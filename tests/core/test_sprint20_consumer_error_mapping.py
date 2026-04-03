@@ -1,3 +1,10 @@
+"""
+tests/core/test_sprint20_consumer_error_mapping.py
+
+Sprint 8: imports migrated from execution_types to models (canonical).
+Test logic unchanged.
+"""
+
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -6,16 +13,18 @@ import fakeredis.aioredis as faredis
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunRequestedEvent
 from hfa_worker.consumer import WorkerConsumer
-from hfa_worker.execution_types import ExecutionPermanentError, ExecutionTransientError
+
+# Sprint 8: canonical imports from hfa_worker.models
+from hfa_worker.models import ExecutionPermanentError, ExecutionTransientError
 
 
 class TransientFailingExecutor:
-    async def execute(self, request):
+    async def execute(self, event):
         raise ExecutionTransientError("network timeout")
 
 
 class PermanentFailingExecutor:
-    async def execute(self, request):
+    async def execute(self, event):
         raise ExecutionPermanentError("bad request")
 
 
@@ -34,10 +43,14 @@ async def test_transient_error_releases_claim_and_does_not_ack():
     consumer._guard.try_claim_and_mark_running.return_value = True
     consumer._state = AsyncMock()
 
-    event = RunRequestedEvent(run_id="run-transient-1", tenant_id="tenant-1", agent_type="test", payload={})
+    event = RunRequestedEvent(
+        run_id="run-transient-1", tenant_id="tenant-1", agent_type="test", payload={}
+    )
 
     with patch("hfa_worker.consumer.ack_message", new=AsyncMock()) as mock_ack:
-        await consumer._process_message("123-0", serialize_event(event), "hfa:stream:runs:0", 0)
+        await consumer._process_message(
+            "123-0", serialize_event(event), "hfa:stream:runs:0", 0
+        )
 
         mock_ack.assert_not_awaited()
         consumer._state.release_claim.assert_awaited_once_with("run-transient-1")
@@ -60,12 +73,20 @@ async def test_permanent_error_marks_failed_and_acks():
     consumer._guard.try_claim_and_mark_running.return_value = True
     consumer._state = AsyncMock()
 
-    event = RunRequestedEvent(run_id="run-permanent-1", tenant_id="tenant-1", agent_type="test", payload={})
+    event = RunRequestedEvent(
+        run_id="run-permanent-1", tenant_id="tenant-1", agent_type="test", payload={}
+    )
 
     with patch("hfa_worker.consumer.ack_message", new=AsyncMock()) as mock_ack:
-        await consumer._process_message("123-0", serialize_event(event), "hfa:stream:runs:0", 0)
+        await consumer._process_message(
+            "123-0", serialize_event(event), "hfa:stream:runs:0", 0
+        )
 
-        mock_ack.assert_awaited_once_with(redis, "hfa:stream:runs:0", "worker_consumers", "123-0")
-        consumer._state.transition_state.assert_awaited_once_with("run-permanent-1", "failed")
+        mock_ack.assert_awaited_once_with(
+            redis, "hfa:stream:runs:0", "worker_consumers", "123-0"
+        )
+        consumer._state.transition_state.assert_awaited_once_with(
+            "run-permanent-1", "failed"
+        )
         consumer._state.mark_completed.assert_awaited_once_with("run-permanent-1")
         consumer._state.release_claim.assert_not_called()

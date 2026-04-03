@@ -5,14 +5,17 @@ services:
     image: redis:7.2-alpine
     container_name: hfa-redis-integration
     ports:
-      - "6379:6379"
+      - "6389:6379"
     command: >
       redis-server
-      --save ""
-      --appendonly no
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
       --protected-mode no
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
       interval: 1s
       timeout: 1s
       retries: 30

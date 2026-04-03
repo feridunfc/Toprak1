@@ -1,3 +1,19 @@
+"""
+hfa-worker/src/hfa_worker/consumer.py
+
+Sprint 7.3 — Import Sanitization
+
+Changes:
+  * Removed: from hfa_worker.execution_types import ExecutionRequest
+  * Removed: _build_execution_request() method (built ExecutionRequest adapter)
+  * Added:   executor receives RunRequestedEvent directly (canonical path)
+  * Errors:  ExecutionPermanentError, ExecutionTransientError now from hfa_worker.models
+
+executor.execute() accepts RunRequestedEvent directly — all canonical executors
+(FakeExecutor, OpenAIExecutor, CognitiveExecutor) use getattr duck-typing so
+both RunRequestedEvent and the old ExecutionRequest continue to work.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,14 +26,16 @@ from hfa.events.codec import deserialize_run_requested, serialize_event
 from hfa.events.schema import RunCompletedEvent, RunFailedEvent
 from hfa.runtime.state_store import StateStore
 from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
-from hfa_worker.execution_types import (
-    ExecutionPermanentError,
-    ExecutionRequest,
-    ExecutionTransientError,
-)
+
+# Sprint 7.3: import exclusively from canonical models
 from hfa_worker.executor import BaseExecutor
 from hfa_worker.idempotency import IdempotencyGuard
-from hfa_worker.models import InfrastructureError, TerminalExecutionError
+from hfa_worker.models import (
+    ExecutionPermanentError,
+    ExecutionTransientError,
+    InfrastructureError,
+    TerminalExecutionError,
+)
 from hfa_worker.redis_utils import ack_message, ensure_consumer_group
 
 try:
@@ -230,16 +248,6 @@ class WorkerConsumer:
                 logger.error("Consume loop error: %s", exc)
                 await asyncio.sleep(0.1)
 
-    def _build_execution_request(self, event) -> ExecutionRequest:
-        return ExecutionRequest(
-            run_id=event.run_id,
-            tenant_id=event.tenant_id,
-            agent_type=event.agent_type,
-            payload=event.payload or {},
-            trace_parent=getattr(event, "trace_parent", None),
-            trace_state=getattr(event, "trace_state", None),
-        )
-
     async def _process_message(self, msg_id: str, data: dict, stream: str, shard: int) -> None:
         try:
             event = deserialize_run_requested(data)
@@ -271,8 +279,8 @@ class WorkerConsumer:
             exec_start = time.monotonic()
 
             try:
-                request = self._build_execution_request(event)
-                result = await self._executor.execute(request)
+                # Sprint 7.3: pass RunRequestedEvent directly — no ExecutionRequest adapter
+                result = await self._executor.execute(event)
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
 
                 if result.status == "done":
@@ -330,13 +338,7 @@ class WorkerConsumer:
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
                 logger.warning("Permanent execution failure run=%s error=%s", event.run_id, exc)
                 await self._state.store_result(
-                    event.run_id,
-                    event.tenant_id,
-                    "failed",
-                    {},
-                    0,
-                    0,
-                    error=str(exc),
+                    event.run_id, event.tenant_id, "failed", {}, 0, 0, error=str(exc),
                 )
                 await self._state.transition_state(event.run_id, "failed")
                 await decrement_tenant_inflight_if_needed(self._redis, event.run_id)
@@ -364,15 +366,10 @@ class WorkerConsumer:
 
             except TerminalExecutionError as exc:
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
-                logger.warning("Terminal failure (legacy) run=%s error=%s", event.run_id, exc)
+                logger.warning("Terminal failure run=%s error=%s", event.run_id, exc)
                 await self._state.store_result(
-                    event.run_id,
-                    event.tenant_id,
-                    "failed",
-                    {},
-                    exc.cost_cents,
-                    exc.tokens_used,
-                    error=str(exc),
+                    event.run_id, event.tenant_id, "failed", {},
+                    exc.cost_cents, exc.tokens_used, error=str(exc),
                 )
                 await self._state.transition_state(event.run_id, "failed")
                 await decrement_tenant_inflight_if_needed(self._redis, event.run_id)
@@ -392,7 +389,7 @@ class WorkerConsumer:
                     _M.run_execution_duration_ms.record(duration_ms)
 
             except InfrastructureError as exc:
-                logger.warning("Infrastructure crash (legacy) run=%s error=%s", event.run_id, exc)
+                logger.warning("Infrastructure crash run=%s error=%s", event.run_id, exc)
                 await self._state.release_claim(event.run_id)
                 if _M:
                     _M.runs_infra_failed_total.inc()
@@ -400,9 +397,7 @@ class WorkerConsumer:
             except Exception as exc:
                 logger.error(
                     "Unexpected execution crash run=%s error=%s",
-                    event.run_id,
-                    exc,
-                    exc_info=True,
+                    event.run_id, exc, exc_info=True,
                 )
                 await self._state.release_claim(event.run_id)
                 if _M:

@@ -1,0 +1,12 @@
+redis[hiredis]>=5.0
+pydantic>=2.0
+hfa-core
+hfa-control
+openai>=1.14.0
+
+[dev]
+pytest>=8
+pytest-asyncio>=0.23
+pytest-mock>=3.14
+fakeredis[aioredis]>=2.23
+anyio>=4.0

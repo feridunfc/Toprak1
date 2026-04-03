@@ -11,6 +11,11 @@ from hfa_control.event_store import EventStore
 
 logger = logging.getLogger(__name__)
 
+# Redis key for the persistent, monotonically-increasing scheduler epoch counter.
+# Incremented each time this scheduler instance acquires leadership.
+# Attached to every dispatch decision so workers can detect stale assignments.
+_SCHEDULER_EPOCH_KEY = "hfa:scheduler:epoch"
+
 
 class SchedulerLoop:
     """Persistent-state scheduler loop with event hooks and single commit authority."""
@@ -31,8 +36,55 @@ class SchedulerLoop:
             self._config = args[9] if len(args) > 9 else (args[-1] if args else None)
             self._event_store = None
         self._bp_guard = BackpressureGuard(self._config)
+        # Current scheduler epoch — set on leadership gain, attached to all dispatches.
+        # "0" means epoch has not been initialised yet (pre-leadership or test mode).
+        self._epoch: str = "0"
+
+    # ── Scheduler Epoch ───────────────────────────────────────────────────────
+
+    async def _increment_epoch(self) -> str:
+        """
+        Atomically increment the global scheduler epoch counter in Redis.
+
+        Uses INCR which is atomic — safe for concurrent scheduler instances.
+        The returned epoch string is stored in self._epoch and attached to
+        every subsequent dispatch decision.
+
+        If Redis is unavailable, falls back to a local monotonic value so the
+        rest of the scheduler can continue operating in degraded mode.
+        """
+        redis = getattr(self._dispatch_controller, "redis", None)
+        if redis is not None:
+            try:
+                epoch_int = await redis.incr(_SCHEDULER_EPOCH_KEY)
+                self._epoch = str(epoch_int)
+                logger.info("SchedulerLoop: epoch incremented to %s", self._epoch)
+                return self._epoch
+            except Exception as exc:
+                logger.warning(
+                    "SchedulerLoop: epoch increment failed (Redis error): %s — using local fallback",
+                    exc,
+                )
+        # Fallback: use a local counter derived from the previous epoch value
+        try:
+            self._epoch = str(int(self._epoch) + 1)
+        except ValueError:
+            self._epoch = "1"
+        logger.warning("SchedulerLoop: using local epoch fallback: %s", self._epoch)
+        return self._epoch
+
+    @property
+    def current_epoch(self) -> str:
+        """Current scheduler epoch. Attached to all dispatch decisions."""
+        return self._epoch
+
+    # ── Leadership Lifecycle ──────────────────────────────────────────────────
 
     async def on_leadership_gained(self) -> None:
+        # Increment epoch so any in-flight decisions from the previous leader
+        # (or previous incarnation of this leader) are invalidated.
+        await self._increment_epoch()
+
         reset = getattr(self._tenant_fairness, "reset", None)
         if callable(reset):
             reset()
@@ -49,10 +101,25 @@ class SchedulerLoop:
             reset()
         self._bp_guard.reset()
 
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
     async def _quarantine_run(self, run_id: str, reason: str) -> None:
         logger.warning("SchedulerLoop quarantine: run_id=%s reason=%s", run_id, reason)
 
-    async def commit_dispatch(self, run_id: str, *, expected_state: str = "queued", target_state: str = "scheduled") -> Any:
+    async def commit_dispatch(
+        self,
+        run_id: str,
+        *,
+        expected_state: str = "queued",
+        target_state: str = "scheduled",
+    ) -> Any:
+        """
+        OCC state transition: queued → scheduled.
+
+        Uses expected_state as a compare-and-set precondition.
+        Returns None (no-op) if Redis is unavailable.
+        Returns falsy if the CAS fails (another scheduler already committed).
+        """
         redis = getattr(self._dispatch_controller, "redis", None)
         if redis is None:
             return None
@@ -73,7 +140,13 @@ class SchedulerLoop:
             fn = getattr(controller, name, None)
             if fn is None:
                 continue
-            result = fn(snapshot=snapshot, worker_scorer=self._worker_scorer)
+            # Pass current epoch to dispatch so it is propagated into
+            # reservation and token generation downstream.
+            result = fn(
+                snapshot=snapshot,
+                worker_scorer=self._worker_scorer,
+                scheduler_epoch=self._epoch,
+            )
             if hasattr(result, "__await__"):
                 result = await result
             if isinstance(result, dict):
@@ -86,7 +159,9 @@ class SchedulerLoop:
                         run_id=run_id,
                         event_type=EventStore.EVENT_TASK_SCHEDULED,
                         worker_id=worker_id,
-                        details={"tenant_id": tenant_id} if tenant_id else None,
+                        details={"tenant_id": tenant_id, "scheduler_epoch": self._epoch}
+                        if tenant_id
+                        else {"scheduler_epoch": self._epoch},
                     )
             return bool(result)
         return False
@@ -97,10 +172,18 @@ class SchedulerLoop:
             inflight=getattr(snapshot, "total_inflight", 0),
             capacity=max(getattr(snapshot, "total_capacity", 0), 1),
             saturation=getattr(snapshot, "saturation", None),
-            max_dispatches_requested=int(max_dispatches or getattr(snapshot, "max_dispatches_this_cycle", 0) or 0),
+            max_dispatches_requested=int(
+                max_dispatches
+                or getattr(snapshot, "max_dispatches_this_cycle", 0)
+                or 0
+            ),
         )
         if decision.throttled:
-            logger.info("SchedulerLoop throttled: reason=%s saturation=%.4f", decision.reason, decision.saturation)
+            logger.info(
+                "SchedulerLoop throttled: reason=%s saturation=%.4f",
+                decision.reason,
+                decision.saturation,
+            )
             return 0
 
         permit = await self._dispatch_controller.current_permit()

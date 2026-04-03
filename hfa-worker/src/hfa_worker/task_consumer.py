@@ -1,4 +1,14 @@
+"""
+hfa_worker/task_consumer.py
+----------------------------
+IRONCLAD Sprint 2 — Task consumer with fence tuple propagation.
 
+Sprint 2 change: after a successful claim_start(), the fence tuple
+(claim_epoch, scheduler_epoch) is extracted from the TaskClaimResult and:
+  1. Injected into the HeartbeatLoop so heartbeats carry claim_epoch.
+  2. Available via ConsumedTaskResult so the execution plane can pass all
+     three fence values to task_complete().
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,15 +45,18 @@ class TaskConsumer:
         self._heartbeat_manager = heartbeat_manager
         self._heartbeat_interval_ms = heartbeat_interval_ms
 
-    async def consume_once(self, ctx: TaskContext, *, claimed_at_ms: int) -> ConsumedTaskResult:
+    async def consume_once(
+        self, ctx: TaskContext, *, claimed_at_ms: int
+    ) -> ConsumedTaskResult:
         match = CapabilityRouter.matches(
             TaskCapabilitySpec(required_capabilities=ctx.required_capabilities or []),
-            WorkerCapabilitySpec(worker_id=ctx.worker_instance_id, capabilities=self._worker_capabilities),
+            WorkerCapabilitySpec(
+                worker_id=ctx.worker_instance_id,
+                capabilities=self._worker_capabilities,
+            ),
         )
         if not match.ok:
             return ConsumedTaskResult(
-                claimed=None,
-                executed=None,
                 rejected_reason="missing_capabilities:" + ",".join(match.missing_capabilities),
             )
 
@@ -52,10 +65,13 @@ class TaskConsumer:
             tenant_id=ctx.tenant_id,
             worker_instance_id=ctx.worker_instance_id,
             claimed_at_ms=claimed_at_ms,
+            # Pass scheduler_epoch from context if present (set during dispatch)
+            scheduler_epoch=ctx.scheduler_epoch,
         )
         if not claim.ok:
-            return ConsumedTaskResult(claimed=claim, executed=None)
+            return ConsumedTaskResult(claimed=claim)
 
+        # Sprint 2: start heartbeat loop with the claim_epoch just issued.
         loop = None
         if self._heartbeat_manager is not None:
             loop = HeartbeatLoop(
@@ -64,6 +80,7 @@ class TaskConsumer:
                 tenant_id=ctx.tenant_id,
                 worker_instance_id=ctx.worker_instance_id,
                 interval_ms=self._heartbeat_interval_ms,
+                claim_epoch=claim.claim_epoch,   # Sprint 2: fence token
             )
             await loop.start()
 

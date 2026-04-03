@@ -1,13 +1,10 @@
-
 from __future__ import annotations
 
-import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from hfa_control.decision_observability import (
-    DecisionBreakdown,
-    RejectedWorkerReason,
-    SchedulerDecisionTrace,
+from hfa_control.scheduler_capability_fair_dispatch import (
+    SchedulerCapabilityFairDispatcher,
+    TaskDispatchRequest,
 )
 from hfa_control.scheduler_capability_selector import (
     SchedulerCapabilitySelector,
@@ -18,13 +15,56 @@ from hfa_control.scheduler_scoring import SchedulerScoring, ScoringCandidate
 
 
 @dataclass(frozen=True)
-class ObservableTaskDispatchRequest:
-    tenant_id: str
-    task_id: str
-    required_capabilities: list[str]
-    dispatch_payload: dict
-    vruntime: float = 0.0
-    inflight: int = 0
+class ObservableRejectedWorker:
+    worker_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ObservableScoredCandidate:
+    worker_id: str
+    total: float
+
+
+@dataclass(frozen=True)
+class SchedulerDecisionTrace:
+    decision_id: str
+    stage: str
+    selected_worker_id: str = ""
+    selected_task_id: str = ""
+    selected_tenant_id: str = ""
+    selected_score: float | None = None
+    selected_reason: str = ""
+    candidate_count: int = 0
+    compatible_worker_ids: list[str] = field(default_factory=list)
+    rejected_workers: list[ObservableRejectedWorker] = field(default_factory=list)
+    scored_candidates: list[ObservableScoredCandidate] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "decision_id": self.decision_id,
+            "stage": self.stage,
+            "selected_worker_id": self.selected_worker_id,
+            "selected_task_id": self.selected_task_id,
+            "selected_tenant_id": self.selected_tenant_id,
+            "selected_score": self.selected_score,
+            "selected_reason": self.selected_reason,
+            "candidate_count": self.candidate_count,
+            "compatible_worker_ids": self.compatible_worker_ids,
+            "rejected_workers": [
+                {"worker_id": w.worker_id, "reason": w.reason}
+                for w in self.rejected_workers
+            ],
+            "scored_candidates": [
+                {"worker_id": c.worker_id, "total": c.total}
+                for c in self.scored_candidates
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class ObservableTaskDispatchRequest(TaskDispatchRequest):
+    pass
 
 
 @dataclass(frozen=True)
@@ -38,8 +78,13 @@ class ObservableDispatchResult:
 
 
 class ObservableSchedulerCapabilityFairDispatcher:
+    """
+    Backward-compatible observable wrapper around canonical dispatcher.
+    """
+
     def __init__(self, reservation_dispatcher: SchedulerReservationDispatcher) -> None:
         self._reservation_dispatcher = reservation_dispatcher
+        self._delegate = SchedulerCapabilityFairDispatcher(reservation_dispatcher)
 
     async def dispatch_task(
         self,
@@ -49,32 +94,26 @@ class ObservableSchedulerCapabilityFairDispatcher:
         scheduler_epoch: str,
         reserved_at_ms: int | None = None,
     ) -> ObservableDispatchResult:
-        decision_id = str(uuid.uuid4())
-
         selection = SchedulerCapabilitySelector.filter_workers(
             required_capabilities=request.required_capabilities,
             workers=workers,
         )
 
         rejected = [
-            RejectedWorkerReason(
-                worker_id=worker_id,
-                reason="capability_mismatch",
-                detail={"missing_capabilities": selection.missing_by_worker.get(worker_id, [])},
-            )
+            ObservableRejectedWorker(worker_id=worker_id, reason="capability_mismatch")
             for worker_id in selection.rejected_worker_ids
         ]
 
         if not selection.compatible:
             trace = SchedulerDecisionTrace(
-                decision_id=decision_id,
-                stage="capability_filter",
+                decision_id=f"{request.task_id}:{scheduler_epoch}",
+                stage="reserve_dispatch",
+                selected_reason="no_compatible_workers",
                 selected_task_id=request.task_id,
                 selected_tenant_id=request.tenant_id,
-                selected_reason="no_compatible_workers",
                 candidate_count=0,
-                compatible_worker_ids=[],
                 rejected_workers=rejected,
+                compatible_worker_ids=[],
                 scored_candidates=[],
             )
             return ObservableDispatchResult(
@@ -82,11 +121,10 @@ class ObservableSchedulerCapabilityFairDispatcher:
                 status="no_compatible_workers",
                 tenant_id=request.tenant_id,
                 task_id=request.task_id,
-                worker_id="",
                 trace=trace,
             )
 
-        scored_raw = [
+        scoring_candidates = [
             ScoringCandidate(
                 tenant_id=request.tenant_id,
                 worker_id=w.worker_id,
@@ -98,51 +136,55 @@ class ObservableSchedulerCapabilityFairDispatcher:
             )
             for w in selection.compatible
         ]
-
-        scored_candidates = [
-            DecisionBreakdown(
-                tenant_id=c.tenant_id,
-                task_id=c.task_id,
-                worker_id=c.worker_id,
-                vruntime=c.vruntime,
-                inflight=c.inflight,
-                worker_load=c.worker_load,
-                capacity=c.capacity,
-                score=SchedulerScoring.score(c),
-            )
-            for c in scored_raw
-        ]
-
-        best = SchedulerScoring.choose_best(scored_raw)
+        best = SchedulerScoring.choose_best(scoring_candidates)
         assert best is not None
 
-        dispatch_result = await self._reservation_dispatcher.reserve_and_dispatch(
-            task_id=request.task_id,
-            worker_id=best.worker_id,
+        scored = [
+            ObservableScoredCandidate(
+                worker_id=c.worker_id,
+                total=SchedulerScoring.score(c).total,
+            )
+            for c in scoring_candidates
+        ]
+
+        delegated = await self._delegate.dispatch_task(
+            request=request,
+            workers=workers,
             scheduler_epoch=scheduler_epoch,
-            dispatch_payload=request.dispatch_payload,
             reserved_at_ms=reserved_at_ms,
         )
 
         trace = SchedulerDecisionTrace(
-            decision_id=decision_id,
+            decision_id=f"{request.task_id}:{scheduler_epoch}",
             stage="reserve_dispatch",
             selected_worker_id=best.worker_id,
             selected_task_id=request.task_id,
             selected_tenant_id=request.tenant_id,
-            selected_score=SchedulerScoring.score(best),
-            selected_reason="best_compatible_worker_by_score",
-            candidate_count=len(scored_candidates),
+            selected_score=SchedulerScoring.score(best).total,
+            selected_reason=(
+                "best_compatible_worker_by_score"
+                if delegated.ok
+                else delegated.status
+            ),
+            candidate_count=len(selection.compatible),
             compatible_worker_ids=[w.worker_id for w in selection.compatible],
             rejected_workers=rejected,
-            scored_candidates=scored_candidates,
+            scored_candidates=scored,
         )
 
         return ObservableDispatchResult(
-            ok=dispatch_result.ok,
-            status=dispatch_result.status,
-            tenant_id=request.tenant_id,
-            task_id=request.task_id,
-            worker_id=best.worker_id,
+            ok=delegated.ok,
+            status=delegated.status,
+            tenant_id=delegated.tenant_id,
+            task_id=delegated.task_id,
+            worker_id=delegated.worker_id,
             trace=trace,
         )
+
+
+__all__ = [
+    "ObservableSchedulerCapabilityFairDispatcher",
+    "ObservableTaskDispatchRequest",
+    "ObservableDispatchResult",
+    "SchedulerDecisionTrace",
+]

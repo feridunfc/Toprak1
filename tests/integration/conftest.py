@@ -16,18 +16,19 @@ REDIS_URL = "redis://127.0.0.1:6389/0"
 
 
 def _run(cmd: list[str]) -> None:
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(
-            f"Command failed: {' '.join(cmd)}\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
+            f"Command failed: {' '.join(cmd)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
+
+
+def _docker_available() -> bool:
+    try:
+        result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def _wait_for_redis(url: str, timeout_s: float = 30.0) -> None:
@@ -35,8 +36,7 @@ def _wait_for_redis(url: str, timeout_s: float = 30.0) -> None:
 
     async def _ping_loop() -> None:
         deadline = time.monotonic() + timeout_s
-        last_error: Exception | None = None
-
+        last_error = None
         while time.monotonic() < deadline:
             client = redis.from_url(url, decode_responses=True)
             try:
@@ -52,29 +52,36 @@ def _wait_for_redis(url: str, timeout_s: float = 30.0) -> None:
                 except Exception:
                     pass
             await asyncio.sleep(0.25)
+        raise RuntimeError(f"Redis did not become healthy in {timeout_s}s. last_error={last_error!r}")
 
-        raise RuntimeError(
-            f"Redis did not become healthy in {timeout_s}s. "
-            f"last_error={last_error!r}"
-        )
-
-    import asyncio
     asyncio.run(_ping_loop())
 
 
 @pytest.fixture(scope="session", autouse=True)
 def integration_redis_stack() -> Iterator[None]:
-    import os
+    use_existing = os.getenv("USE_EXISTING_REDIS") == "1"
+    managed = False
 
-    if os.getenv("USE_EXISTING_REDIS") != "1":
-        _run(["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--remove-orphans"])
-
-        _wait_for_redis(REDIS_URL, timeout_s=30.0)
+    if not use_existing:
+        if _docker_available():
+            _run(["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--remove-orphans"])
+            _wait_for_redis(REDIS_URL, timeout_s=30.0)
+            managed = True
+        else:
+            import warnings
+            warnings.warn(
+                "Docker not available. Set USE_EXISTING_REDIS=1 to use a local Redis.",
+                stacklevel=1,
+            )
 
     try:
         yield
     finally:
-        _run(["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"])
+        if managed and _docker_available():
+            try:
+                _run(["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"])
+            except Exception:
+                pass
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -94,12 +101,10 @@ def strict_mode_env(integration_redis_stack: None) -> Iterator[None]:
             os.environ.pop("REDIS_URL", None)
         else:
             os.environ["REDIS_URL"] = old_redis_url
-
         if old_strict is None:
             os.environ.pop("HFA_STRICT_CAS_MODE", None)
         else:
             os.environ["HFA_STRICT_CAS_MODE"] = old_strict
-
         if old_env is None:
             os.environ.pop("APP_ENV", None)
         else:

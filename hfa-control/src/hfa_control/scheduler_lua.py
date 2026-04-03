@@ -330,6 +330,9 @@ class SchedulerLua:
         """
         Atomic dispatch commit with a structured status code.
         """
+        # Default to canonical stream keys so Lua script writes to streams
+        control_stream = control_stream or RedisKey.stream_control()
+        shard_stream   = shard_stream   or RedisKey.stream_shard(shard)
         state_key = RedisKey.run_state(run_id)
         meta_key = RedisKey.run_meta(run_id)
         now = time.time()

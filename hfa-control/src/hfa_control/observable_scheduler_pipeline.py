@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -64,3 +63,6 @@ class ObservableSchedulerPipeline:
             trace_stream_id=persisted.stream_id if persisted is not None else "",
             worker_id=result.worker_id,
         )
+
+
+__all__ = ["ObservableSchedulerPipeline", "ObservablePipelineResult"]
