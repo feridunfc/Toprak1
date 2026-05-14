@@ -54,6 +54,11 @@ from hfa_control.effect_metrics import (
     STALE_COMPLETION_FENCED,
     increment,
 )
+from hfa.events.append_service import (
+    AuthoritativeEventAppendError,
+    AuthoritativeEventGate,
+    is_event_gate_enabled,
+)
 from hfa_control.event_hooks import emit_event_background
 from hfa_control.event_store import EventStore
 
@@ -257,6 +262,7 @@ class StateStore:
         _policy = policy or RedisCallPolicy(max_retries=3, base_delay_ms=100)
         self._policy = _policy
         self._event_store = event_store
+        self._event_gate = AuthoritativeEventGate(event_store)
         self._effect_ledger = effect_ledger
         self._payload_store = payload_store
         self._lineage_store = lineage_store
@@ -414,6 +420,30 @@ class StateStore:
                 reason="stale_owner_fenced",
             )
 
+        terminal_event_type = (
+            EventStore.EVENT_TASK_COMPLETED
+            if status == "done"
+            else EventStore.EVENT_TASK_FAILED
+        )
+
+        try:
+            await self._event_gate.append_before_authoritative_write(
+                run_id=run_id,
+                event_type=terminal_event_type,
+                worker_id=worker_id,
+                details=details,
+                authority="StateStore.complete_once",
+            )
+        except AuthoritativeEventAppendError as exc:
+            return CompletionResult(
+                ok=False,
+                status="event_gate_blocked",
+                run_id=run_id,
+                worker_id=worker_id,
+                duplicate=False,
+                reason=str(exc),
+            )
+
         state_key = f"hfa:dag:task:{task_id}:state"
         current_state = await self._control.get_task_state(task_id=task_id)
 
@@ -443,19 +473,11 @@ class StateStore:
 
         await self._control.set_owner(task_id=task_id, worker_id=worker_id)
 
-        if status == "done":
+        if not is_event_gate_enabled():
             emit_event_background(
                 self._event_store,
                 run_id=run_id,
-                event_type=EventStore.EVENT_TASK_COMPLETED,
-                worker_id=worker_id,
-                details=details,
-            )
-        else:
-            emit_event_background(
-                self._event_store,
-                run_id=run_id,
-                event_type=EventStore.EVENT_TASK_FAILED,
+                event_type=terminal_event_type,
                 worker_id=worker_id,
                 details=details,
             )

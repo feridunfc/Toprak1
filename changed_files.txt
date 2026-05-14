@@ -1,0 +1,13 @@
+docs/architecture/adr-v3-constitution.md
+docs/architecture/authority-matrix.md
+docs/architecture/command-event-effect-taxonomy.md
+hfa-core/src/hfa/events/append_service.py
+hfa-core/src/hfa/runtime/state_store.py
+hfa-control/src/hfa_control/feedback/handle_result.py
+hfa-control/src/hfa_control/event_hooks.py
+hfa-agents/src/hfa_agents/workflow/engine.py
+hfa-core/src/hfa/governance/budget_guard.py
+hfa-semantic/src/hfa_semantic/runtime/semantic_hook.py
+hfa-agents/src/hfa_agents/roles/tester.py
+changed_files.txt
+acceptance_report.md
