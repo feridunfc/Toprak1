@@ -1,0 +1,148 @@
+version: "3.9"
+
+# IRONCLAD OS — Production Deployment Topology
+#
+# Services:
+#   redis          — shared state (IRONCLAD + semantic, separate key namespaces)
+#   neo4j          — graph database (hfa-semantic MergeEngine)
+#   qdrant         — vector database (hfa-semantic MergeEngine)
+#   control-plane  — hfa-control (scheduler, event sourcing, FastAPI)
+#   worker         — hfa-worker with CognitiveExecutor (agent execution)
+#   prometheus     — metrics scraping
+#
+# Key design decisions:
+#   - Redis is shared but IRONCLAD uses hfa:* prefix, semantic uses semantic:*
+#   - Neo4j and Qdrant are optional (semantic MergeEngine bypass mode works without)
+#   - Worker scales horizontally: multiple replicas claim tasks independently
+#   - Control plane is HA: 2+ replicas with leader election via Redis
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: ironclad-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 4gb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: ironclad-neo4j
+    ports:
+      - "7474:7474"   # Browser
+      - "7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: "neo4j/ironclad_neo4j_pass"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_pagecache_size: "512M"
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    profiles: ["semantic-full"]   # optional — remove for dev without graph
+
+  qdrant:
+    image: qdrant/qdrant:v1.8.3
+    container_name: ironclad-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: ["semantic-full"]   # optional
+
+  # ── Control Plane ────────────────────────────────────────────────────────
+  control-plane:
+    build:
+      context: .
+      dockerfile: hfa-control/Dockerfile
+    container_name: ironclad-control
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: "INFO"
+      HFA_STRICT_MODE: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    # Scale for HA: docker-compose scale control-plane=2
+    # Leader election handles multi-instance safely
+
+  # ── Cognitive Worker ─────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: hfa-worker/Dockerfile
+    environment:
+      REDIS_URL:                "redis://redis:6379"
+      SEMANTIC_ENABLED:         "true"
+      SEMANTIC_MAX_PARTITIONS:  "10000"
+      SEMANTIC_WINDOW_TTL_MS:   "300000"
+      COGNITIVE_BUDGET_CENTS:   "2000"
+      WORKER_CAPABILITIES:      "cognitive,agent"
+      ANTHROPIC_API_KEY:        "${ANTHROPIC_API_KEY}"
+      OPENAI_API_KEY:           "${OPENAI_API_KEY:-}"
+      NEO4J_URI:                "bolt://neo4j:7687"
+      NEO4J_AUTH:               "neo4j/ironclad_neo4j_pass"
+      QDRANT_HOST:              "qdrant"
+      QDRANT_PORT:              "6333"
+      LOG_LEVEL:                "INFO"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2        # scale workers horizontally
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+    # Workers are stateless: safe to scale up/down freely
+
+  # ── Observability ────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: ironclad-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    depends_on:
+      - control-plane
+      - worker
+
+volumes:
+  redis-data:
+  neo4j-data:
+  qdrant-data:

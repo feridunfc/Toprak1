@@ -1,0 +1,4 @@
+
+[pytest]
+markers =
+    chaos: chaos testing scenarios

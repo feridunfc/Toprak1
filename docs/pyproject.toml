@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hfa-worker"
+version = "0.1.0"
+description = "IRONCLAD worker package"
+requires-python = ">=3.11"
+dependencies = [
+    "redis[hiredis]>=5.0",
+    "pydantic>=2.0",
+    "hfa-core",
+    "hfa-control",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "fakeredis[aioredis]>=2.23",
+    "anyio>=4.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: hfa-agents
+Version: 0.10.5
+Summary: IRONCLAD agent layer integrated with hfa-semantic
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2.7
+Provides-Extra: test
+Requires-Dist: pytest>=8.0; extra == "test"
+Requires-Dist: pytest-asyncio>=0.23; extra == "test"

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hfa-control"
+version = "10.0.0"
+description = "IRONCLAD Sprint 10 Control Plane"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "redis[hiredis]>=5.0",
+    "pydantic>=2.0",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "hfa-core",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "fakeredis[aioredis]>=2.23",
+    "anyio>=4.0",
+]
+
+[project.scripts]
+hfa-control = "hfa_control.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+exclude = [
+  "archive_disabled",
+  "tests/legacy",
+]

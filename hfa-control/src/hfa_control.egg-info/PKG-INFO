@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: hfa-control
+Version: 10.0.0
+Summary: IRONCLAD Sprint 10 Control Plane
+Requires-Python: >=3.11
+Requires-Dist: fastapi>=0.111
+Requires-Dist: uvicorn[standard]>=0.29
+Requires-Dist: redis[hiredis]>=5.0
+Requires-Dist: pydantic>=2.0
+Requires-Dist: opentelemetry-api>=1.24
+Requires-Dist: opentelemetry-sdk>=1.24
+Requires-Dist: hfa-core
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+Requires-Dist: pytest-mock>=3.14; extra == "dev"
+Requires-Dist: fakeredis[aioredis]>=2.23; extra == "dev"
+Requires-Dist: anyio>=4.0; extra == "dev"

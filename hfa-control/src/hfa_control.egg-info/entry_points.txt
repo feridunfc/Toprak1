@@ -1,0 +1,2 @@
+[console_scripts]
+hfa-control = hfa_control.main:main

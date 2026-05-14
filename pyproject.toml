@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+exclude = [
+    "archive_disabled",
+    "tests/legacy",
+]
+
+[tool.ruff.lint]
+ignore = ["F841"]
+
+[tool.ruff.lint.per-file-ignores]
+"hfa-tools/**" = ["F401", "F821", "F841", "E731"]

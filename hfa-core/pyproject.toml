@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hfa-core"
+version = "0.1.0"
+description = "IRONCLAD core package"
+requires-python = ">=3.11"
+dependencies = [
+    "redis>=5.0",
+    "pydantic>=2.0",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "fakeredis[aioredis]>=2.23",
+    "anyio>=4.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+exclude = [
+  "archive_disabled",
+  "tests/legacy",
+]

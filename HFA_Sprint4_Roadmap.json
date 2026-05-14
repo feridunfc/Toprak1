@@ -1,0 +1,40 @@
+{
+  "status": "pre-sprint4-hardening",
+  "repo_public_view": {
+    "default_branch": "main",
+    "visible_branch_count": 1,
+    "focus": "contract cleanup before sprint4 completion"
+  },
+  "keep": [
+    "hfa-tools/tests/test_budget_guard_atomic.py",
+    "hfa-tools/tests/test_tenant_patches.py",
+    "hfa-tools/src/hfa_tools/middleware/ledger.py",
+    "hfa-tools/src/hfa_tools/middleware/rate_limit.py",
+    "hfa-core/src/hfa/schemas/supervisor.py",
+    "hfa-core/src/hfa/schemas/research.py"
+  ],
+  "refactor": [
+    "hfa-core/src/hfa/schemas/agent.py",
+    "hfa-tools/src/hfa_tools/middleware/tenant.py",
+    "hfa-tools/tests/test_sprint2.py"
+  ],
+  "archive_or_remove": [
+    "legacy BudgetGuard assertions in test_sprint2.py",
+    "UUID-less tenant/run examples in legacy tests",
+    "duplicate root tests if overlapping with hfa-tools/tests"
+  ],
+  "blockers": [
+    "tenant contract drift",
+    "budget guard contract drift",
+    "rate limit async warning risk",
+    "duplicate tests",
+    "packaging/import sanity"
+  ],
+  "next_steps": [
+    "freeze contracts",
+    "clean tests",
+    "refactor tenant/rate_limit/agent",
+    "run curated CI gate",
+    "finish sprint4 services"
+  ]
+}

@@ -1,0 +1,10 @@
+-- THIS FILE HAS BEEN DELETED.
+--
+-- The authoritative task_complete.lua is:
+--   hfa-core/src/hfa/lua/task_complete.lua
+--
+-- Remove this file from the repository:
+--   git rm lua/task_complete.lua
+--
+-- Having two copies of this script is what caused the contract drift
+-- described in Sprint 0.  One source of truth only.
