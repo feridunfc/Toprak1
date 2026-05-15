@@ -1,38 +1,23 @@
 """
-hfa-control/src/hfa_control/scheduler_semantic_hook.py
-IRONCLAD OS — Scheduler → Semantic Pre-warming Hook
+hfa-worker/src/hfa_worker/scheduler_semantic_hook.py
 
-PURPOSE
--------
-Before a task enters the dispatch queue, this hook fires an async
-background signal to hfa-semantic so the semantic pipeline can:
-  - Pre-warm window state for tenant
-  - Start watermark tracking for the event stream
-  - Record the admission event for ordering guarantees
+Scheduler/worker semantic hook utilities.
 
-CRITICAL RULES
---------------
-1. This is ALWAYS fire-and-forget (asyncio.create_task)
-2. NEVER awaited inside SchedulerLoop
-3. Never raises — exceptions are swallowed
-4. Adds ZERO latency to the scheduler tick
-
-HOW TO WIRE (one line in scheduler_loop.py or dispatch_controller.py)
-----------------------------------------------------------------------
-  from hfa_control.scheduler_semantic_hook import fire_semantic_prewarm
-
-  # After successful Lua dispatch commit:
-  fire_semantic_prewarm(run_id=run_id, tenant_id=tenant_id,
-                        agent_type=agent_type, pipeline=self._semantic_pipeline)
-
-The semantic_pipeline is injected at startup via DI — see worker_main.py patch.
+The prewarm hook is advisory and fire-and-forget. Sprint 7 adds a separate gate
+helper for explicit semantic gate checks. Do not use the prewarm hook as an
+authoritative gate.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
+
+try:
+    from hfa_semantic.runtime.semantic_hook import evaluate_gate_semantics
+except Exception:  # pragma: no cover - semantic package optional in worker tests
+    evaluate_gate_semantics = None  # type: ignore[assignment]
 
 logger = logging.getLogger("hfa.scheduler_semantic_hook")
 
@@ -45,29 +30,63 @@ def fire_semantic_prewarm(
     pipeline: Any | None,
 ) -> None:
     """
-    Fire-and-forget: inform hfa-semantic that a task was just scheduled.
+    Advisory fire-and-forget: inform hfa-semantic that a task was scheduled.
 
-    This is called INSIDE the scheduler but never awaited.
-    Failure is silent — semantic is a sidecar, not critical path.
+    This must never become an authoritative gate. Failure is logged at debug
+    level and does not affect scheduler/worker progress.
     """
+
     if pipeline is None:
         return
 
     async def _prewarm() -> None:
         try:
             event = {
-                "event_id":     f"sched:{run_id}",
-                "event_type":   f"scheduled:{agent_type}",
-                "tenant_id":    tenant_id,
-                "run_id":       run_id,
+                "event_id": f"sched:{run_id}",
+                "event_type": f"scheduled:{agent_type}",
+                "tenant_id": tenant_id,
+                "run_id": run_id,
                 "timestamp_ms": int(time.time() * 1000),
-                "goal":         "",  # goal unknown at scheduling time
+                "goal": "",
             }
             await pipeline.process(event=event, rule_id="scheduler_prewarm")
         except Exception as exc:
-            logger.debug("semantic prewarm failed run=%s: %s", run_id, exc)
+            logger.debug("semantic advisory prewarm failed run=%s: %s", run_id, exc)
 
     try:
         asyncio.create_task(_prewarm())
     except RuntimeError:
-        pass   # No event loop running (e.g. during tests)
+        pass
+
+
+async def evaluate_scheduler_semantic_gate(
+    *,
+    run_id: str,
+    tenant_id: str,
+    agent_type: str,
+    evaluator: Any | None,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    """Evaluate an explicit semantic gate before execution/dispatch coupling.
+
+    Missing semantic hook support is fail-closed because this helper is only for
+    gate mode. Advisory callers must continue to use ``fire_semantic_prewarm``.
+    """
+
+    event = {
+        "event_id": f"gate:{run_id}",
+        "event_type": f"semantic_gate:{agent_type}",
+        "tenant_id": tenant_id,
+        "run_id": run_id,
+        "timestamp_ms": int(time.time() * 1000),
+        **(payload or {}),
+    }
+    if evaluate_gate_semantics is None:
+        return {
+            "mode": "gate",
+            "allowed": False,
+            "reason": "semantic_gate_unavailable",
+            "replay_visible": True,
+            "audit_visible": True,
+        }
+    return await evaluate_gate_semantics(evaluator, event)
