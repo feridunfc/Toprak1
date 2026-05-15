@@ -153,3 +153,42 @@ Results:
 - Existing broader repository drift remains outside Sprint 3 scope.
 - This sprint does not modify worker execution, scheduler commit, or control-plane replay internals.
 - Large artifact storage is provided by a minimal local/file protocol or injected artifact store; production object storage can be introduced later through the same `ArtifactStore` protocol without changing event schema.
+
+## Sprint 4 — Scheduler Commit Sealing
+
+### Contract
+- Sprint: 4
+- Name: Scheduler Commit Sealing
+- Feature flag: `IRON_V3_SCHEDULER_SEAL`
+
+### Files changed
+- `hfa-control/src/hfa_control/scheduler_loop.py`
+- `hfa-control/src/hfa_control/scheduler_reasons.py`
+- `hfa-control/src/hfa_control/scheduler_candidate/shadow_dispatcher.py`
+- `tests/core/test_scheduler_commit_sealing.py`
+- `acceptance_report.md`
+
+### Sealed commit flow summary
+When `IRON_V3_SCHEDULER_SEAL` is disabled, `SchedulerLoop` preserves legacy behavior and emits `TASK_SCHEDULED` through the existing non-blocking background event hook.
+
+When `IRON_V3_SCHEDULER_SEAL` is enabled, `SchedulerLoop` treats a dispatch result as authoritative only after a durable `TASK_SCHEDULED` append succeeds through the existing authoritative event gate. If the append fails or raises, the scheduler logs the blocked dispatch and returns a non-authoritative false result for that cycle.
+
+The candidate scheduler boundary is represented by `ShadowDispatcher`, which records compare-only candidate decisions and never marks itself or its records as authoritative.
+
+### Acceptance checks
+- Scheduler decision is not counted authoritative without durable scheduled-event append when `IRON_V3_SCHEDULER_SEAL=1`.
+- Legacy background event emission is preserved when the flag is disabled.
+- `Scheduler` still delegates to `SchedulerLoop.run_cycle`; single scheduler authority tests remain green.
+- Shadow dispatcher is explicitly non-authoritative.
+- Rollback is available by disabling `IRON_V3_SCHEDULER_SEAL`.
+
+### Tests run
+```powershell
+$env:IRON_V3_SCHEDULER_SEAL="1"
+python -m pytest tests/core/test_scheduler_commit_sealing.py tests/core/test_scheduler_single_authority.py tests/core/test_scheduler_dispatch_event_hook.py -q --tb=short
+# 12 passed
+```
+
+### Remaining risks
+- Existing lower-level dispatch/reservation helpers may still perform side effects before the Sprint 4 seal observes the result. This sprint avoids broad scheduler rewrites and makes authoritative recognition event-gated at `SchedulerLoop`, per scope.
+- Integration-level scheduler tests were not run in this patch workspace.
