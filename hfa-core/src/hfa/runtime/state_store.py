@@ -37,6 +37,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -61,8 +62,20 @@ from hfa.events.append_service import (
 )
 from hfa_control.event_hooks import emit_event_background
 from hfa_control.event_store import EventStore
+from hfa_core.events.event_types import (
+    TASK_COMPLETION_REQUESTED,
+    TASK_COMPLETED,
+    TASK_FAILED,
+)
 
 logger = logging.getLogger(__name__)
+
+_COMPLETION_SLICE_FALSE_VALUES = {"", "0", "false", "False", "no", "NO", "off", "OFF"}
+
+
+def is_completion_slice_enabled() -> bool:
+    """Return True when Sprint 2 completion slice authority is enforced."""
+    return os.getenv("IRON_V3_COMPLETION_SLICE", "0") not in _COMPLETION_SLICE_FALSE_VALUES
 
 
 async def _maybe_await(result):
@@ -420,19 +433,54 @@ class StateStore:
                 reason="stale_owner_fenced",
             )
 
-        terminal_event_type = (
-            EventStore.EVENT_TASK_COMPLETED
-            if status == "done"
-            else EventStore.EVENT_TASK_FAILED
-        )
+        completion_slice_enabled = is_completion_slice_enabled()
+        terminal_event_type = TASK_COMPLETED if status == "done" else TASK_FAILED
 
+        event_details = dict(details or {})
+        event_details.update({
+            "task_id": task_id,
+            "run_id": run_id,
+            "attempt": attempt,
+            "requested_status": status,
+            "completion_slice": "IRON_V3_COMPLETION_SLICE" if completion_slice_enabled else "legacy",
+        })
+
+        # Sprint 2 CQRS pilot: record completion intent before any terminal
+        # projection.  The requested event is observable but never terminal.
+        if completion_slice_enabled:
+            requested_gate = AuthoritativeEventGate(self._event_store, enabled=True)
+            try:
+                await requested_gate.append_before_authoritative_write(
+                    run_id=run_id,
+                    event_type=TASK_COMPLETION_REQUESTED,
+                    worker_id=worker_id,
+                    details=event_details,
+                    authority="StateStore.complete_once.request",
+                )
+            except AuthoritativeEventAppendError as exc:
+                return CompletionResult(
+                    ok=False,
+                    status="completion_request_event_blocked",
+                    run_id=run_id,
+                    worker_id=worker_id,
+                    duplicate=False,
+                    reason=str(exc),
+                )
+
+        # Final terminal projection requires a durable final event when either
+        # Sprint 1 global event gate or Sprint 2 completion slice is enabled.
+        final_gate = (
+            AuthoritativeEventGate(self._event_store, enabled=True)
+            if completion_slice_enabled
+            else self._event_gate
+        )
         try:
-            await self._event_gate.append_before_authoritative_write(
+            await final_gate.append_before_authoritative_write(
                 run_id=run_id,
                 event_type=terminal_event_type,
                 worker_id=worker_id,
-                details=details,
-                authority="StateStore.complete_once",
+                details=event_details,
+                authority="StateStore.complete_once.final",
             )
         except AuthoritativeEventAppendError as exc:
             return CompletionResult(
@@ -473,13 +521,13 @@ class StateStore:
 
         await self._control.set_owner(task_id=task_id, worker_id=worker_id)
 
-        if not is_event_gate_enabled():
+        if not is_event_gate_enabled() and not completion_slice_enabled:
             emit_event_background(
                 self._event_store,
                 run_id=run_id,
                 event_type=terminal_event_type,
                 worker_id=worker_id,
-                details=details,
+                details=event_details,
             )
 
         return CompletionResult(
