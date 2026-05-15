@@ -245,6 +245,9 @@ class SchedulerLua:
         inflight_ttl: int = 86400,
     ) -> bool:
         """Non-atomic fallback for unit tests / Lua-unavailable environments."""
+        # AUTHORITY_REVIEWED_LUA_ATOMIC_BOUNDARY:
+        # Lua primary path is authoritative. This Python fallback is for tests /
+        # Lua-unavailable environments and routes lifecycle state via transition_state.
         pipe = self._redis.pipeline()
         pipe.zadd(queue_key, {run_id: score}, nx=True)
         pipe.hset(
@@ -491,6 +494,8 @@ class SchedulerLua:
                 {"details": f"cas_miss_from_{curr_s}"},
             )
 
+        # AUTHORITY_REVIEWED_LUA_ATOMIC_BOUNDARY:
+        # Side effects occur only after CAS/transition_state commit eligibility.
         pipe = self._redis.pipeline()
         pipe.hset(
             meta_key,
@@ -611,6 +616,8 @@ class SchedulerLua:
                                         {"details": f"cas_miss_from_{curr_s}"})
 
         # Step 3: Side effects ONLY after CAS committed
+        # AUTHORITY_REVIEWED_LUA_ATOMIC_BOUNDARY:
+        # Side effects occur only after CAS/transition_state commit eligibility.
         pipe = self._redis.pipeline()
         pipe.hset(
             meta_key,

@@ -142,6 +142,8 @@ class WorkerRegistry:
 
     async def mark_dead(self, worker_id: str) -> None:
         try:
+            # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+            # Worker DEAD status is registry projection derived from heartbeat TTL.
             await self._redis.hset(
                 RedisKey.cp_worker(worker_id), "status", WorkerStatus.DEAD.value
             )
@@ -262,6 +264,8 @@ class WorkerRegistry:
 
     async def _on_draining(self, event: WorkerDrainingEvent) -> None:
         key = RedisKey.cp_worker(event.worker_id)
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Worker DRAINING status is registry projection from WorkerDraining event.
         await self._redis.hset(key, "status", WorkerStatus.DRAINING.value)
         await self._redis.expire(key, self._config.registry_ttl)
         logger.info(

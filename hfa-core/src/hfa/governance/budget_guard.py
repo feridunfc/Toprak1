@@ -326,9 +326,13 @@ class BudgetGuard:
             pipe.set(limit_key, str(limit_cents))
             if reset_spent:
                 pipe.set(spent_key, "0")
+                # AUTHORITY_REVIEWED_GOVERNANCE_STATE:
+                # Budget status is governance admission-control state, not run lifecycle truth.
                 pipe.set(status_key, "active")
             else:
                 pipe.setnx(spent_key, "0")
+                # AUTHORITY_REVIEWED_GOVERNANCE_STATE:
+                # Budget status is governance admission-control state, not run lifecycle truth.
                 pipe.setnx(status_key, "active")
             await pipe.execute()
             logger.info(
@@ -548,6 +552,8 @@ class BudgetGuard:
             pipe.set(limit_key, str(limit_cents))
             pipe.set(spent_key, str(spent_cents))
             status = "exhausted" if spent_cents >= limit_cents else "active"
+            # AUTHORITY_REVIEWED_GOVERNANCE_STATE:
+            # Budget recovery projection from replay-derived values.
             pipe.set(status_key, status)
             await pipe.execute()
             logger.info(
