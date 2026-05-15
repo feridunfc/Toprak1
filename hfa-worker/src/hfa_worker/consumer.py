@@ -37,6 +37,7 @@ from hfa_worker.models import (
     TerminalExecutionError,
 )
 from hfa_worker.redis_utils import ack_message, ensure_consumer_group
+from hfa_worker.runtime.worker_runtime import is_worker_effect_hybrid_enabled
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -337,6 +338,21 @@ class WorkerConsumer:
             except ExecutionPermanentError as exc:
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
                 logger.warning("Permanent execution failure run=%s error=%s", event.run_id, exc)
+                if is_worker_effect_hybrid_enabled():
+                    evt = RunFailedEvent(
+                        run_id=event.run_id,
+                        tenant_id=event.tenant_id,
+                        worker_id=self._worker_id,
+                        error=str(exc),
+                        cost_cents=0,
+                        tokens_used=0,
+                        payload={},
+                    )
+                    # Sprint 5: permanent failure is reported as an effect event;
+                    # no direct terminal truth is authored by the worker.
+                    await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                    await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+                    return
                 await self._state.store_result(
                     event.run_id, event.tenant_id, "failed", {}, 0, 0, error=str(exc),
                 )
@@ -367,6 +383,20 @@ class WorkerConsumer:
             except TerminalExecutionError as exc:
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
                 logger.warning("Terminal failure run=%s error=%s", event.run_id, exc)
+                if is_worker_effect_hybrid_enabled():
+                    evt = RunFailedEvent(
+                        run_id=event.run_id,
+                        tenant_id=event.tenant_id,
+                        worker_id=self._worker_id,
+                        error=str(exc),
+                        cost_cents=exc.cost_cents,
+                        tokens_used=exc.tokens_used,
+                    )
+                    # Sprint 5: terminal failure is reported as an effect event;
+                    # no direct terminal truth is authored by the worker.
+                    await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                    await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+                    return
                 await self._state.store_result(
                     event.run_id, event.tenant_id, "failed", {},
                     exc.cost_cents, exc.tokens_used, error=str(exc),

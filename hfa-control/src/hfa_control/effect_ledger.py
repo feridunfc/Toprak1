@@ -17,6 +17,12 @@ from dataclasses import asdict, dataclass
 from typing import Optional
 from hfa_control.effect_config import get_completion_effect_ttl
 
+EFFECT_REQUESTED = "EFFECT_REQUESTED"
+EFFECT_COMMITTED = "EFFECT_COMMITTED"
+EFFECT_FAILED = "EFFECT_FAILED"
+EFFECT_SUPPRESSED = "EFFECT_SUPPRESSED"
+
+
 @dataclass
 class EffectReceipt:
     """
@@ -62,6 +68,10 @@ class EffectReceipt:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, sort_keys=True)
+
+    def as_event_details(self) -> dict:
+        """Return a replay/audit-visible representation of this effect receipt."""
+        return asdict(self)
 
 
 class EffectLedger:
