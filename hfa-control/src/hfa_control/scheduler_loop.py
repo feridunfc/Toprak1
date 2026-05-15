@@ -55,6 +55,9 @@ class SchedulerLoop:
         redis = getattr(self._dispatch_controller, "redis", None)
         if redis is not None:
             try:
+                # AUTHORITY_REVIEWED_LEASE_COUNTER:
+                # Scheduler epoch is a fencing/lease counter, not run lifecycle truth.
+                # It only scopes scheduler ownership decisions and is observable in TASK_SCHEDULED details.
                 epoch_int = await redis.incr(_SCHEDULER_EPOCH_KEY)
                 self._epoch = str(epoch_int)
                 logger.info("SchedulerLoop: epoch incremented to %s", self._epoch)
@@ -105,8 +108,28 @@ class SchedulerLoop:
         redis = getattr(self._dispatch_controller, "redis", None)
         if is_proof_enforcement_enabled() and redis is not None:
             try:
+                if self._event_store is not None:
+                    await AuthoritativeEventGate(self._event_store, enabled=True).append_before_authoritative_write(
+                        run_id=run_id,
+                        event_type="RUN_QUARANTINED",
+                        worker_id=None,
+                        details={
+                            "run_id": run_id,
+                            "reason": reason or "quarantined",
+                            "scheduler_epoch": self._epoch,
+                            "proof_enforcement": "IRON_V3_PROOF_ENFORCEMENT",
+                        },
+                        authority="SchedulerLoop.quarantine",
+                    )
+                # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+                # Quarantine Redis keys are enforced projections after RUN_QUARANTINED proof/event.
                 await redis.set(f"hfa:quarantine:{run_id}", reason or "quarantined")
+                # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+                # Compatibility quarantine marker; event/proof remains RUN_QUARANTINED.
                 await redis.set(f"hfa:run:{run_id}:quarantined", "1")
+            except AuthoritativeEventAppendError as exc:
+                logger.error("SchedulerLoop quarantine event append blocked marker: run_id=%s error=%s", run_id, exc)
+                return
             except Exception as exc:
                 logger.error("SchedulerLoop quarantine marker failed: run_id=%s error=%s", run_id, exc)
         logger.warning("SchedulerLoop quarantine: run_id=%s reason=%s", run_id, reason)
