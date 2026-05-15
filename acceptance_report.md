@@ -67,3 +67,89 @@ Results:
 - Existing broader `tests/core` failures remain outside Sprint 2 scope and were not modified.
 - Existing worker direct-finalization risks remain excluded by the Sprint 2 contract.
 - Existing scheduler sealing remains deferred to Sprint 4.
+
+---
+
+# Sprint 3 Acceptance Report — LLM Sealing + Claim Check
+
+## Scope
+
+Modified or added only Sprint 3 contract files plus this required acceptance report:
+
+- `hfa-core/src/hfa/events/completion_capture.py`
+- `hfa-core/src/hfa/events/execution_artifacts.py`
+- `hfa-agents/src/hfa_agents/base/agent_base.py`
+- `tests/core/test_completion_capture_required.py`
+- `tests/core/test_replay_without_llm.py`
+- `acceptance_report.md`
+
+No control-plane, worker, scheduler, or docs files were changed.
+
+## Artifact schema summary
+
+Sprint 3 adds a shared completion capture helper for agent/LLM-like outputs.
+Captured events use `LLM_COMPLETION_CAPTURED` and include:
+
+- `provider`
+- `model`
+- `prompt_hash`
+- `system_prompt_hash`
+- `output_hash`
+- `tokens`
+- `cost_cents`
+- `fallback_used`
+- `output`
+- `capture_helper`
+
+The `output` field is event-safe:
+
+- Small outputs use `mode=inline` with deterministic content hash.
+- Large outputs use `mode=claim_check`, `artifact_ref`, `content_hash`, and `size_bytes`.
+- Large payload content is not embedded in the event.
+
+Replay uses `replay_captured_completion()` and `resolve_execution_artifact()` to reconstruct output from event payloads and artifact references only.  No live LLM call is required or available in the replay helper.
+
+## Feature flag behavior
+
+- `IRON_V3_LLM_SEALING=0` or unset: legacy agent execution behavior is preserved.
+- `IRON_V3_LLM_SEALING=1`: `AgentBase.execute()` seals output through `hfa.events.completion_capture.capture_agent_completion`.
+- If strict capture append fails while the flag is enabled, the agent returns a failed result with HITL required.
+
+## Acceptance criteria
+
+- Replay never calls live LLM: PASS
+- Large outputs use claim-check reference: PASS
+- Small outputs inline correctly: PASS
+- Strict mode append failure returns failed result: PASS
+- Listed roles use shared helper through `AgentBase.execute()`: PASS
+- Rollback flag exists: PASS (`IRON_V3_LLM_SEALING`)
+
+## Verification run
+
+Commands run locally in the patch workspace:
+
+```bash
+PYTHONPATH=hfa-core/src:hfa-agents/src:hfa-semantic/src \
+  python -m compileall \
+  hfa-core/src/hfa/events/completion_capture.py \
+  hfa-core/src/hfa/events/execution_artifacts.py \
+  hfa-agents/src/hfa_agents/base/agent_base.py \
+  hfa-agents/src/hfa_agents/roles/coder.py \
+  hfa-agents/src/hfa_agents/roles/tester.py \
+  hfa-agents/src/hfa_agents/roles/architect.py \
+  hfa-agents/src/hfa_agents/roles/researcher.py
+
+PYTHONPATH=hfa-core/src:hfa-agents/src:hfa-semantic/src \
+  python -m pytest tests/core/test_completion_capture_required.py \
+  tests/core/test_replay_without_llm.py -q --tb=short
+```
+
+Results:
+
+- Sprint 3 focused tests: 7 passed
+
+## Remaining gaps
+
+- Existing broader repository drift remains outside Sprint 3 scope.
+- This sprint does not modify worker execution, scheduler commit, or control-plane replay internals.
+- Large artifact storage is provided by a minimal local/file protocol or injected artifact store; production object storage can be introduced later through the same `ArtifactStore` protocol without changing event schema.

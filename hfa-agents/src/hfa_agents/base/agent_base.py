@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from hfa_agents.base.contracts import EnrichedEvent, ExecutionResult
+from hfa.events.completion_capture import CompletionCaptureError, maybe_capture_agent_completion
 
 
 @dataclass(slots=True)
@@ -64,10 +65,27 @@ class AgentBase(ABC):
             started = time.perf_counter()
             try:
                 result = await asyncio.wait_for(self._execute_core(event), timeout=self.timeout_seconds)
+                receipt = await maybe_capture_agent_completion(
+                    event=event,
+                    result=result,
+                    role=self.role,
+                    agent_id=self.agent_id,
+                )
+                if receipt is not None:
+                    result.artifacts["completion_capture"] = receipt.to_event_details()
+                    result.reasoning_trace.append("completion_capture=sealed")
                 self.circuit_breaker.record_success()
                 result.reasoning_trace.append(f"agent={self.agent_id}")
                 result.reasoning_trace.append(f"duration_ms={(time.perf_counter() - started)*1000:.2f}")
                 return result
+            except CompletionCaptureError as exc:
+                self.circuit_breaker.record_failure()
+                return ExecutionResult(
+                    status="failed",
+                    reasoning_trace=[f"completion_capture_failed:{self.agent_id}:{exc}"],
+                    suggested_feedback="authoritative completion capture failed",
+                    requires_hitl=True,
+                )
             except asyncio.TimeoutError:
                 self.circuit_breaker.record_failure()
                 return ExecutionResult(
