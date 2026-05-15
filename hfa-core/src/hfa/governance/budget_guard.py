@@ -33,11 +33,18 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+_FALSE_VALUES = {"", "0", "false", "False", "no", "NO", "off", "OFF"}
+
+
+def is_strict_mode_enabled() -> bool:
+    return os.getenv("IRON_STRICT_MODE", os.getenv("IRONCLAD_STRICT_MODE", "0")) not in _FALSE_VALUES
 
 # ---------------------------------------------------------------------------
 # Unit helpers
@@ -235,12 +242,25 @@ class BudgetGuard:
     ) -> None:
         self._redis = redis
         self._prefix = key_prefix
+        if fail_open and is_strict_mode_enabled():
+            logger.warning("BudgetGuard fail_open requested in strict mode; forcing fail_closed")
+            fail_open = False
         self._fail_open = fail_open
+        self._authority_source = f"redis:{key_prefix}"
         self._sha_debit: Optional[str] = None
         self._sha_check: Optional[str] = None
         self._sha_freeze: Optional[str] = None
         self._sha_reset: Optional[str] = None
-        logger.info("BudgetGuard created (fail_open=%s)", fail_open)
+        logger.info("BudgetGuard created (fail_open=%s authority_source=%s)", fail_open, self._authority_source)
+
+    @property
+    def authority_source(self) -> str:
+        """Single budget authority source identifier for audits and callers."""
+        return self._authority_source
+
+    @property
+    def fail_open(self) -> bool:
+        return self._fail_open
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -418,7 +438,7 @@ class BudgetGuard:
             raise
         except Exception as exc:
             logger.error("debit failed: %s", exc, exc_info=True)
-            if self._fail_open:
+            if self._fail_open and not is_strict_mode_enabled():
                 logger.warning("fail_open=True — permitting spend despite Redis error")
                 return BudgetState(
                     tenant_id=tenant_id,

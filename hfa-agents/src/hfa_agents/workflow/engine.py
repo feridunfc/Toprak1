@@ -18,6 +18,7 @@ Production guards (unchanged from Sprint 1):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -25,11 +26,21 @@ from typing import Any, Dict, List, Optional
 from hfa_agents.base.contracts import EnrichedEvent, ExecutionResult
 from hfa_agents.base.registry import AgentRegistry
 
+try:
+    from hfa_control.feedback.handle_result import handle_result
+except Exception:  # pragma: no cover - keeps agents package bootstrap-friendly
+    handle_result = None
+
 logger = logging.getLogger(__name__)
 
 _MAX_STEPS_CEILING = 50
 _DEFAULT_MAX_STEPS = 10
 _DEFAULT_BUDGET_CENTS = 2_000
+_FALSE_VALUES = {"", "0", "false", "False", "no", "NO", "off", "OFF"}
+
+
+def _strict_mode_enabled() -> bool:
+    return os.getenv("IRON_STRICT_MODE", os.getenv("IRONCLAD_STRICT_MODE", "0")) not in _FALSE_VALUES
 
 
 @dataclass(slots=True)
@@ -166,6 +177,17 @@ class WorkflowEngine:
             event.artifacts = artifacts.copy()
 
             result = await agent.execute(event)
+            if handle_result is not None:
+                feedback_decision = handle_result(result, strict_mode=_strict_mode_enabled())
+                reasoning_trace.append(f"feedback_decision:{feedback_decision.reason}:{feedback_decision.status}")
+                if feedback_decision.status == "failed" and feedback_decision.reason == "missing_status_fail_closed":
+                    return ExecutionResult(
+                        status="failed",
+                        output_data=artifacts,
+                        reasoning_trace=reasoning_trace,
+                        suggested_feedback=feedback_decision.suggested_feedback,
+                        requires_hitl=feedback_decision.requires_hitl,
+                    )
             artifacts.update(result.output_data)
             artifacts.update(result.artifacts)
             reasoning_trace.extend(result.reasoning_trace)
