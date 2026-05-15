@@ -2,14 +2,27 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
+from hfa.events.append_service import (
+    AuthoritativeEventAppendError,
+    AuthoritativeEventGate,
+)
 from hfa.state import transition_state
 from hfa_control.backpressure import BackpressureGuard
 from hfa_control.event_hooks import emit_event_background
 from hfa_control.event_store import EventStore
 
 logger = logging.getLogger(__name__)
+
+_FALSE_VALUES = {"", "0", "false", "False", "no", "NO", "off", "OFF"}
+
+
+def is_scheduler_commit_seal_enabled() -> bool:
+    """Return True when scheduler commits require durable scheduled-event append."""
+    return os.getenv("IRON_V3_SCHEDULER_SEAL", "0") not in _FALSE_VALUES
+
 
 # Redis key for the persistent, monotonically-increasing scheduler epoch counter.
 # Incremented each time this scheduler instance acquires leadership.
@@ -131,6 +144,57 @@ class SchedulerLoop:
             state_key=run_id,
         )
 
+    def _scheduled_event_details(self, *, tenant_id: Any | None = None) -> dict[str, Any]:
+        details = {"scheduler_epoch": self._epoch}
+        if tenant_id:
+            details["tenant_id"] = tenant_id
+        return details
+
+    async def _seal_scheduler_commit(
+        self,
+        *,
+        run_id: str,
+        worker_id: str | None,
+        details: dict[str, Any],
+    ) -> bool:
+        """Append the durable scheduled event before a dispatch is authoritative.
+
+        With IRON_V3_SCHEDULER_SEAL disabled, preserve legacy background
+        emission behavior. With the flag enabled, the scheduler fails closed:
+        a dispatch result is not counted as authoritative unless the scheduled
+        event append succeeds.
+        """
+        if not is_scheduler_commit_seal_enabled():
+            emit_event_background(
+                self._event_store,
+                run_id=run_id,
+                event_type=EventStore.EVENT_TASK_SCHEDULED,
+                worker_id=worker_id,
+                details=details,
+            )
+            return True
+
+        try:
+            await AuthoritativeEventGate(
+                self._event_store,
+                enabled=True,
+            ).append_before_authoritative_write(
+                run_id=run_id,
+                event_type=EventStore.EVENT_TASK_SCHEDULED,
+                worker_id=worker_id,
+                details={**details, "event_gate": "IRON_V3_SCHEDULER_SEAL"},
+                authority="SchedulerLoop.dispatch_commit",
+            )
+        except AuthoritativeEventAppendError as exc:
+            logger.error(
+                "SchedulerLoop blocked authoritative dispatch: run_id=%s worker_id=%s reason=%s",
+                run_id,
+                worker_id,
+                exc,
+            )
+            return False
+        return True
+
     async def _dispatch_once(self, snapshot: Any) -> bool:
         controller = self._dispatch_controller
         if controller is None:
@@ -154,15 +218,13 @@ class SchedulerLoop:
                 worker_id = result.get("worker_id")
                 tenant_id = result.get("tenant_id")
                 if run_id:
-                    emit_event_background(
-                        self._event_store,
-                        run_id=run_id,
-                        event_type=EventStore.EVENT_TASK_SCHEDULED,
-                        worker_id=worker_id,
-                        details={"tenant_id": tenant_id, "scheduler_epoch": self._epoch}
-                        if tenant_id
-                        else {"scheduler_epoch": self._epoch},
+                    sealed = await self._seal_scheduler_commit(
+                        run_id=str(run_id),
+                        worker_id=str(worker_id) if worker_id else None,
+                        details=self._scheduled_event_details(tenant_id=tenant_id),
                     )
+                    if not sealed:
+                        return False
             return bool(result)
         return False
 

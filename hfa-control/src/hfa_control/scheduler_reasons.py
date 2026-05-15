@@ -8,6 +8,7 @@ Used in: DispatchCommitResult, DispatchAttemptResult, metrics labels, logs.
 
 # Successful outcome
 COMMITTED                = "committed"
+SCHEDULER_EVENT_APPEND_FAILED = "scheduler_event_append_failed"
 
 # Dispatch pacing / quota
 DISPATCH_BUDGET_EXHAUSTED = "dispatch_budget_exhausted"
