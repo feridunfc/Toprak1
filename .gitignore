@@ -10,3 +10,5 @@ __pycache__/
 .env.*
 secrets/
 *.private.pem
+hfa-dashboard/frontend/node_modules/
+hfa-dashboard/frontend/dist/
