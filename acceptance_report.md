@@ -192,3 +192,18 @@ python -m pytest tests/core/test_scheduler_commit_sealing.py tests/core/test_sch
 ### Remaining risks
 - Existing lower-level dispatch/reservation helpers may still perform side effects before the Sprint 4 seal observes the result. This sprint avoids broad scheduler rewrites and makes authoritative recognition event-gated at `SchedulerLoop`, per scope.
 - Integration-level scheduler tests were not run in this patch workspace.
+
+## Sprint 5 — Worker & Effect Closure
+
+Feature flag: `IRON_V3_WORKER_EFFECT_HYBRID`
+
+Implemented as a bounded, additive effect-executor slice:
+
+- Added `WorkerRuntime` to execute worker effects without authoring terminal truth.
+- Added visible effect events: `EFFECT_REQUESTED`, `EFFECT_COMMITTED`, `EFFECT_FAILED`, `EFFECT_SUPPRESSED`.
+- Added quarantine read guard before effect execution.
+- Added duplicate suppression through the existing `EffectLedger` when supplied.
+- Added feedback and agent integration clients as thin adapters; they do not own scheduler or state authority.
+- Updated the legacy worker consumer so, when the flag is enabled, it reports result events and ACKs only after the event path accepts them; it does not call terminal `StateStore` mutations in that path.
+
+Rollback: disable `IRON_V3_WORKER_EFFECT_HYBRID` to preserve legacy behavior.
