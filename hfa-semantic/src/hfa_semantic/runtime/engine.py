@@ -13,6 +13,11 @@ from hfa_semantic.runtime.runtime_metrics import SemanticMetrics
 from hfa_semantic.runtime.state_store import StateStore
 from hfa_semantic.runtime.watermark import WatermarkManager
 
+try:
+    from hfa_semantic.validation.safety_verdict import SafetyVerdict
+except Exception:  # pragma: no cover - old packaging compatibility
+    SafetyVerdict = None  # type: ignore[assignment]
+
 
 @dataclass(slots=True)
 class SemanticEventContext:
@@ -73,11 +78,51 @@ class SemanticRuntimeEngine:
             return False, None
 
         self._metrics.inc_processed()
-        return True, {
+        result = {
             "raw": evt.model_dump(),
             "context": ctx.__dict__,
             "partition_key": ctx.partition_key,
             "watermark_ms": self._watermark.current_watermark_ms,
             "latency_ms": (time.perf_counter() - started) * 1000,
             "semantic_matches": [],
+        }
+
+        verdict_payload = self._extract_safety_verdict_payload(raw)
+        if verdict_payload is not None:
+            result["safety_verdict"] = verdict_payload
+            result["audit_visible"] = bool(verdict_payload.get("audit_visible", True))
+            result["replay_visible"] = bool(verdict_payload.get("replay_visible", True))
+
+        return True, result
+
+    @staticmethod
+    def _extract_safety_verdict_payload(raw: dict | RawEvent) -> dict[str, Any] | None:
+        """Carry policy/safety verdicts into semantic outputs.
+
+        This keeps Sprint 7 verdicts visible to audit/replay surfaces without
+        changing the main event-processing contract.
+        """
+
+        if isinstance(raw, RawEvent):
+            raw_map = raw.model_dump()
+        else:
+            raw_map = dict(raw)
+
+        verdict = raw_map.get("safety_verdict") or raw_map.get("semantic_verdict")
+        if verdict is None:
+            return None
+        if SafetyVerdict is not None and isinstance(verdict, SafetyVerdict):
+            return verdict.to_event_payload()
+        if hasattr(verdict, "to_event_payload"):
+            return dict(verdict.to_event_payload())
+        if isinstance(verdict, dict):
+            payload = dict(verdict)
+            payload.setdefault("audit_visible", True)
+            payload.setdefault("replay_visible", True)
+            return payload
+        return {
+            "allowed": bool(verdict),
+            "reason": "boolean_semantic_verdict",
+            "audit_visible": True,
+            "replay_visible": True,
         }

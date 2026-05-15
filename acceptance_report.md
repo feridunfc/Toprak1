@@ -1,36 +1,40 @@
-# Sprint 6 Acceptance Report — Proof Enforcement + Quarantine
+# Sprint 7 Acceptance Report — Semantic Constitution + Release
 
 ## Scope
-Implemented only Sprint 6 proof/quarantine enforcement surfaces:
 
-- `hfa-control/src/hfa_control/reconciliation_manager.py`
-- `hfa-control/src/hfa_control/task_recovery.py`
-- `hfa-control/src/hfa_control/scheduler_loop.py`
-- `scripts/replay_compare.py`
-- `tests/integration/test_reconciliation.py`
-- `tests/integration/test_recovery_modes.py`
-- `tests/integration/test_quarantine.py`
-- `tests/integration/test_runtime_recovery_guard.py`
-- `tests/integration/test_replay_compare_enforcement.py`
+Changed only Sprint 7 files:
 
-`hfa-control/src/hfa_control/recovery.py` and `hfa-worker/src/hfa_worker/runtime/worker_runtime.py` were not changed because existing Sprint 5/Sprint 4 surfaces already expose the needed quarantine/proof hooks for this slice.
+- `hfa-semantic/src/hfa_semantic/runtime/semantic_hook.py`
+- `hfa-semantic/src/hfa_semantic/validation/safety_verdict.py`
+- `hfa-semantic/src/hfa_semantic/runtime/engine.py`
+- `hfa-agents/src/hfa_agents/integration/semantic_bridge.py`
+- `hfa-worker/src/hfa_worker/scheduler_semantic_hook.py`
+- `docs/ops/config_matrix.md`
+- `docs/ops/runbook.md`
+- `docs/ops/release_checklist.md`
+- `tests/integration/test_phase5b_strict_mode.py`
+- `tests/integration/test_phase6a_runtime_safety.py`
 
-## Feature flag
-- `IRON_V3_PROOF_ENFORCEMENT`
+## Acceptance
 
-Rollback: disable `IRON_V3_PROOF_ENFORCEMENT`.
+- Advisory path may degrade/fail open.
+- Gate path fails closed.
+- Safety verdicts carry replay/audit visibility flags.
+- Agent semantic bridge keeps advisory enrichment separate from gate evaluation.
+- Scheduler/worker semantic prewarm remains non-authoritative.
+- Ops docs define release mode and rollback.
 
-## Acceptance mapping
+## Feature flag / rollback
 
-- gaps_or_duplicates_imply_ambiguous: covered by `recovery_proof_decision` and `evaluate_replay_compare`.
-- ambiguous_blocks_auto_resume: covered by `TaskRecoveryManager.proof_allows_auto_resume`.
-- quarantined_runs_blocked_by_scheduler_and_worker: scheduler quarantine projection plus existing worker quarantine read path.
-- replay_integrity_failure_nonzero_cli: covered by `scripts/replay_compare.py`.
-- critical_drift_requires_manual_path: `ReconciliationManager` blocks auto-correction under the flag.
+Rollback:
 
-## Suggested verification
+```text
+IRON_SEMANTIC_GATE_MODE=legacy
+```
+
+## Test command
 
 ```powershell
-$env:IRON_V3_PROOF_ENFORCEMENT="1"
-python -m pytest tests/integration/test_reconciliation.py tests/integration/test_recovery_modes.py tests/integration/test_quarantine.py tests/integration/test_runtime_recovery_guard.py tests/integration/test_replay_compare_enforcement.py -q --tb=short
+$env:IRON_SEMANTIC_GATE_MODE="gate"
+python -m pytest tests/integration/test_phase5b_strict_mode.py tests/integration/test_phase6a_runtime_safety.py -q --tb=short
 ```
