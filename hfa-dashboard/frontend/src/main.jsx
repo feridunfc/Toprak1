@@ -46,26 +46,40 @@ function FindingsList({ findings }) {
   );
 }
 
-function App() {
+function EvidencePanel({ title, children, note }) {
+  return (
+    <section className="card evidence-card">
+      <div className="section-header"><h2>{title}</h2><span className="muted">read-only</span></div>
+      <div className="evidence-body">{children}</div>
+      {note ? <p className="note">{note}</p> : null}
+    </section>
+  );
+}
+
+function Dashboard() {
   const [authority, setAuthority] = useState(null);
   const [heatmap, setHeatmap] = useState([]);
   const [findings, setFindings] = useState([]);
+  const [replay, setReplay] = useState(null);
+  const [quarantine, setQuarantine] = useState(null);
+  const [artifacts, setArtifacts] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const [a, h, f] = await Promise.all([
+        const [a, h, f, r, q, av] = await Promise.all([
           fetchJson("/dashboard/authority"),
           fetchJson("/dashboard/authority/heatmap"),
           fetchJson("/dashboard/findings?limit=20"),
+          fetchJson("/dashboard/replay"),
+          fetchJson("/dashboard/quarantine"),
+          fetchJson("/dashboard/artifacts?limit=8"),
         ]);
         if (!cancelled) {
-          setAuthority(a);
-          setHeatmap(h.slice(0, 12));
-          setFindings(f.items || []);
-          setError("");
+          setAuthority(a); setHeatmap(h.slice(0, 12)); setFindings(f.items || []);
+          setReplay(r); setQuarantine(q); setArtifacts(av); setError("");
         }
       } catch (err) {
         if (!cancelled) setError(err.message || String(err));
@@ -85,7 +99,7 @@ function App() {
         <div>
           <p className="eyebrow">IRONCLAD / Toprak1</p>
           <h1>Read-only Command Center</h1>
-          <p className="subtitle">Authority audit status, risk heatmap and findings. No write or approval actions are exposed.</p>
+          <p className="subtitle">Authority, replay, quarantine and artifact evidence. No write or approval actions are exposed.</p>
         </div>
         <div className="status-panel"><span className="muted">Authority Status</span><StatusBadge status={authority?.authority_status || "LOADING"} /></div>
       </header>
@@ -99,6 +113,18 @@ function App() {
         <StatCard label="Allowed" value={counts.allowed ?? "—"} hint="reviewed/authority paths" />
       </section>
 
+      <section className="grid evidence-grid">
+        <EvidencePanel title="Replay Integrity" note={replay?.note}>
+          <dl><dt>Replay compare</dt><dd>{String(replay?.replay_compare_present ?? "—")}</dd><dt>Smoke runner</dt><dd>{String(replay?.smoke_runner_present ?? "—")}</dd><dt>Last result</dt><dd>{replay?.last_result || "—"}</dd></dl>
+        </EvidencePanel>
+        <EvidencePanel title="Quarantine Snapshot" note={quarantine?.note}>
+          <dl><dt>Pending</dt><dd>{quarantine?.pending_count ?? "—"}</dd><dt>Banned findings</dt><dd>{quarantine?.known_banned_authority_findings ?? "—"}</dd><dt>Actions</dt><dd>disabled</dd></dl>
+        </EvidencePanel>
+        <EvidencePanel title="Artifact Vault" note={artifacts?.note}>
+          <dl><dt>Indexed files</dt><dd>{artifacts?.count ?? "—"}</dd><dt>Displayed</dt><dd>{artifacts?.items?.length ?? "—"}</dd><dt>Payload reads</dt><dd>disabled</dd></dl>
+        </EvidencePanel>
+      </section>
+
       <section className="grid content-grid">
         <HeatmapTable rows={topHeatmap} />
         <FindingsList findings={findings} />
@@ -107,4 +133,4 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(<Dashboard />);
