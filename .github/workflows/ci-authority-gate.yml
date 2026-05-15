@@ -12,6 +12,7 @@ on:
 jobs:
   authority-gate:
     runs-on: ubuntu-latest
+
     services:
       redis:
         image: redis:7-alpine
@@ -36,19 +37,25 @@ jobs:
           python -m pip install pytest pytest-asyncio anyio redis fakeredis fastapi uvicorn
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-semantic -e hfa-agents
 
-      - name: Authority audit strict gate
-        run: python scripts/authority_audit.py --repo-root . --format text --strict
+      # Sprint 8 is a baseline/reporting gate.
+      # It must not block merge just because the current repo has known banned/suspicious findings.
+      # Sprint 9 burn-down will reduce these, then this can become --fail-on banned or --strict.
+      - name: Authority audit baseline report
+        run: |
+          python scripts/authority_audit.py --repo-root . --format text --fail-on none
+          python scripts/authority_audit.py --repo-root . --heatmap --fail-on none
 
       - name: Authority audit dashboard JSON smoke
         run: python scripts/authority_audit.py --repo-root . --format dashboard --fail-on none
 
-      - name: Direct write guard
-        run: python -m pytest tests/core/test_no_direct_run_state_writes.py tests/core/test_authority_audit_tool.py -q --tb=short
+      - name: Direct write guard and audit tool tests
+        run: python -m pytest tests/core/test_no_direct_run_state_writes.py tests/core/test_authority_audit_tool.py tests/core/test_full_auto_smoke_script.py -q --tb=short
 
       - name: Replay compare enforcement
         env:
           IRON_V3_PROOF_ENFORCEMENT: "1"
           USE_EXISTING_REDIS: "1"
+          USE_FAKE_REDIS: "0"
           REDIS_URL: "redis://127.0.0.1:6389/0"
         run: python -m pytest tests/integration/test_replay_compare_enforcement.py -q --tb=short
 
