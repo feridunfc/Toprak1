@@ -215,6 +215,9 @@ class RedisControlStateStore(ControlStateStore):
         return raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
     async def set_owner(self, *, task_id: str, worker_id: str) -> None:
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Task owner is a fencing/projection key used to reject stale completions.
+        # Terminal completion truth remains guarded by AuthoritativeEventGate.
         await _maybe_await(self._redis.set(f"hfa:task:{task_id}:owner", worker_id))
 
     async def get_task_state(self, *, task_id: str) -> Optional[str]:
@@ -226,11 +229,17 @@ class RedisControlStateStore(ControlStateStore):
         return raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
     async def set_task_state(self, *, task_id: str, state: str) -> None:
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # DAG task state is a compatibility projection. Terminal lifecycle changes
+        # are guarded by transition_state and completion events.
         await _maybe_await(
             self._redis.set(f"hfa:dag:task:{task_id}:state", state)
         )
 
     async def set_task_output(self, *, task_id: str, record: dict) -> None:
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Task output is projection/claim-check storage. Authoritative completion
+        # is sealed through completion events and replayable artifacts.
         await _maybe_await(
             self._redis.set(f"hfa:task:{task_id}:output", json.dumps(record))
         )

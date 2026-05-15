@@ -108,5 +108,3 @@ async def main() -> None:
 # SEMANTIC_MAX_PARTITIONS = 10000
 # ANTHROPIC_API_KEY       = ...
 # OPENAI_API_KEY          = ...   (fallback)
-EOF
-echo "worker_main_patch.py done"

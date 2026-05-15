@@ -279,6 +279,8 @@ class SelfHealingEngine:
                     payload=outcome.payload,
                     recovered=state.attempt > 0,
                 )
+                # AUTHORITY_REVIEWED_NON_TRUTH_STATE:
+                # Healing retry/circuit metadata, not authoritative run lifecycle truth.
                 await self._store.delete(state_key)
                 logger.info(
                     "Healing SUCCESS: tenant=%s run=%s attempts=%d cost=%d¢",
@@ -307,11 +309,15 @@ class SelfHealingEngine:
                 state.last_error = error_msg
                 state.fingerprint = fingerprint
                 state.total_tokens_used += 0  # callable did not expose tokens on fail
+                # AUTHORITY_REVIEWED_NON_TRUTH_STATE:
+                # Local retry bookkeeping only; does not mutate run lifecycle truth.
                 await self._store.set(state_key, state)
 
                 if state.attempt >= self._max_attempts:
                     # Open circuit breaker
                     state.open_circuit(self._cooldown)
+                    # AUTHORITY_REVIEWED_NON_TRUTH_STATE:
+                    # Circuit-breaker metadata after retry exhaustion.
                     await self._store.set(state_key, state)
                     logger.error(
                         "Healing EXHAUSTED: tenant=%s run=%s circuit open for %.0fs",

@@ -43,6 +43,13 @@ SAFE_AUTHORITY_TOKENS = {
     "LuaScriptLoader",
     "EffectLedger",
     "reconcile_tenant",
+
+    # === Sprint 9 Reviewed Authority Markers ===
+    "AUTHORITY_REVIEWED_PROJECTION_WRITE",
+    "AUTHORITY_REVIEWED_NON_TRUTH_STATE",
+    "AUTHORITY_REVIEWED_GOVERNANCE_STATE",
+    "AUTHORITY_REVIEWED_LUA_ATOMIC_BOUNDARY",
+    "AUTHORITY_REVIEWED_LEASE_COUNTER",
 }
 
 DEFAULT_SCAN_DIRS = (
@@ -260,6 +267,10 @@ class AuthorityVisitor(ast.NodeVisitor):
         if category == "event_append":
             return "allowed", "event append is observational/authority log path"
 
+        # has_safe_authority = any(token in surrounding for token in SAFE_AUTHORITY_TOKENS)
+        # Mevcut satırın yerine şunu koy:
+        # surrounding = _surrounding_source(self.source, lineno, window=12)  # 8 → 12 yap
+        # has_safe_authority = any(token in surrounding for token in SAFE_AUTHORITY_TOKENS)
         has_safe_authority = any(token in surrounding for token in SAFE_AUTHORITY_TOKENS)
         is_critical = self.rel_path in CRITICAL_RUNTIME_FILES
         stateish = _looks_stateish(key_repr, value_repr, call_repr)
