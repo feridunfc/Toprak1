@@ -1,4 +1,4 @@
-"""Read-only Dashboard-A/B FastAPI app."""
+"""Read-only Dashboard-A/B/C FastAPI app."""
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -6,12 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from routes.artifacts import router as artifacts_router
 from routes.authority import router as authority_router
+from routes.events import router as events_router
 from routes.findings import router as findings_router
 from routes.health import router as health_router
 from routes.quarantine import router as quarantine_router
 from routes.replay import router as replay_router
+from routes.workers import router as workers_router
 
-app = FastAPI(title="IRONCLAD Dashboard", version="0.2.0")
+app = FastAPI(title="IRONCLAD Dashboard", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,3 +29,5 @@ app.include_router(findings_router)
 app.include_router(replay_router)
 app.include_router(quarantine_router)
 app.include_router(artifacts_router)
+app.include_router(events_router)
+app.include_router(workers_router)
