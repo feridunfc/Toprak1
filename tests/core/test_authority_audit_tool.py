@@ -217,3 +217,40 @@ def test_authority_audit_observability_only_has_low_risk(tmp_path: Path, capsys)
     assert payload["telemetry_risk_count"] == 1
     assert payload["risk_bearing_suspicious"] == 0
     assert payload["risk_score"] == 1
+
+
+def test_authority_audit_lua_boundary_subclassification(tmp_path: Path) -> None:
+    repo = tmp_path
+
+    scheduler = repo / "hfa-control" / "src" / "hfa_control" / "scheduler_lua.py"
+    scheduler.parent.mkdir(parents=True)
+    scheduler.write_text(
+        "async def _commit_fallback(redis):\n    await redis.evalsha('sha', 1, 'key')\n",
+        encoding="utf-8",
+    )
+
+    authority = repo / "hfa-core" / "src" / "hfa" / "lua" / "task_complete.lua"
+    authority.parent.mkdir(parents=True)
+    authority.write_text(
+        "redis.call('HSET', KEYS[1], 'state', 'complete')\n",
+        encoding="utf-8",
+    )
+
+    projection = repo / "hfa-core" / "src" / "hfa" / "lua" / "loader.py"
+    projection.parent.mkdir(parents=True, exist_ok=True)
+    projection.write_text(
+        "async def run(redis):\n    return await redis.eval('return 1', 0)\n",
+        encoding="utf-8",
+    )
+
+    result = authority_audit.run_audit(
+        repo,
+        scan_dirs=("hfa-control/src", "hfa-core/src"),
+        include_lua=True,
+    )
+
+    classes = {finding.suspicious_class for finding in result.findings}
+
+    assert "lua_scheduler_fallback" in classes
+    assert "lua_authority_transition" in classes
+    assert "lua_atomic_projection" in classes
