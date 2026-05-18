@@ -24,6 +24,18 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 Severity = Literal["allowed", "suspicious", "banned"]
+SuspiciousClass = Literal[
+    "not_applicable",
+    "governance_local",
+    "observability_only",
+    "lua_atomic_boundary",
+    "lease_or_fencing",
+    "rate_limit_or_admission",
+    "recovery_or_reconciliation",
+    "worker_or_effect_telemetry",
+    "false_positive_static",
+    "true_authority_review",
+]
 
 MUTATION_CALLS = {
     "set", "hset", "delete", "xadd", "zadd", "zrem", "sadd", "lpush", "rpush",
@@ -114,6 +126,7 @@ class AuditFinding:
     reason: str
     context: str
     function: str = "<module>"
+    suspicious_class: SuspiciousClass = "not_applicable"
     risk_score: int = 0
 
 
@@ -209,6 +222,15 @@ class AuthorityVisitor(ast.NodeVisitor):
             reason=reason,
             context=context,
             function=self.current_function,
+            suspicious_class=_classify_suspicious(
+                severity=severity,
+                path=self.rel_path,
+                function=self.current_function,
+                category=category,
+                call=call,
+                context=context,
+                reason=reason,
+            ),
             risk_score=_risk_score(severity, self.rel_path in CRITICAL_RUNTIME_FILES),
         )
 
@@ -289,6 +311,81 @@ class AuthorityVisitor(ast.NodeVisitor):
             return "suspicious", "Lua mutation boundary must be reviewed for invariant coverage"
 
         return "suspicious", "Redis/write-like mutation candidate; review authority semantics"
+
+
+
+
+def _classify_suspicious(
+    *,
+    severity: Severity,
+    path: str,
+    function: str,
+    category: str,
+    call: str,
+    context: str,
+    reason: str,
+) -> SuspiciousClass:
+    """Assign a review-oriented class to suspicious findings.
+
+    This does not lower severity and does not mark findings as allowed. It only
+    makes the remaining review backlog more readable for dashboards and planning.
+    """
+    if severity != "suspicious":
+        return "not_applicable"
+
+    lowered = " ".join((path, function, category, call, context, reason)).lower()
+
+    static_set_call = (
+        call == "set"
+        or context.strip().startswith("set(")
+        or " set(" in f" {context.lower()}"
+        or "= set()" in lowered
+        or "= set(" in lowered
+        or ": set[" in lowered
+        or ".setdefault(" in lowered
+        or "caps = set(" in lowered
+        or "merged: set" in lowered
+        or "set()" in lowered
+    )
+    if static_set_call and not any(
+        token in lowered
+        for token in ("redis.", "self._redis", "await redis", "await self._redis", "pipe.")
+    ):
+        return "false_positive_static"
+
+
+    if (
+        " set(" in f" {context.lower()}"
+        or "= set()" in lowered
+        or ": set[" in lowered
+        or ".setdefault(" in lowered
+        or "caps = set(" in lowered
+        or "merged: set" in lowered
+    ) and "redis" not in lowered and "_redis" not in lowered:
+        return "false_positive_static"
+
+    if "lua" in path or "evalsha" in lowered or "eval(" in lowered or category in {"lua_mutation", "lua_script_mutation"}:
+        return "lua_atomic_boundary"
+
+    if any(token in lowered for token in ("budget", "governance", "ledger", "signed_ledger")):
+        return "governance_local"
+
+    if any(token in lowered for token in ("obs/", "audit_store", "decision_trace", "metrics", "prometheus", "graph_store", "run_graph", "operational_metrics")):
+        return "observability_only"
+
+    if any(token in lowered for token in ("leader", "shard", "reservation", "idempotency", "token", "owner", "ttl", "fence", "heartbeat")):
+        return "lease_or_fencing"
+
+    if any(token in lowered for token in ("rate_limit", "admission", "tenant_registry", "tenant_queue", "fairness", "inflight", "vruntime")):
+        return "rate_limit_or_admission"
+
+    if any(token in lowered for token in ("recovery", "reconcile", "reconciliation", "failure_sweeper", "healing", "dead_letter", "dlq")):
+        return "recovery_or_reconciliation"
+
+    if any(token in lowered for token in ("worker", "effect_ledger", "effect", "drain", "consumer")):
+        return "worker_or_effect_telemetry"
+
+    return "true_authority_review"
 
 
 def _call_attr(node: ast.Call) -> str:
@@ -425,6 +522,15 @@ def scan_lua_file(path: Path, repo_root: Path) -> list[AuditFinding]:
                 reason=reason,
                 context=line.strip(),
                 function="<lua>",
+                suspicious_class=_classify_suspicious(
+                    severity=severity,
+                    path=rel,
+                    function="<lua>",
+                    category="lua_script_mutation",
+                    call=call,
+                    context=line.strip(),
+                    reason=reason,
+                ),
                 risk_score=_risk_score(severity),
             )
         )
@@ -481,17 +587,37 @@ def heatmap(summary: AuditSummary) -> list[dict[str, object]]:
     for finding in summary.findings:
         entry = files.setdefault(
             finding.path,
-            {"path": finding.path, "allowed": 0, "suspicious": 0, "banned": 0, "risk_score": 0},
+            {
+                "path": finding.path,
+                "allowed": 0,
+                "suspicious": 0,
+                "banned": 0,
+                "risk_score": 0,
+                "class_counts": {},
+            },
         )
         entry[finding.severity] = int(entry[finding.severity]) + 1
         entry["risk_score"] = int(entry["risk_score"]) + finding.risk_score
+        class_counts = entry.setdefault("class_counts", {})
+        if finding.severity == "suspicious":
+            class_counts[finding.suspicious_class] = int(class_counts.get(finding.suspicious_class, 0)) + 1
     return sorted(files.values(), key=lambda item: int(item["risk_score"]), reverse=True)
+
+
+def suspicious_class_counts(summary: AuditSummary) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for finding in summary.findings:
+        if finding.severity != "suspicious":
+            continue
+        counts[finding.suspicious_class] = counts.get(finding.suspicious_class, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
 def summary_to_dashboard(summary: AuditSummary) -> dict[str, object]:
     return {
         "authority_status": summary.status,
         "risk_score": sum(f.risk_score for f in summary.findings),
+        "suspicious_classes": suspicious_class_counts(summary),
         "counts": {
             "allowed": summary.allowed,
             "suspicious": summary.suspicious,
@@ -516,7 +642,8 @@ def emit_text(summary: AuditSummary, *, max_findings: int) -> str:
         for finding in summary.findings[:max_findings]:
             lines.append(
                 f"- [{finding.severity.upper()}] {finding.path}:{finding.line} "
-                f"{finding.function} {finding.category} {finding.call} :: {finding.reason}"
+                f"{finding.function} {finding.category} {finding.call} "
+                f"class={finding.suspicious_class} :: {finding.reason}"
             )
         if len(summary.findings) > max_findings:
             lines.append(f"... {len(summary.findings) - max_findings} more findings")
@@ -572,3 +699,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
