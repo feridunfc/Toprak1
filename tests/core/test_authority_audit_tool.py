@@ -251,7 +251,7 @@ def test_authority_audit_lua_boundary_subclassification(tmp_path: Path) -> None:
 
     classes = {finding.suspicious_class for finding in result.findings}
 
-    assert "lua_scheduler_fallback" in classes
+    assert "scheduler_state_fallback_review" in classes
     assert "lua_authority_transition" in classes
     assert "lua_atomic_projection" in classes
 
@@ -278,3 +278,32 @@ def test_authority_audit_lua_projection_has_low_risk(tmp_path: Path, capsys) -> 
     assert payload["lua_projection_risk_count"] == 1
     assert payload["risk_bearing_suspicious"] == 0
     assert payload["risk_score"] == 1
+
+
+def test_authority_audit_scheduler_fallback_subclassification(tmp_path: Path) -> None:
+    repo = tmp_path
+    target = repo / "hfa-control" / "src" / "hfa_control" / "scheduler_lua.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "async def _commit_fallback(redis, pipe):\n"
+        "    pipe.hset('meta', mapping={'state': 'running'})\n"
+        "    pipe.xadd('control_stream', {'event': 'scheduled'})\n"
+        "    await pipe.execute()\n",
+        encoding="utf-8",
+    )
+
+    result = authority_audit.run_audit(repo, scan_dirs=("hfa-control/src",), include_lua=False)
+    classes = [finding.suspicious_class for finding in result.findings]
+
+    assert "scheduler_state_fallback_review" in classes
+    assert "scheduler_event_backed_fallback" not in classes
+    assert "lua_scheduler_fallback" not in classes
+    assert any(
+        finding.category == "event_append" and finding.severity == "allowed"
+        for finding in result.findings
+    )
+    assert all(
+        finding.risk_score == 5
+        for finding in result.findings
+        if finding.suspicious_class == "scheduler_state_fallback_review"
+    )
