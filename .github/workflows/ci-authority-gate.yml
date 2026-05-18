@@ -1,4 +1,4 @@
-name: Authority Gate
+﻿name: Authority Gate
 
 on:
   pull_request:
@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - baseline/local-import
+      - sprint/11-authority-evidence-hardening
 
 jobs:
   authority-gate:
@@ -25,19 +26,27 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      # Sprint 8 hard requirement:
-      # The new audit/smoke tooling itself must pass.
-      - name: Run Sprint 8 tool tests
+      - name: Run authority tool tests
         run: |
           python -m pytest tests/core/test_authority_audit_tool.py tests/core/test_full_auto_smoke_script.py -q --tb=short
 
-      # Sprint 8 is a baseline/reporting sprint.
-      # Known repo risks must be reported, not block this PR.
-      - name: Generate authority audit baseline report
+      - name: Generate authority dashboard artifact
         run: |
-          python scripts/authority_audit.py --repo-root . --format text --fail-on none
-          python scripts/authority_audit.py --repo-root . --heatmap --fail-on none
-          python scripts/authority_audit.py --repo-root . --format dashboard --fail-on none
+          mkdir -p docs/dashboard/artifacts
+          python scripts/authority_audit.py --repo-root . --format dashboard --output docs/dashboard/artifacts/latest_authority.json --fail-on banned
+
+      - name: Generate authority heatmap
+        run: |
+          python scripts/authority_audit.py --repo-root . --heatmap --fail-on none > docs/dashboard/artifacts/latest_authority_heatmap.json
+
+      - name: Upload authority evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: authority-evidence
+          path: |
+            docs/dashboard/artifacts/latest_authority.json
+            docs/dashboard/artifacts/latest_authority_heatmap.json
+          if-no-files-found: error
 
       - name: Smoke command dry run
         run: |
