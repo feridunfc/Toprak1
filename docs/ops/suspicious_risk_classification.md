@@ -51,3 +51,16 @@ Dashboard payload now includes:
 
 This keeps the backlog transparent while separating broad static scanner noise
 from risk-bearing authority review work.
+
+## Sprint 10C — Observability-only Risk Separation
+
+`observability_only` findings remain `suspicious` because they are real writes,
+but they are non-terminal telemetry/observability paths. They now contribute a
+reduced `risk_score` of `1` instead of `5`.
+
+Dashboard payload now includes:
+
+- `telemetry_risk_count`
+
+`risk_bearing_suspicious` excludes both `false_positive_static` and
+`observability_only`, while `suspicious` still includes all visible backlog.
