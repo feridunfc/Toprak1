@@ -38,3 +38,16 @@ Suspicious findings can be classified as:
 
 Sprint 10B can use these classes to burn down false positives and low-risk
 observability findings without hiding true authority-review work.
+
+## Sprint 10B — Static Noise Burn-down
+
+`false_positive_static` findings remain `suspicious` so they stay visible in
+audit output, but they no longer contribute to `risk_score`.
+
+Dashboard payload now includes:
+
+- `noise_count`
+- `risk_bearing_suspicious`
+
+This keeps the backlog transparent while separating broad static scanner noise
+from risk-bearing authority review work.

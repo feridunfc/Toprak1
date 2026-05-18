@@ -213,6 +213,15 @@ class AuthorityVisitor(ast.NodeVisitor):
         reason: str,
         context: str,
     ) -> AuditFinding:
+        suspicious_class = _classify_suspicious(
+            severity=severity,
+            path=self.rel_path,
+            function=self.current_function,
+            category=category,
+            call=call,
+            context=context,
+            reason=reason,
+        )
         return AuditFinding(
             severity=severity,
             path=self.rel_path,
@@ -222,16 +231,12 @@ class AuthorityVisitor(ast.NodeVisitor):
             reason=reason,
             context=context,
             function=self.current_function,
-            suspicious_class=_classify_suspicious(
-                severity=severity,
-                path=self.rel_path,
-                function=self.current_function,
-                category=category,
-                call=call,
-                context=context,
-                reason=reason,
+            suspicious_class=suspicious_class,
+            risk_score=_risk_score(
+                severity,
+                self.rel_path in CRITICAL_RUNTIME_FILES,
+                suspicious_class,
             ),
-            risk_score=_risk_score(severity, self.rel_path in CRITICAL_RUNTIME_FILES),
         )
 
     def _record_pipeline_commit(self, node: ast.Call, attr_name: str, func_name: str) -> None:
@@ -454,7 +459,13 @@ def _looks_like_pipeline_commit(node: ast.Call) -> bool:
     return any(token in target for token in ("pipe", "pipeline", "txn", "transaction"))
 
 
-def _risk_score(severity: Severity, critical: bool = False) -> int:
+def _risk_score(
+    severity: Severity,
+    critical: bool = False,
+    suspicious_class: SuspiciousClass = "not_applicable",
+) -> int:
+    if severity == "suspicious" and suspicious_class == "false_positive_static":
+        return 0
     base = {"allowed": 0, "suspicious": 5, "banned": 100}[severity]
     return base + (25 if critical and severity != "allowed" else 0)
 
@@ -512,6 +523,15 @@ def scan_lua_file(path: Path, repo_root: Path) -> list[AuditFinding]:
         else:
             severity = "suspicious"
             reason = "Lua write command; review atomic authority invariants"
+        suspicious_class = _classify_suspicious(
+            severity=severity,
+            path=rel,
+            function="<lua>",
+            category="lua_script_mutation",
+            call=call,
+            context=line.strip(),
+            reason=reason,
+        )
         findings.append(
             AuditFinding(
                 severity=severity,
@@ -522,16 +542,8 @@ def scan_lua_file(path: Path, repo_root: Path) -> list[AuditFinding]:
                 reason=reason,
                 context=line.strip(),
                 function="<lua>",
-                suspicious_class=_classify_suspicious(
-                    severity=severity,
-                    path=rel,
-                    function="<lua>",
-                    category="lua_script_mutation",
-                    call=call,
-                    context=line.strip(),
-                    reason=reason,
-                ),
-                risk_score=_risk_score(severity),
+                suspicious_class=suspicious_class,
+                risk_score=_risk_score(severity, suspicious_class=suspicious_class),
             )
         )
     return findings
@@ -613,10 +625,30 @@ def suspicious_class_counts(summary: AuditSummary) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
+def noise_count(summary: AuditSummary) -> int:
+    return sum(
+        1
+        for finding in summary.findings
+        if finding.severity == "suspicious"
+        and finding.suspicious_class == "false_positive_static"
+    )
+
+
+def risk_bearing_suspicious_count(summary: AuditSummary) -> int:
+    return sum(
+        1
+        for finding in summary.findings
+        if finding.severity == "suspicious"
+        and finding.suspicious_class != "false_positive_static"
+    )
+
+
 def summary_to_dashboard(summary: AuditSummary) -> dict[str, object]:
     return {
         "authority_status": summary.status,
         "risk_score": sum(f.risk_score for f in summary.findings),
+        "noise_count": noise_count(summary),
+        "risk_bearing_suspicious": risk_bearing_suspicious_count(summary),
         "suspicious_classes": suspicious_class_counts(summary),
         "counts": {
             "allowed": summary.allowed,
