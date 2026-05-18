@@ -88,3 +88,24 @@ Dashboard payload now includes:
 - `lua_projection_risk_count`
 
 `lua_authority_transition` and `lua_scheduler_fallback` remain risk-bearing.
+
+## Sprint 10F — Scheduler Fallback Authority Review
+
+Sprint 10F splits broad scheduler fallback Lua findings into more actionable
+review buckets without changing risk score:
+
+- `scheduler_event_backed_fallback`
+- `scheduler_state_fallback_review`
+
+Both remain `suspicious` and risk-bearing. This sprint is classification-only:
+it separates event-backed fallback writes from state/pipeline fallback review
+items so a later sprint can review invariants safely.
+
+### Sprint 10F note
+
+In the current audit model, scheduler fallback event appends are classified as
+`allowed` event paths, so they may appear with `suspicious_class:
+not_applicable` instead of `scheduler_event_backed_fallback`.
+
+The risk-bearing scheduler fallback backlog is currently represented by
+`scheduler_state_fallback_review`.

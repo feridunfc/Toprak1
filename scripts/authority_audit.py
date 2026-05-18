@@ -31,6 +31,8 @@ SuspiciousClass = Literal[
     "lua_atomic_boundary",
     "lua_authority_transition",
     "lua_scheduler_fallback",
+    "scheduler_event_backed_fallback",
+    "scheduler_state_fallback_review",
     "lua_atomic_projection",
     "lease_or_fencing",
     "rate_limit_or_admission",
@@ -382,7 +384,18 @@ def _classify_suspicious(
                 "fallback",
             )
         ):
-            return "lua_scheduler_fallback"
+            if any(
+                token in lowered
+                for token in (
+                    ".xadd",
+                    " xadd",
+                    "event_append",
+                    "control_stream",
+                    "shard_stream",
+                )
+            ):
+                return "scheduler_event_backed_fallback"
+            return "scheduler_state_fallback_review"
 
         if any(
             token in lowered
