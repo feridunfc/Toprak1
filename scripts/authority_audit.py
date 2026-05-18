@@ -768,6 +768,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strict", action="store_true", help="Alias for --fail-on suspicious.")
     parser.add_argument("--no-lua", action="store_true", help="Disable Lua script scanning.")
     parser.add_argument("--include", action="append", default=[], help="Additional directory to scan.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional file path to write text/json/dashboard output artifact.",
+    )
     return parser
 
 
@@ -784,11 +790,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.heatmap:
         print(json.dumps(heatmap(summary), indent=2, sort_keys=True))
     elif args.format == "json":
-        print(json.dumps(asdict(summary), indent=2, sort_keys=True))
+        rendered = json.dumps(asdict(summary), indent=2, sort_keys=True)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
     elif args.format == "dashboard":
-        print(json.dumps(summary_to_dashboard(summary), indent=2, sort_keys=True))
+        rendered = json.dumps(summary_to_dashboard(summary), indent=2, sort_keys=True)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
     else:
-        print(emit_text(summary, max_findings=args.max_findings))
+        rendered = emit_text(summary, max_findings=args.max_findings)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
 
     fail_on = "suspicious" if args.strict else args.fail_on
     if fail_on == "none":

@@ -307,3 +307,33 @@ def test_authority_audit_scheduler_fallback_subclassification(tmp_path: Path) ->
         for finding in result.findings
         if finding.suspicious_class == "scheduler_state_fallback_review"
     )
+
+
+def test_authority_audit_writes_dashboard_output_artifact(tmp_path: Path, capsys) -> None:
+    repo = tmp_path
+    target = repo / "hfa-core" / "src" / "hfa" / "obs" / "graph_store.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "async def save(redis):\n    await redis.set('graph:snapshot', '1')\n",
+        encoding="utf-8",
+    )
+    output = repo / "docs" / "dashboard" / "artifacts" / "latest_authority.json"
+
+    code = authority_audit.main([
+        "--repo-root",
+        str(repo),
+        "--format",
+        "dashboard",
+        "--output",
+        str(output),
+        "--fail-on",
+        "none",
+    ])
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    printed = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert output.exists()
+    assert payload["authority_status"] == "PASS_WITH_RISKS"
+    assert payload == printed
