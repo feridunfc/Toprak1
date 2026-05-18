@@ -59,4 +59,8 @@ The current engineering target is to keep `Banned: 0` while reducing risk-bearin
 - 11B: add current state and readiness checklist.
 - 11C: add dashboard artifact read-model verification.
 - 11D: add replay evidence gate plan.
-- 11E: classify governance local review paths.
+- 12A: document replay evidence gate plan.
+
+## Sprint 12 status
+
+Sprint 12 starts the replay evidence gate work. Current replay dashboard support is readiness-only; artifact-backed replay evidence is planned next.

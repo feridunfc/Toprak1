@@ -34,7 +34,7 @@ Toprak1 is not yet production-ready. The audit and dashboard evidence tooling ar
 
 - [x] Redis/Lua task lifecycle has atomic dispatch/claim/complete/requeue foundations.
 - [x] Tenant isolation, rate limiting, fairness, reservation, and fencing patterns exist.
-- [ ] Replay compare must become a release gate.
+- [ ] Replay compare must become a release gate. Sprint 12 started with replay evidence gate planning.
 - [ ] Cold restart and in-flight recovery semantics must be proven.
 - [ ] Archive and replay semantics must be documented and tested.
 - [ ] Worker lifecycle under Redis failover/network partition must be hardened.
