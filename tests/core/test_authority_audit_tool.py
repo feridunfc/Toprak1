@@ -135,3 +135,36 @@ def test_authority_audit_lua_scanner_reports_mutations(tmp_path: Path) -> None:
     result = authority_audit.run_audit(repo, scan_dirs=(), include_lua=True)
     assert result.suspicious == 1
     assert result.findings[0].category == "lua_script_mutation"
+
+
+def test_authority_audit_suspicious_classification_shape(tmp_path: Path, capsys) -> None:
+    repo = tmp_path
+    target = repo / "hfa-core" / "src" / "hfa" / "governance" / "budget_guard.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "async def maybe(redis):\n    await redis.set('budget:tenant:1:spent', '10')\n",
+        encoding="utf-8",
+    )
+
+    code = authority_audit.main(["--repo-root", str(repo), "--format", "dashboard", "--fail-on", "none"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["findings"][0]["suspicious_class"] == "governance_local"
+    assert payload["suspicious_classes"]["governance_local"] == 1
+    assert payload["heatmap"][0]["class_counts"]["governance_local"] == 1
+
+
+def test_authority_audit_false_positive_static_classification(tmp_path: Path) -> None:
+    repo = tmp_path
+    target = repo / "hfa-control" / "src" / "hfa_control" / "worker_scoring.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def score(worker):\n    caps = set(getattr(worker, 'capabilities', ()) or ())\n    return caps\n",
+        encoding="utf-8",
+    )
+
+    result = authority_audit.run_audit(repo, scan_dirs=("hfa-control/src",), include_lua=False)
+
+    assert result.suspicious == 1
+    assert result.findings[0].suspicious_class == "false_positive_static"

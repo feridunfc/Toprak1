@@ -43,7 +43,9 @@ function FindingsList({ findings }) {
         <article className="finding" key={`${finding.path}-${finding.line}-${index}`}>
           <div><StatusBadge status={finding.severity} /> <span className="mono path">{finding.path}:{finding.line}</span></div>
           <p>{finding.reason}</p>
-          <small className="mono">{finding.function} · {finding.category} · {finding.call}</small>
+          <small className="mono">
+            {finding.suspicious_class || "not_applicable"} · {finding.function} · {finding.category} · {finding.call}
+          </small>
         </article>
       ))}</div>
     </section>
