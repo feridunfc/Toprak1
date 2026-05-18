@@ -254,3 +254,27 @@ def test_authority_audit_lua_boundary_subclassification(tmp_path: Path) -> None:
     assert "lua_scheduler_fallback" in classes
     assert "lua_authority_transition" in classes
     assert "lua_atomic_projection" in classes
+
+
+def test_authority_audit_lua_projection_has_low_risk(tmp_path: Path, capsys) -> None:
+    repo = tmp_path
+    target = repo / "hfa-core" / "src" / "hfa" / "lua" / "loader.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "async def run(redis):\n    return await redis.eval('return 1', 0)\n",
+        encoding="utf-8",
+    )
+
+    result = authority_audit.run_audit(repo, scan_dirs=("hfa-core/src",), include_lua=False)
+
+    assert result.suspicious == 1
+    assert result.findings[0].suspicious_class == "lua_atomic_projection"
+    assert result.findings[0].risk_score == 1
+
+    code = authority_audit.main(["--repo-root", str(repo), "--format", "dashboard", "--fail-on", "none"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["lua_projection_risk_count"] == 1
+    assert payload["risk_bearing_suspicious"] == 0
+    assert payload["risk_score"] == 1

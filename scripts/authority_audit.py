@@ -498,6 +498,8 @@ def _risk_score(
         return 0
     if severity == "suspicious" and suspicious_class == "observability_only":
         return 1
+    if severity == "suspicious" and suspicious_class == "lua_atomic_projection":
+        return 1
     base = {"allowed": 0, "suspicious": 5, "banned": 100}[severity]
     return base + (25 if critical and severity != "allowed" else 0)
 
@@ -671,7 +673,20 @@ def risk_bearing_suspicious_count(summary: AuditSummary) -> int:
         1
         for finding in summary.findings
         if finding.severity == "suspicious"
-        and finding.suspicious_class not in {"false_positive_static", "observability_only"}
+        and finding.suspicious_class not in {
+            "false_positive_static",
+            "observability_only",
+            "lua_atomic_projection",
+        }
+    )
+
+
+def lua_projection_risk_count(summary: AuditSummary) -> int:
+    return sum(
+        1
+        for finding in summary.findings
+        if finding.severity == "suspicious"
+        and finding.suspicious_class == "lua_atomic_projection"
     )
 
 
@@ -690,6 +705,7 @@ def summary_to_dashboard(summary: AuditSummary) -> dict[str, object]:
         "risk_score": sum(f.risk_score for f in summary.findings),
         "noise_count": noise_count(summary),
         "telemetry_risk_count": telemetry_risk_count(summary),
+        "lua_projection_risk_count": lua_projection_risk_count(summary),
         "risk_bearing_suspicious": risk_bearing_suspicious_count(summary),
         "suspicious_classes": suspicious_class_counts(summary),
         "counts": {
