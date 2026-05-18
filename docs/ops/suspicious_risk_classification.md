@@ -64,3 +64,15 @@ Dashboard payload now includes:
 
 `risk_bearing_suspicious` excludes both `false_positive_static` and
 `observability_only`, while `suspicious` still includes all visible backlog.
+
+## Sprint 10D — Lua Atomic Boundary Classification
+
+Sprint 10D splits broad `lua_atomic_boundary` findings into more actionable
+review buckets without changing risk score:
+
+- `lua_authority_transition`
+- `lua_scheduler_fallback`
+- `lua_atomic_projection`
+
+The goal is classification only. Lua findings remain visible and risk-bearing
+until a later sprint reviews invariants per bucket.

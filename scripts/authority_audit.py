@@ -29,6 +29,9 @@ SuspiciousClass = Literal[
     "governance_local",
     "observability_only",
     "lua_atomic_boundary",
+    "lua_authority_transition",
+    "lua_scheduler_fallback",
+    "lua_atomic_projection",
     "lease_or_fencing",
     "rate_limit_or_admission",
     "recovery_or_reconciliation",
@@ -370,7 +373,34 @@ def _classify_suspicious(
         return "false_positive_static"
 
     if "lua" in path or "evalsha" in lowered or "eval(" in lowered or category in {"lua_mutation", "lua_script_mutation"}:
-        return "lua_atomic_boundary"
+        if any(
+            token in lowered
+            for token in (
+                "scheduler_lua",
+                "_enqueue_fallback",
+                "_commit_fallback",
+                "fallback",
+            )
+        ):
+            return "lua_scheduler_fallback"
+
+        if any(
+            token in lowered
+            for token in (
+                "state_transition",
+                "task_complete",
+                "task_claim_start",
+                "task_dispatch_commit",
+                "dispatch_commit",
+                "task_admit",
+                "enqueue_admitted",
+                "reserve_worker",
+                "rate_limit.lua",
+            )
+        ):
+            return "lua_authority_transition"
+
+        return "lua_atomic_projection"
 
     if any(token in lowered for token in ("budget", "governance", "ledger", "signed_ledger")):
         return "governance_local"
