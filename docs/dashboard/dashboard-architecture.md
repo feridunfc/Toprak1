@@ -78,3 +78,12 @@ $env:HFA_DASHBOARD_REPO_ROOT="C:\Users\FCY\PycharmProjects\TOPRAK1"
 - Dashboard does not import control-plane mutators.
 - Dashboard does not append events.
 - Quarantine decisions remain out of scope until a later sprint.
+
+
+## Sprint 11A - Authority Artifact Integration
+
+Authority audit can now emit dashboard JSON to a local artifact path:
+
+    python scripts/authority_audit.py --repo-root . --format dashboard --output docs/dashboard/artifacts/latest_authority.json --fail-on none
+
+Dashboard authority read model can use this generated artifact as the read-only CI/local snapshot source. Generated JSON artifacts under docs/dashboard/artifacts are ignored by git.
