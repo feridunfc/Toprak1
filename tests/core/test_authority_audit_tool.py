@@ -168,3 +168,27 @@ def test_authority_audit_false_positive_static_classification(tmp_path: Path) ->
 
     assert result.suspicious == 1
     assert result.findings[0].suspicious_class == "false_positive_static"
+
+
+def test_authority_audit_false_positive_static_has_zero_risk(tmp_path: Path, capsys) -> None:
+    repo = tmp_path
+    target = repo / "hfa-control" / "src" / "hfa_control" / "worker_scoring.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def score(worker):\n    caps = set(getattr(worker, 'capabilities', ()) or ())\n    return caps\n",
+        encoding="utf-8",
+    )
+
+    result = authority_audit.run_audit(repo, scan_dirs=("hfa-control/src",), include_lua=False)
+
+    assert result.suspicious == 1
+    assert result.findings[0].suspicious_class == "false_positive_static"
+    assert result.findings[0].risk_score == 0
+
+    code = authority_audit.main(["--repo-root", str(repo), "--format", "dashboard", "--fail-on", "none"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["noise_count"] == 1
+    assert payload["risk_bearing_suspicious"] == 0
+    assert payload["risk_score"] == 0
