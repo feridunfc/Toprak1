@@ -76,3 +76,15 @@ review buckets without changing risk score:
 
 The goal is classification only. Lua findings remain visible and risk-bearing
 until a later sprint reviews invariants per bucket.
+
+## Sprint 10E — Lua Projection Risk Reduction
+
+`lua_atomic_projection` findings remain `suspicious`, but they are separated
+from authority-transition Lua and scheduler fallback Lua. They now contribute a
+reduced `risk_score` of `1`.
+
+Dashboard payload now includes:
+
+- `lua_projection_risk_count`
+
+`lua_authority_transition` and `lua_scheduler_fallback` remain risk-bearing.
