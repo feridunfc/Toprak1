@@ -39,13 +39,18 @@ jobs:
         run: |
           python scripts/authority_audit.py --repo-root . --heatmap --fail-on none > docs/dashboard/artifacts/latest_authority_heatmap.json
 
-      - name: Upload authority evidence artifacts
+      - name: Generate replay evidence artifact
+        run: |
+          python scripts/replay_compare.py --json --output docs/dashboard/artifacts/latest_replay.json
+
+      - name: Upload authority and replay evidence artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: authority-evidence
+          name: authority-replay-evidence
           path: |
             docs/dashboard/artifacts/latest_authority.json
             docs/dashboard/artifacts/latest_authority_heatmap.json
+            docs/dashboard/artifacts/latest_replay.json
           if-no-files-found: error
 
       - name: Smoke command dry run

@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from dataclasses import asdict, dataclass
 
 _FALSE_VALUES = {"", "0", "false", "False", "no", "NO", "off", "OFF"}
@@ -79,6 +80,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--replay-clean", choices=("true", "false"), default="true")
     p.add_argument("--deterministic-replay-ok", choices=("true", "false"), default="true")
     p.add_argument("--json", action="store_true", help="print machine-readable result")
+    p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional file path to write replay evidence JSON artifact.",
+    )
     return p
 
 
@@ -92,8 +99,19 @@ def main(argv: list[str] | None = None) -> int:
         duplicates_detected=args.duplicates_detected,
         integrity_issue=args.integrity_issue,
     )
+    payload = asdict(result)
+    payload["mode"] = "read-only"
+    payload["source"] = "replay_compare"
+    payload["replay_status"] = "FAIL" if result.exit_code else "PASS"
+
+    rendered = json.dumps(payload, sort_keys=True)
+
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+
     if args.json:
-        print(json.dumps(asdict(result), sort_keys=True))
+        print(rendered)
     elif result.exit_code:
         print(f"REPLAY_COMPARE_FAIL: {result.reason}", file=sys.stderr)
     else:

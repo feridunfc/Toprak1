@@ -59,4 +59,28 @@ The current engineering target is to keep `Banned: 0` while reducing risk-bearin
 - 11B: add current state and readiness checklist.
 - 11C: add dashboard artifact read-model verification.
 - 11D: add replay evidence gate plan.
-- 11E: classify governance local review paths.
+- 12A: document replay evidence gate plan.
+
+## Sprint 12 status
+
+Sprint 12 starts the replay evidence gate work. Current replay dashboard support is readiness-only; artifact-backed replay evidence is planned next.
+
+## Sprint 12 status
+
+Sprint 12 — Replay Evidence Gate MVP is complete.
+
+Completed:
+
+- 12A: Replay evidence gate plan documented.
+- 12B: `scripts/replay_compare.py` can emit read-only JSON artifacts via `--output`.
+- 12C: CI authority gate now generates and uploads `latest_replay.json`.
+- 12D: Dashboard replay read model reads `latest_replay.json` when present, reports invalid artifacts read-only, and falls back to readiness when absent.
+
+Latest verified Sprint 12 state:
+
+- Test suite slice: `26 passed`
+- Replay artifact status: `PASS`
+- Replay artifact mode: `read-only`
+- Replay artifact source: `replay_compare`
+- Dashboard replay source behavior: `artifact` when present, `readiness` when absent
+- Hard replay mismatch gate: planned for Sprint 13
