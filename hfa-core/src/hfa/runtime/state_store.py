@@ -372,9 +372,16 @@ class StateStore:
 
     async def create_run_meta(self, run_id: str, meta: dict[str, Any]) -> None:
         mapping = {str(k): str(v) for k, v in dict(meta).items()}
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility run metadata projection for legacy worker/read API.
+        # Authoritative lifecycle evidence remains event-gated/replay-audited.
         await _maybe_await(self._redis.hset(self._run_meta_key(run_id), mapping=mapping))
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # TTL maintenance for compatibility run metadata projection.
         await _maybe_await(self._redis.expire(self._run_meta_key(run_id), self.RUN_META_TTL_SECONDS))
         if "state" in mapping:
+            # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+            # Compatibility state projection seeded from run metadata.
             await _maybe_await(self._redis.set(self._run_state_key(run_id), mapping["state"], ex=self.RUN_STATE_TTL_SECONDS))
 
     async def get_run_meta(self, run_id: str) -> dict[str, Any]:
@@ -392,6 +399,9 @@ class StateStore:
         return state in {"done", "failed", "cancelled", "dead_lettered"}
 
     async def claim_execution(self, run_id: str, worker_id: str) -> bool:
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility claim key is a legacy worker fencing projection.
+        # NX claim semantics prevent concurrent worker ownership.
         claimed = await _maybe_await(self._redis.set(self._claim_key(run_id), worker_id, ex=self.CLAIM_TTL, nx=True))
         return bool(claimed)
 
@@ -405,6 +415,8 @@ class StateStore:
 
         import time
 
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Running metadata projection is written only after successful NX claim.
         await _maybe_await(
             self._redis.hset(
                 self._run_meta_key(run_id),
@@ -416,7 +428,11 @@ class StateStore:
                 },
             )
         )
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility running state projection mirrors claimed worker state.
         await _maybe_await(self._redis.set(self._run_state_key(run_id), "running", ex=self.RUN_STATE_TTL_SECONDS))
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Running ZSET is a compatibility/read-model projection for active runs.
         await _maybe_await(self._redis.zadd(self.RUNNING_ZSET, {run_id: time.time()}))
         return True
 
@@ -465,7 +481,12 @@ class StateStore:
             "error": error or "",
             "completed_at": str(time.time()),
         }
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility result projection for legacy run result API.
+        # Authoritative completion is emitted by the worker result event path.
         await _maybe_await(self._redis.hset(self._run_result_key(run_id), mapping=record))
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # TTL maintenance for compatibility result projection.
         await _maybe_await(self._redis.expire(self._run_result_key(run_id), self.RUN_META_TTL_SECONDS))
 
     async def get_run_result(self, run_id: str) -> dict[str, Any] | None:
