@@ -77,3 +77,15 @@ Production-like readiness requires:
 - [x] Dashboard replay read model reports invalid replay artifact read-only.
 - [x] Dashboard replay read model falls back to readiness when replay artifact is absent.
 - [ ] Replay mismatch hard gate is enabled in CI.
+
+## Sprint 14 Runtime Stabilization
+
+- [x] Runtime StateStore / WorkerConsumer compatibility inventory documented.
+- [x] `StateStore(redis)` compatibility restored and tested.
+- [x] Worker-facing lifecycle API compatibility restored and tested.
+- [x] `FakeExecutor` public import compatibility restored.
+- [x] Scheduler Lua duplicate fallback removed.
+- [x] Scheduler fallback semantics verified with CAS/no-side-effect tests.
+- [x] Explicit StateStore compatibility contract test added.
+- [ ] Deployment smoke repaired and verified with `docker compose config`.
+- [ ] Minimal Redis + control + worker local smoke verified.
