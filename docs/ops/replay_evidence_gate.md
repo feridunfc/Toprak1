@@ -39,3 +39,18 @@ Sprint 12 turns replay readiness into replay evidence:
 - Do not make dashboard execute replay.
 - Do not add replay write/mutation endpoints.
 - Do not claim production replay completeness until cold restart, archive/replay semantics, and staging replay fixtures are proven.
+
+## Sprint 13A — Replay hard gate readiness
+
+`replay_compare.py` already returns non-zero for hard replay evidence failures:
+
+- runtime/replay mismatch
+- replay gaps
+- duplicate events
+- integrity issue
+- replay not clean
+- deterministic replay failure
+
+CI can treat the replay evidence artifact step as a hard gate because the command exits with `1` for these failure cases while still writing `latest_replay.json` for debugging.
+
+The Sprint 13A test coverage locks this behavior down before changing broader CI policy.
