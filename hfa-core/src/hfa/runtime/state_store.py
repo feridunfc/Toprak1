@@ -68,7 +68,21 @@ from hfa_core.events.event_types import (
     TASK_FAILED,
 )
 
+
 logger = logging.getLogger(__name__)
+
+
+class _NoopLuaExecutor:
+    """Compatibility fallback for legacy StateStore(redis) callers.
+
+    Methods that require Lua should fail clearly if invoked without an injected
+    executor, while non-Lua compatibility methods can still operate directly
+    against Redis.
+    """
+
+    async def __call__(self, *args, **kwargs):
+        raise RuntimeError("StateStore Lua executor is not configured")
+
 
 _COMPLETION_SLICE_FALSE_VALUES = {"", "0", "false", "False", "no", "NO", "off", "OFF"}
 
@@ -176,11 +190,11 @@ class RedisControlStateStore(ControlStateStore):
     def __init__(
         self,
         redis_client: Any,
-        lua_executor: Any,
+        lua_executor: Any | None = None,
         policy: RedisCallPolicy | None = None,
     ) -> None:
         self._redis = redis_client
-        self._lua = lua_executor
+        self._lua = lua_executor or _NoopLuaExecutor()
         self._policy = policy or RedisCallPolicy(max_retries=3, base_delay_ms=100)
 
     async def reserve_worker(
@@ -267,7 +281,7 @@ class StateStore:
     def __init__(
         self,
         redis_client: Any,
-        lua_executor: Any,
+        lua_executor: Any | None = None,
         *,
         policy: RedisCallPolicy | None = None,
         event_store: EventStore | None = None,
@@ -280,7 +294,7 @@ class StateStore:
         control_store: ControlStateStore | None = None,
     ) -> None:
         self._redis = redis_client
-        self._lua = lua_executor
+        self._lua = lua_executor or _NoopLuaExecutor()
         _policy = policy or RedisCallPolicy(max_retries=3, base_delay_ms=100)
         self._policy = _policy
         self._event_store = event_store
@@ -295,7 +309,7 @@ class StateStore:
         else:
             self._control = RedisControlStateStore(
                 redis_client=redis_client,
-                lua_executor=lua_executor,
+                lua_executor=self._lua,
                 policy=_policy,
             )
 
@@ -316,6 +330,212 @@ class StateStore:
         *, run_id: str, task_id: str, worker_id: str, attempt: int
     ) -> str:
         return f"complete:{run_id}:{task_id}:worker:{worker_id}:attempt:{attempt}"
+
+
+    # ------------------------------------------------------------------
+    # Backward-compatible worker lifecycle API
+    # ------------------------------------------------------------------
+    # WorkerConsumer, IdempotencyGuard, and legacy run API tests depend on
+    # these methods. Keep this compatibility surface stable until callers are
+    # explicitly migrated to the newer control-plane runtime API.
+
+    RUN_META_TTL_SECONDS = 86400
+    RUN_STATE_TTL_SECONDS = 86400
+    CLAIM_TTL = 60
+    RUNNING_ZSET = "hfa:cp:running"
+
+    @staticmethod
+    def _run_meta_key(run_id: str) -> str:
+        return f"hfa:run:meta:{run_id}"
+
+    @staticmethod
+    def _run_state_key(run_id: str) -> str:
+        return f"hfa:run:state:{run_id}"
+
+    @staticmethod
+    def _run_result_key(run_id: str) -> str:
+        return f"hfa:run:result:{run_id}"
+
+    @staticmethod
+    def _claim_key(run_id: str) -> str:
+        return f"hfa:run:claim:{run_id}"
+
+    @staticmethod
+    def _decode(value: Any) -> Any:
+        if isinstance(value, bytes):
+            return value.decode()
+        return value
+
+    @classmethod
+    def _decode_mapping(cls, data: dict) -> dict[str, Any]:
+        return {cls._decode(k): cls._decode(v) for k, v in (data or {}).items()}
+
+    async def create_run_meta(self, run_id: str, meta: dict[str, Any]) -> None:
+        mapping = {str(k): str(v) for k, v in dict(meta).items()}
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility run metadata projection for legacy worker/read API.
+        # Authoritative lifecycle evidence remains event-gated/replay-audited.
+        await _maybe_await(self._redis.hset(self._run_meta_key(run_id), mapping=mapping))
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # TTL maintenance for compatibility run metadata projection.
+        await _maybe_await(self._redis.expire(self._run_meta_key(run_id), self.RUN_META_TTL_SECONDS))
+        if "state" in mapping:
+            # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+            # Compatibility state projection seeded from run metadata.
+            await _maybe_await(self._redis.set(self._run_state_key(run_id), mapping["state"], ex=self.RUN_STATE_TTL_SECONDS))
+
+    async def get_run_meta(self, run_id: str) -> dict[str, Any]:
+        return self._decode_mapping(await _maybe_await(self._redis.hgetall(self._run_meta_key(run_id))))
+
+    async def get_run_state(self, run_id: str) -> str | None:
+        return self._decode(await _maybe_await(self._redis.get(self._run_state_key(run_id))))
+
+    async def transition_state(self, run_id: str, state: str) -> None:
+        await _maybe_await(self._redis.set(self._run_state_key(run_id), state, ex=self.RUN_STATE_TTL_SECONDS))
+        await _maybe_await(self._redis.hset(self._run_meta_key(run_id), mapping={"state": state}))
+
+    async def is_terminal(self, run_id: str) -> bool:
+        state = await self.get_run_state(run_id)
+        return state in {"done", "failed", "cancelled", "dead_lettered"}
+
+    async def claim_execution(self, run_id: str, worker_id: str) -> bool:
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility claim key is a legacy worker fencing projection.
+        # NX claim semantics prevent concurrent worker ownership.
+        claimed = await _maybe_await(self._redis.set(self._claim_key(run_id), worker_id, ex=self.CLAIM_TTL, nx=True))
+        return bool(claimed)
+
+    async def mark_running(self, run_id: str, worker_id: str, worker_group: str, shard: int) -> bool:
+        if await self.is_terminal(run_id):
+            return False
+
+        claimed = await self.claim_execution(run_id, worker_id)
+        if not claimed:
+            return False
+
+        import time
+
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Running metadata projection is written only after successful NX claim.
+        await _maybe_await(
+            self._redis.hset(
+                self._run_meta_key(run_id),
+                mapping={
+                    "worker_id": worker_id,
+                    "worker_group": worker_group,
+                    "shard": str(shard),
+                    "state": "running",
+                },
+            )
+        )
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility running state projection mirrors claimed worker state.
+        await _maybe_await(self._redis.set(self._run_state_key(run_id), "running", ex=self.RUN_STATE_TTL_SECONDS))
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Running ZSET is a compatibility/read-model projection for active runs.
+        await _maybe_await(self._redis.zadd(self.RUNNING_ZSET, {run_id: time.time()}))
+        return True
+
+    async def get_claim_owner(self, run_id: str) -> str | None:
+        return self._decode(await _maybe_await(self._redis.get(self._claim_key(run_id))))
+
+    async def get_claim_ttl(self, run_id: str) -> int:
+        return int(await _maybe_await(self._redis.ttl(self._claim_key(run_id))))
+
+    async def renew_claim(self, run_id: str) -> bool:
+        owner = await self.get_claim_owner(run_id)
+        if owner is None:
+            return False
+        return bool(await _maybe_await(self._redis.expire(self._claim_key(run_id), self.CLAIM_TTL)))
+
+    async def release_claim(self, run_id: str) -> bool:
+        await _maybe_await(self._redis.zrem(self.RUNNING_ZSET, run_id))
+        return bool(await _maybe_await(self._redis.delete(self._claim_key(run_id))))
+
+    async def mark_completed(self, run_id: str) -> None:
+        await self.transition_state(run_id, "done")
+        await self.release_claim(run_id)
+
+    async def store_result(
+        self,
+        run_id: str,
+        tenant_id: str,
+        status: str,
+        payload: dict[str, Any],
+        cost_cents: int,
+        tokens_used: int,
+        *,
+        error: str | None = None,
+    ) -> None:
+        import json
+
+        import time
+
+        record = {
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "status": status,
+            "payload": json.dumps(payload or {}, sort_keys=True),
+            "cost_cents": str(cost_cents),
+            "tokens_used": str(tokens_used),
+            "error": error or "",
+            "completed_at": str(time.time()),
+        }
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # Compatibility result projection for legacy run result API.
+        # Authoritative completion is emitted by the worker result event path.
+        await _maybe_await(self._redis.hset(self._run_result_key(run_id), mapping=record))
+        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
+        # TTL maintenance for compatibility result projection.
+        await _maybe_await(self._redis.expire(self._run_result_key(run_id), self.RUN_META_TTL_SECONDS))
+
+    async def get_run_result(self, run_id: str) -> dict[str, Any] | None:
+        import json
+
+        data = self._decode_mapping(await _maybe_await(self._redis.hgetall(self._run_result_key(run_id))))
+        if not data:
+            return None
+        if "payload" in data:
+            try:
+                data["payload"] = json.loads(data["payload"])
+            except Exception:
+                data["payload"] = {}
+        for key in ("cost_cents", "tokens_used"):
+            if key in data:
+                data[key] = int(data[key])
+        if "completed_at" in data:
+            data["completed_at"] = float(data["completed_at"])
+        if data.get("error") == "":
+            data["error"] = None
+        return data
+
+    async def get_result(self, run_id: str) -> dict[str, Any] | None:
+        return await self.get_run_result(run_id)
+
+    async def get_running_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        raw = await _maybe_await(self._redis.zrange(self.RUNNING_ZSET, 0, max(limit - 1, 0), withscores=True))
+        rows: list[dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, tuple):
+                run_id_raw, score = item
+            else:
+                run_id_raw, score = item, 0
+            run_id = self._decode(run_id_raw)
+            meta = await self.get_run_meta(run_id)
+            started_at = meta.get("started_at") or meta.get("admitted_at") or score
+            try:
+                started_at = float(started_at)
+            except Exception:
+                started_at = float(score or 0)
+
+            rows.append({
+                "run_id": run_id,
+                "score": score,
+                "started_at": started_at,
+                "state": await self.get_run_state(run_id),
+                **meta,
+            })
+        return rows
 
     async def store_task_output(
         self,

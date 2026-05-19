@@ -84,3 +84,36 @@ Latest verified Sprint 12 state:
 - Replay artifact source: `replay_compare`
 - Dashboard replay source behavior: `artifact` when present, `readiness` when absent
 - Hard replay mismatch gate: planned for Sprint 13
+
+## Sprint 14 Runtime Stabilization
+
+Sprint 14A-14D completed on `fix/runtime-contracts`.
+
+Completed:
+
+- 14A: Runtime StateStore / WorkerConsumer compatibility inventory documented in `docs/architecture/runtime_contracts.md`.
+- 14B: Runtime compatibility contracts restored:
+  - `StateStore(redis)` legacy constructor compatibility.
+  - Worker-facing lifecycle API compatibility.
+  - `hfa_worker.executor.FakeExecutor` public import compatibility.
+- 14C: Scheduler Lua fallback unified:
+  - duplicate `_commit_fallback` removed.
+  - extended fallback signature retained for priority, payload, trace, policy, region, control stream, and shard stream.
+- 14D: Explicit StateStore compatibility contract test added.
+
+Latest verified mini-gate:
+
+- `30 passed`
+- Coverage:
+  - `tests/core/test_sprint14_state_store_compat_contract.py`
+  - `tests/core/test_sprint11_idempotency.py`
+  - `tests/core/test_sprint12_claim_renewal.py`
+  - `tests/core/test_sprint13_run_api.py`
+  - `tests/core/test_scheduler_lua_fallback_semantics.py`
+
+Production readiness impact:
+
+- Runtime compatibility drift reduced.
+- Scheduler fallback override risk removed.
+- Worker lifecycle compatibility is now explicitly tested.
+- Deployment smoke repair remains next.
