@@ -220,3 +220,47 @@ Production readiness impact:
 - Artifact-backed proof decisions are fail-closed.
 - Automatic recovery loop remains disabled.
 - Redis-backed mutation drill remains pending.
+
+## Sprint 19 Redis-Backed Recovery Requeue Drill
+
+Sprint 19A-19D completed on `sprint/19-redis-backed-recovery-requeue-drill`.
+
+Completed:
+
+- 19A: Redis-backed recovery requeue drill contract documented in `docs/ops/redis_backed_recovery_requeue_drill.md`.
+- 19B: Controlled single-task Redis-backed drill script added:
+  - `scripts/recovery_requeue_drill.py`
+  - seeds a stale DAG task candidate.
+  - writes clean replay/authority/recovery-audit proof artifacts.
+  - invokes `recovery_requeue.py --proof-mode artifacts` without dry-run.
+  - writes `docs/dashboard/artifacts/latest_recovery_requeue_drill.json`.
+- 19C: Drill artifact tests added:
+  - fake Redis is skipped as unsupported for Lua EVAL mutation drill.
+  - PASS artifact shape is locked.
+  - final recovery requeue artifact preserves artifact-backed proof metadata.
+- 19D: Recovery requeue drill artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- Real Redis local drill:
+  - `python scripts/recovery_requeue_drill.py --json`
+  - `status=PASS`
+  - `requeue_status=TASK_REQUEUED`
+  - `mutation_attempted=true`
+  - task moved from `running` to `ready`
+  - running zset removed
+  - ready queue score written
+  - `claim_epoch` remained monotonic/unchanged.
+- Sprint 19 mini-gate:
+  - `tests/core/test_recovery_requeue_drill.py`
+  - `tests/core/test_artifact_backed_recovery_proof.py`
+  - `tests/core/test_recovery_requeue.py`
+  - `tests/core/test_recovery_audit.py`
+  - `14 passed`
+
+Production readiness impact:
+
+- Artifact-backed proof can now authorize a real Redis-backed single-task requeue mutation.
+- Canonical mutation path is `TaskRecoveryManager.requeue_stale_task(...)`.
+- CI emits a skipped drill artifact under fake Redis because real Redis Lua EVAL is required.
+- Automatic recovery daemon remains disabled.

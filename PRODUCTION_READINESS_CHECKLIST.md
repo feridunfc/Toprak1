@@ -123,3 +123,19 @@ Production-like readiness requires:
 - [x] Authority Gate CI uses artifact-backed recovery requeue dry-run.
 - [ ] Redis-backed mutation drill remains required before production enablement.
 - [ ] Automatic recovery loop remains disabled.
+
+## Sprint 19 Redis-Backed Recovery Requeue Drill
+
+- [x] Redis-backed recovery requeue drill contract documented.
+- [x] Controlled single-task drill script added.
+- [x] Stale DAG task candidate seeded for drill.
+- [x] Artifact-backed proof PASS authorizes mutation.
+- [x] Canonical `TaskRecoveryManager.requeue_stale_task(...)` path used.
+- [x] Real Redis local drill reached `TASK_REQUEUED`.
+- [x] Task moved from running to ready.
+- [x] Running zset entry removed.
+- [x] Ready queue entry written.
+- [x] `claim_epoch` remains monotonic/unchanged on requeue.
+- [x] Drill artifact uploaded by Authority Gate CI.
+- [ ] Automatic recovery daemon remains disabled.
+- [ ] Staging cold restart drill remains required before production enablement.

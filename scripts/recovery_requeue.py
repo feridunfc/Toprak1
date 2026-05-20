@@ -316,6 +316,11 @@ async def proof_gated_requeue(
         requeue_status=str(result.status),
         requeue_count=int(getattr(result, "requeue_count", 0)),
         notes=notes,
+        proof_mode=proof_mode,
+        replay_artifact_status=artifact_proof.replay_status if artifact_proof else "not_used",
+        authority_artifact_status=artifact_proof.authority_status if artifact_proof else "not_used",
+        recovery_audit_artifact_status=artifact_proof.recovery_audit_status if artifact_proof else "not_used",
+        artifact_candidate_found=candidate is not None if artifact_proof else False,
     )
 
 
