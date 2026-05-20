@@ -48,7 +48,11 @@ jobs:
           python scripts/deployment_smoke.py --json
           python scripts/redis_failover_smoke.py --json
 
-      - name: Upload authority, replay, and deployment evidence artifacts
+      - name: Generate recovery audit artifact
+        run: |
+          USE_FAKE_REDIS=1 python scripts/recovery_audit.py --json
+
+      - name: Upload authority, replay, deployment, and recovery evidence artifacts
         uses: actions/upload-artifact@v4
         with:
           name: authority-replay-deployment-evidence
@@ -58,6 +62,7 @@ jobs:
             docs/dashboard/artifacts/latest_replay.json
             docs/dashboard/artifacts/latest_deployment_smoke.json
             docs/dashboard/artifacts/latest_redis_failover_smoke.json
+            docs/dashboard/artifacts/latest_recovery_audit.json
           if-no-files-found: error
 
       - name: Smoke command dry run
