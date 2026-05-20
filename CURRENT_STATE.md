@@ -117,3 +117,32 @@ Production readiness impact:
 - Scheduler fallback override risk removed.
 - Worker lifecycle compatibility is now explicitly tested.
 - Deployment smoke repair remains next.
+
+## Sprint 16 Cold Restart Recovery
+
+Sprint 16A-16D completed on `sprint/16-cold-restart-recovery`.
+
+Completed:
+
+- 16A: Cold restart + in-flight recovery contract documented in `docs/ops/cold_restart_recovery.md`.
+- 16B: Read-only recovery audit script added:
+  - `scripts/recovery_audit.py`
+  - inspects `hfa:cp:running`, run meta, run state, and claim TTLs.
+  - performs no Redis mutations.
+- 16C: Recovery audit candidate detection tests added.
+- 16D: Recovery audit artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/recovery_audit.py --json` with `USE_FAKE_REDIS=1`
+  - `status=PASS`
+  - `running_count=0`
+  - `candidate_count=0`
+- `tests/core/test_recovery_audit.py`
+  - `3 passed`
+
+Production readiness impact:
+
+- Cold restart recovery now has a read-only audit artifact.
+- Stale/missing/expired in-flight run candidates are classified before mutation.
+- Auto-recovery remains gated; no automatic requeue loop is enabled yet.
