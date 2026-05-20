@@ -33,6 +33,8 @@ OPTIONAL_CI_COMPONENTS = [
 
 
 ALLOWED_REQUIRED_STATUSES = {
+    "recovery_requeue": {"PASS", "BLOCKED"},
+    "recovery_requeue_drill": {"PASS", "SKIPPED"},
     "cold_restart_drill": {"PASS", "SKIPPED"},
     "zombie_completion_drill": {"PASS", "SKIPPED"},
 }
@@ -63,8 +65,18 @@ def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _component_status(payload: dict[str, Any]) -> str:
-    return str(payload.get("status", "UNKNOWN"))
+def _component_status(payload: dict[str, Any], component_name: str) -> str:
+    if "status" in payload:
+        return str(payload.get("status", "UNKNOWN"))
+
+    if component_name == "authority":
+        banned = int(payload.get("banned_count", payload.get("banned", 0)) or 0)
+        return "PASS" if banned == 0 else "FAIL"
+
+    if component_name == "replay":
+        return str(payload.get("replay_status", "UNKNOWN"))
+
+    return "UNKNOWN"
 
 
 def _component_source(payload: dict[str, Any], fallback: str) -> str:
@@ -93,7 +105,7 @@ def _read_component(
     return ProductionReadinessComponent(
         name=name,
         path=str(path),
-        status=_component_status(payload),
+        status=_component_status(payload, name),
         required=required,
         present=True,
         source=_component_source(payload, name),

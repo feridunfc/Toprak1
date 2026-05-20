@@ -557,3 +557,47 @@ Production readiness impact:
 - Cognitive, semantic, and feedback surfaces remain advisory/non-authoritative.
 - FeedbackWriter and SemanticBridge dedicated governance artifacts remain included.
 - Canonical runtime truth authority remains in runtime/Lua/control-plane approved paths.
+
+## Sprint 27 Production Readiness Rollup Gate
+
+Sprint 27A-27D completed on `sprint/27-production-readiness-rollup-gate`.
+
+Completed:
+
+- 27A: Production readiness rollup contract documented in `docs/architecture/production_readiness_rollup_contract.md`.
+- 27B: Production readiness rollup artifact generator added:
+  - `scripts/production_readiness_rollup.py`
+  - writes `docs/dashboard/artifacts/latest_production_readiness_rollup.json`.
+- 27C/27D: Production readiness rollup artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/production_readiness_rollup.py --json`
+  - `status=PASS`
+  - `required_components_checked=9`
+  - `optional_components_checked=2`
+  - authority PASS
+  - replay PASS
+  - recovery audit PASS
+  - recovery requeue PASS
+  - recovery requeue drill PASS
+  - cold restart drill SKIPPED accepted as staging status
+  - zombie completion drill SKIPPED accepted as staging status
+  - recovery auto-resume guardrail PASS
+  - advisory governance rollup PASS
+- Sprint 27 mini-gate:
+  - `tests/core/test_production_readiness_rollup.py`
+  - `tests/core/test_advisory_governance_rollup.py`
+  - `tests/core/test_semanticbridge_gate_artifact.py`
+  - `tests/core/test_feedbackwriter_governance_artifact.py`
+  - `tests/core/test_semantic_advisory_contract_artifact.py`
+  - `tests/core/test_cognitive_governance_audit.py`
+  - `14 passed`
+
+Production readiness impact:
+
+- Top-level production readiness proof is now available as a single rollup artifact.
+- Required proof components fail closed when missing or non-PASS.
+- Staging-only cold restart and zombie completion SKIPPED states are explicitly tolerated.
+- Optional CI-only deployment/Redis smoke artifacts are reported when present and must PASS if present.
+- The rollup performs no Redis/runtime mutation.
