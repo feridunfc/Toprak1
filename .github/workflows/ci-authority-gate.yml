@@ -83,6 +83,7 @@ jobs:
             docs/dashboard/artifacts/latest_recovery_requeue_drill.json
             docs/dashboard/artifacts/latest_cold_restart_drill.json
             docs/dashboard/artifacts/latest_zombie_completion_drill.json
+            docs/dashboard/artifacts/latest_zombie_completion_drill.json
           if-no-files-found: error
 
       - name: Smoke command dry run
