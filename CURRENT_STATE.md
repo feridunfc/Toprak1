@@ -314,3 +314,51 @@ Production readiness impact:
 - CI emits a skipped artifact under fake Redis because real Redis Lua EVAL is required.
 - Zombie/stale-owner completion rejection remains pending explicit completion harness integration.
 - Automatic recovery daemon remains disabled.
+
+## Sprint 21 Zombie Completion Rejection Drill
+
+Sprint 21A-21D completed on `sprint/21-zombie-completion-rejection-drill`.
+
+Completed:
+
+- 21A: Zombie completion rejection drill contract documented in `docs/ops/zombie_completion_rejection_drill.md`.
+- 21B: Zombie completion rejection drill added:
+  - `scripts/zombie_completion_drill.py`
+  - composes Redis-backed recovery requeue drill.
+  - attempts stale worker completion after requeue.
+  - writes `docs/dashboard/artifacts/latest_zombie_completion_drill.json`.
+- 21C: Zombie completion drill artifact behavior tests added:
+  - fake Redis is skipped as unsupported for Lua EVAL mutation drill.
+  - PASS artifact shape is locked.
+- 21D: Zombie completion drill artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- Real Redis zombie completion drill:
+  - `python scripts/zombie_completion_drill.py --json`
+  - `status=PASS`
+  - `recovery_requeue_status=TASK_REQUEUED`
+  - `zombie_completion_attempted=true`
+  - `zombie_completion_accepted=false`
+  - `zombie_completion_status=illegal_transition`
+  - `pre_requeue_claim_epoch=1`
+  - `post_requeue_claim_epoch=1`
+- Fake Redis CI-compatible artifact:
+  - `status=SKIPPED`
+  - `zombie_completion_status=REAL_REDIS_REQUIRED`
+- Sprint 21 mini-gate:
+  - `tests/core/test_zombie_completion_drill.py`
+  - `tests/core/test_cold_restart_drill.py`
+  - `tests/core/test_recovery_requeue_drill.py`
+  - `tests/core/test_artifact_backed_recovery_proof.py`
+  - `tests/core/test_recovery_requeue.py`
+  - `tests/core/test_recovery_audit.py`
+  - `18 passed`
+
+Production readiness impact:
+
+- Stale/zombie worker completion is now explicitly rejected after recovery requeue.
+- Requeue keeps `claim_epoch` monotonic/unchanged.
+- Requeue clears stale worker identity fields.
+- Post-requeue zombie completion fails closed via `illegal_transition`.
+- Automatic recovery daemon remains disabled.

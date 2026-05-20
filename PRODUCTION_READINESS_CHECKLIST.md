@@ -155,3 +155,18 @@ Production-like readiness requires:
 - [ ] Zombie/stale-owner completion rejection remains pending explicit completion harness integration.
 - [ ] Automatic recovery daemon remains disabled.
 - [ ] Production auto-enable remains blocked.
+
+## Sprint 21 Zombie Completion Rejection Drill
+
+- [x] Zombie completion rejection drill contract documented.
+- [x] Zombie completion rejection drill script added.
+- [x] Fake Redis skip behavior locked.
+- [x] Real Redis zombie completion drill reached `PASS`.
+- [x] Recovery requeue reached `TASK_REQUEUED`.
+- [x] Stale worker completion attempted after requeue.
+- [x] Stale worker completion rejected.
+- [x] Rejection status captured as `illegal_transition`.
+- [x] `claim_epoch` remains monotonic/unchanged across requeue.
+- [x] Zombie completion drill artifact uploaded by Authority Gate CI.
+- [ ] Automatic recovery daemon remains disabled.
+- [ ] Production auto-enable remains blocked.
