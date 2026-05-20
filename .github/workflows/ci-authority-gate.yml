@@ -68,6 +68,10 @@ jobs:
         run: |
           USE_FAKE_REDIS=1 python scripts/zombie_completion_drill.py --json
 
+      - name: Generate recovery auto-resume guardrail artifact
+        run: |
+          python scripts/recovery_auto_resume_guardrail.py --json
+
       - name: Upload authority, replay, deployment, and recovery evidence artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -83,6 +87,7 @@ jobs:
             docs/dashboard/artifacts/latest_recovery_requeue_drill.json
             docs/dashboard/artifacts/latest_cold_restart_drill.json
             docs/dashboard/artifacts/latest_zombie_completion_drill.json
+            docs/dashboard/artifacts/latest_recovery_auto_resume_guardrail.json
             docs/dashboard/artifacts/latest_zombie_completion_drill.json
           if-no-files-found: error
 
