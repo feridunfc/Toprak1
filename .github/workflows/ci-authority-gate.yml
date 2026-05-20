@@ -56,6 +56,10 @@ jobs:
         run: |
           USE_FAKE_REDIS=1 python scripts/recovery_requeue.py --run-id ci-missing-run --tenant-id ci --proof-mode artifacts --dry-run --json
 
+      - name: Generate recovery requeue drill artifact
+        run: |
+          USE_FAKE_REDIS=1 python scripts/recovery_requeue_drill.py --json
+
       - name: Upload authority, replay, deployment, and recovery evidence artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -68,6 +72,7 @@ jobs:
             docs/dashboard/artifacts/latest_redis_failover_smoke.json
             docs/dashboard/artifacts/latest_recovery_audit.json
             docs/dashboard/artifacts/latest_recovery_requeue.json
+            docs/dashboard/artifacts/latest_recovery_requeue_drill.json
           if-no-files-found: error
 
       - name: Smoke command dry run
