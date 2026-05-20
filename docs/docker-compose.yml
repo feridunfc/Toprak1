@@ -1,3 +1,12 @@
+# NOTE: Reference topology only.
+#
+# This file documents the intended production deployment topology.
+# It is not currently a build-ready root deployment manifest because this repo
+# does not include `hfa-control/Dockerfile` or `hfa-worker/Dockerfile`.
+#
+# Use the root `docker-compose.yml` for minimal Redis deployment smoke
+# validation. Use `docker-compose.integration.yml` for Redis integration tests.
+#
 version: "3.9"
 
 # IRONCLAD OS — Production Deployment Topology

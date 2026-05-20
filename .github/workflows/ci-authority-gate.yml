@@ -43,14 +43,21 @@ jobs:
         run: |
           python scripts/replay_compare.py --json --output docs/dashboard/artifacts/latest_replay.json
 
-      - name: Upload authority and replay evidence artifacts
+      - name: Generate deployment smoke artifacts
+        run: |
+          python scripts/deployment_smoke.py --json
+          python scripts/redis_failover_smoke.py --json
+
+      - name: Upload authority, replay, and deployment evidence artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: authority-replay-evidence
+          name: authority-replay-deployment-evidence
           path: |
             docs/dashboard/artifacts/latest_authority.json
             docs/dashboard/artifacts/latest_authority_heatmap.json
             docs/dashboard/artifacts/latest_replay.json
+            docs/dashboard/artifacts/latest_deployment_smoke.json
+            docs/dashboard/artifacts/latest_redis_failover_smoke.json
           if-no-files-found: error
 
       - name: Smoke command dry run
