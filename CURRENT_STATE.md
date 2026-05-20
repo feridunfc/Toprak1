@@ -475,3 +475,46 @@ Production readiness impact:
 - Feedback writes are locally gated before persistence.
 - Rejected feedback does not write memory and does not mutate canonical runtime truth.
 - Runtime truth authority remains in runtime/Lua/control-plane approved paths.
+
+## Sprint 25 SemanticBridge Gate Enforcement
+
+Sprint 25A-25D completed on `sprint/25-semanticbridge-gate-enforcement`.
+
+Completed:
+
+- 25A: SemanticBridge gate enforcement contract documented in `docs/architecture/semanticbridge_gate_enforcement_contract.md`.
+- 25B: SemanticBridge fail-closed gate decision added:
+  - `SemanticBridgeGateDecision`
+  - `evaluate_semantic_gate_decision(...)`
+  - missing verdict rejection
+  - low confidence rejection
+  - hook unavailable fail-closed
+  - exception fail-closed
+- 25C: SemanticBridge gate artifact generator added:
+  - `scripts/semanticbridge_gate.py`
+  - writes `docs/dashboard/artifacts/latest_semanticbridge_gate.json`.
+- 25D: SemanticBridge gate artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/semanticbridge_gate.py --json`
+  - `status=PASS`
+  - missing verdict rejected
+  - low confidence allowed verdict rejected
+  - high confidence allowed verdict accepted
+  - hook unavailable rejected
+  - hook exception rejected
+- Sprint 25 mini-gate:
+  - `tests/core/test_semanticbridge_gate_enforcement.py`
+  - `tests/core/test_semanticbridge_gate_artifact.py`
+  - `tests/core/test_semantic_advisory_contract.py`
+  - `tests/core/test_semantic_advisory_contract_artifact.py`
+  - `tests/core/test_cognitive_governance_audit.py`
+  - `15 passed`
+
+Production readiness impact:
+
+- SemanticBridge remains advisory/non-authoritative.
+- Gate decisions are explicit, structured, replay-visible, and audit-visible.
+- Semantic gate failure fails closed for advisory gate metadata.
+- SemanticBridge does not mutate canonical runtime truth.

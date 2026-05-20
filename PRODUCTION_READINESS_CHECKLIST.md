@@ -209,3 +209,17 @@ Production-like readiness requires:
 - [x] FeedbackWriter governance artifact uploaded by Authority Gate CI.
 - [x] Local FeedbackWriter governance artifact passes.
 - [ ] SemanticBridge gate enforcement remains a future sprint.
+
+## Sprint 25 SemanticBridge Gate Enforcement
+
+- [x] SemanticBridge gate enforcement contract documented.
+- [x] SemanticBridge remains advisory/non-authoritative.
+- [x] Structured gate decision added.
+- [x] Missing verdict fails closed.
+- [x] Low confidence allowed verdict fails closed.
+- [x] Hook unavailable fails closed.
+- [x] Gate exception fails closed.
+- [x] SemanticBridge gate artifact generator added.
+- [x] SemanticBridge gate artifact uploaded by Authority Gate CI.
+- [x] Local SemanticBridge gate artifact passes.
+- [ ] Production runtime enforcement remains a future authority-reviewed sprint.
