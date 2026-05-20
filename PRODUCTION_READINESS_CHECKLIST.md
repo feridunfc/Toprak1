@@ -99,3 +99,15 @@ Production-like readiness requires:
 - [x] Recovery audit artifact uploaded by Authority Gate CI.
 - [ ] Automatic recovery/requeue loop remains disabled pending replay/proof gate integration.
 - [ ] Staging cold restart drill remains required.
+
+## Sprint 17 Proof-Gated Recovery Requeue
+
+- [x] Proof-gated recovery requeue contract documented.
+- [x] Single-task recovery requeue command added.
+- [x] Missing candidate blocks mutation.
+- [x] Dirty/ambiguous proof blocks mutation.
+- [x] Dry-run mode emits artifact without mutation.
+- [x] Allowed candidate path calls canonical recovery manager.
+- [x] Recovery requeue dry-run artifact uploaded by Authority Gate CI.
+- [ ] Automatic recovery loop remains disabled pending staging drill.
+- [ ] Full Redis-backed mutation drill remains required before production enablement.

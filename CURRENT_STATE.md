@@ -146,3 +146,42 @@ Production readiness impact:
 - Cold restart recovery now has a read-only audit artifact.
 - Stale/missing/expired in-flight run candidates are classified before mutation.
 - Auto-recovery remains gated; no automatic requeue loop is enabled yet.
+
+## Sprint 17 Proof-Gated Recovery Requeue
+
+Sprint 17A-17D completed on `sprint/17-proof-gated-requeue`.
+
+Completed:
+
+- 17A: Proof-gated recovery requeue contract documented in `docs/ops/proof_gated_requeue.md`.
+- 17B: Single-task proof-gated requeue command added:
+  - `scripts/recovery_requeue.py`
+  - reads recovery audit candidates.
+  - fails closed when candidate is missing.
+  - fails closed when replay/runtime/authority proof denies auto-resume.
+  - supports dry-run artifact generation.
+- 17C: Proof-gated requeue behavior tests added:
+  - missing candidate blocks mutation.
+  - dirty proof blocks mutation.
+  - dry-run never mutates.
+  - allowed candidate calls manager once.
+  - proof denial reports fail-closed reasons.
+- 17D: Recovery requeue dry-run artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `USE_FAKE_REDIS=1 python scripts/recovery_requeue.py --run-id ci-missing-run --tenant-id ci --dry-run --json`
+  - `status=BLOCKED`
+  - `requeue_status=NO_RECOVERY_CANDIDATE`
+  - `mutation_attempted=false`
+- `python -m pytest tests/core/test_recovery_requeue.py -q --tb=short`
+  - `5 passed`
+- Sprint 17 mini-gate:
+  - recovery requeue + recovery audit + StateStore compatibility
+  - `9 passed`
+
+Production readiness impact:
+
+- Recovery mutation now has an explicit proof-gated single-task command.
+- Automatic recovery loop remains disabled.
+- Requeue mutation remains routed through `TaskRecoveryManager.requeue_stale_task(...)`.
