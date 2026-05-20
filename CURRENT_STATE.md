@@ -632,3 +632,47 @@ Production readiness impact:
 - Decision states are constrained to `READY` or `NOT_READY`.
 - Missing, malformed, or non-PASS rollup input fails closed to `NOT_READY`.
 - The decision gate performs no Redis/runtime mutation and does not enable deployment.
+
+## Sprint 29 Production Readiness Evidence Freeze
+
+Sprint 29A-29E completed on `sprint/29-production-readiness-evidence-freeze`.
+
+Completed:
+
+- 29A: Production readiness evidence freeze contract documented in `docs/ops/production_readiness_evidence_freeze.md`.
+- 29B: Production readiness evidence freeze artifact generator added:
+  - `scripts/production_readiness_evidence_freeze.py`
+  - writes `docs/dashboard/artifacts/latest_production_readiness_evidence_freeze.json`.
+- 29C/29D: Evidence freeze tests added:
+  - READY + PASS rollup + complete artifacts => PASS
+  - missing decision artifact => FAIL
+  - decision NOT_READY => FAIL
+  - rollup non-PASS => FAIL
+  - malformed JSON => FAIL
+  - deterministic manifest hash
+  - hash changes when artifact content changes
+  - `mutation_attempted=false`
+- 29E: Production readiness evidence freeze artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/production_readiness_evidence_freeze.py --json`
+  - `status=PASS`
+  - `decision=READY`
+  - `rollup_status=PASS`
+  - `artifact_count=13`
+  - `required_artifacts_complete=true`
+  - `mutation_attempted=false`
+  - `evidence_manifest_hash` generated
+- Sprint 29 mini-gate:
+  - `tests/core/test_production_readiness_evidence_freeze.py`
+  - `tests/core/test_production_readiness_decision.py`
+  - `tests/core/test_production_readiness_rollup.py`
+  - `19 passed`
+
+Production readiness impact:
+
+- The READY decision is now bound to a deterministic evidence manifest hash.
+- Required readiness artifacts are frozen by SHA-256.
+- Missing, malformed, non-ready, or non-PASS evidence fails closed.
+- Evidence freeze performs no Redis/runtime mutation and does not enable deployment.
