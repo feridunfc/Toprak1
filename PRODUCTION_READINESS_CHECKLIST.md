@@ -194,3 +194,18 @@ Production-like readiness requires:
 - [x] Cognitive governance audit remains zero findings.
 - [ ] FeedbackWriter hard governance enforcement remains a future sprint.
 - [ ] SemanticBridge gate enforcement remains a future sprint.
+
+## Sprint 24 FeedbackWriter Hard Governance Enforcement
+
+- [x] FeedbackWriter governance contract documented.
+- [x] FeedbackWriter remains advisory/non-authoritative.
+- [x] Hard local governance gate added.
+- [x] Required identifiers are enforced.
+- [x] Low-confidence feedback is rejected.
+- [x] Non-success feedback status is rejected.
+- [x] HITL-pending feedback is rejected.
+- [x] Malformed feedback payloads are rejected.
+- [x] FeedbackWriter governance artifact generator added.
+- [x] FeedbackWriter governance artifact uploaded by Authority Gate CI.
+- [x] Local FeedbackWriter governance artifact passes.
+- [ ] SemanticBridge gate enforcement remains a future sprint.

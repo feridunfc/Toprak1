@@ -18,22 +18,86 @@ No behavior changes — no blocking, no exception propagation.
 """
 
 
+from __future__ import annotations
+
 # Sprint 23 semantic advisory contract marker.
 # This module may emit advisory/feedback/validation signals only.
 # It must not directly mutate canonical runtime truth.
 ADVISORY_ONLY_SURFACE = True
 CANONICAL_AUTHORITY_WRITES_ALLOWED = False
 
-from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger("hfa.feedback_writer")
 
 _MIN_CONFIDENCE = 0.70
 _WRITE_STATUSES = frozenset({"success"})
+_MAX_FEEDBACK_OUTPUT_KEYS = 100
+_MAX_REASONING_TRACE_ITEMS = 3
+
+
+@dataclass(frozen=True)
+class FeedbackGovernanceDecision:
+    accepted: bool
+    reason: str
+    confidence: float
+
+    @property
+    def rejected(self) -> bool:
+        return not self.accepted
+
+
+def validate_feedback_governance(
+    *,
+    result: Any,
+    task_id: str,
+    run_id: str,
+    tenant_id: str,
+    trace_id: str,
+    min_confidence: float = _MIN_CONFIDENCE,
+) -> FeedbackGovernanceDecision:
+    """Hard local governance gate for non-authoritative feedback writes.
+
+    This gate protects the feedback/memory write path only. It must not mutate
+    canonical runtime truth and must not promote feedback into authority.
+    """
+    confidence = float(getattr(result, "confidence", 0.0) or 0.0)
+    status = str(getattr(result, "status", "") or "")
+
+    if not task_id:
+        return FeedbackGovernanceDecision(False, "missing_task_id", confidence)
+    if not run_id:
+        return FeedbackGovernanceDecision(False, "missing_run_id", confidence)
+    if not tenant_id:
+        return FeedbackGovernanceDecision(False, "missing_tenant_id", confidence)
+    if not trace_id:
+        return FeedbackGovernanceDecision(False, "missing_trace_id", confidence)
+    if status not in _WRITE_STATUSES:
+        return FeedbackGovernanceDecision(False, f"non_accepted_status:{status or '?'}", confidence)
+    if confidence < min_confidence:
+        return FeedbackGovernanceDecision(False, f"confidence_below_threshold:{confidence:.3f}", confidence)
+    if getattr(result, "requires_hitl", False):
+        return FeedbackGovernanceDecision(False, "requires_hitl_pending", confidence)
+
+    output_data = getattr(result, "output_data", None)
+    if output_data is None:
+        output_data = {}
+    if not isinstance(output_data, dict):
+        return FeedbackGovernanceDecision(False, "output_data_not_mapping", confidence)
+    if len(output_data.keys()) > _MAX_FEEDBACK_OUTPUT_KEYS:
+        return FeedbackGovernanceDecision(False, "output_keys_limit_exceeded", confidence)
+
+    reasoning_trace = getattr(result, "reasoning_trace", None)
+    if reasoning_trace is None:
+        reasoning_trace = []
+    if not isinstance(reasoning_trace, list):
+        return FeedbackGovernanceDecision(False, "reasoning_trace_not_list", confidence)
+
+    return FeedbackGovernanceDecision(True, "all_checks_passed", confidence)
 
 
 # ── In-process metrics ────────────────────────────────────────────────────────
@@ -166,6 +230,29 @@ class FeedbackWriter:
             logger.debug(
                 "FeedbackWriter.skip task=%s trace_id=%s reason=no_pipeline",
                 task_id, trace_id,
+            )
+            _metrics.inc_skipped()
+            return
+
+        # Sprint 24: hard local governance gate for feedback writes.
+        governance_decision = validate_feedback_governance(
+            result=result,
+            task_id=task_id,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            trace_id=trace_id,
+            min_confidence=self._min_confidence,
+        )
+        if governance_decision.rejected:
+            _metrics.inc_rejected()
+            logger.debug(
+                "feedback_rejected task=%s run=%s trace_id=%s "
+                "reason=%s confidence=%.2f",
+                task_id,
+                run_id,
+                trace_id,
+                governance_decision.reason,
+                governance_decision.confidence,
             )
             _metrics.inc_skipped()
             return

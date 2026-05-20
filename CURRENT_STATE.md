@@ -431,3 +431,47 @@ Production readiness impact:
 - Advisory surfaces may enrich, persist feedback, validate, score, and report.
 - Advisory surfaces must not directly mutate canonical runtime truth.
 - Future promotion to authoritative behavior requires a separate authority-reviewed sprint.
+
+## Sprint 24 FeedbackWriter Hard Governance Enforcement
+
+Sprint 24A-24D completed on `sprint/24-feedbackwriter-hard-governance`.
+
+Completed:
+
+- 24A: FeedbackWriter governance contract documented in `docs/architecture/feedbackwriter_governance_contract.md`.
+- 24B: FeedbackWriter hard local governance gate added:
+  - `FeedbackGovernanceDecision`
+  - `validate_feedback_governance(...)`
+  - required task/run/tenant/trace identifiers
+  - success-only feedback write policy
+  - minimum confidence policy
+  - HITL pending rejection
+  - bounded payload shape validation
+- 24C: FeedbackWriter governance artifact generator added:
+  - `scripts/feedbackwriter_governance.py`
+  - writes `docs/dashboard/artifacts/latest_feedbackwriter_governance.json`.
+- 24D: FeedbackWriter governance artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/feedbackwriter_governance.py --json`
+  - `status=PASS`
+  - valid feedback accepted
+  - low confidence rejected
+  - non-success status rejected
+  - missing trace id rejected
+  - malformed output data rejected
+- Sprint 24 mini-gate:
+  - `tests/core/test_feedbackwriter_governance.py`
+  - `tests/core/test_feedbackwriter_governance_artifact.py`
+  - `tests/core/test_semantic_advisory_contract.py`
+  - `tests/core/test_semantic_advisory_contract_artifact.py`
+  - `tests/core/test_cognitive_governance_audit.py`
+  - `15 passed`
+
+Production readiness impact:
+
+- FeedbackWriter remains advisory/non-authoritative.
+- Feedback writes are locally gated before persistence.
+- Rejected feedback does not write memory and does not mutate canonical runtime truth.
+- Runtime truth authority remains in runtime/Lua/control-plane approved paths.
