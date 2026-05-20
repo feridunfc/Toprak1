@@ -52,9 +52,9 @@ jobs:
         run: |
           USE_FAKE_REDIS=1 python scripts/recovery_audit.py --json
 
-      - name: Generate recovery requeue dry-run artifact
+      - name: Generate artifact-backed recovery requeue dry-run artifact
         run: |
-          USE_FAKE_REDIS=1 python scripts/recovery_requeue.py --run-id ci-missing-run --tenant-id ci --dry-run --json
+          USE_FAKE_REDIS=1 python scripts/recovery_requeue.py --run-id ci-missing-run --tenant-id ci --proof-mode artifacts --dry-run --json
 
       - name: Upload authority, replay, deployment, and recovery evidence artifacts
         uses: actions/upload-artifact@v4
