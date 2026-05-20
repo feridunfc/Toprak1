@@ -264,3 +264,53 @@ Production readiness impact:
 - Canonical mutation path is `TaskRecoveryManager.requeue_stale_task(...)`.
 - CI emits a skipped drill artifact under fake Redis because real Redis Lua EVAL is required.
 - Automatic recovery daemon remains disabled.
+
+## Sprint 20 Staging Cold Restart Drill
+
+Sprint 20A-20D completed on `sprint/20-staging-cold-restart-drill`.
+
+Completed:
+
+- 20A: Staging cold restart drill contract documented in `docs/ops/staging_cold_restart_drill.md`.
+- 20B: Controlled cold restart drill harness added:
+  - `scripts/cold_restart_drill.py`
+  - composes the Redis-backed recovery requeue drill.
+  - uses artifact-backed proof.
+  - invokes canonical recovery mutation path through the requeue drill.
+  - writes `docs/dashboard/artifacts/latest_cold_restart_drill.json`.
+- 20C: Cold restart drill artifact behavior tests added:
+  - fake Redis is skipped as unsupported for Lua EVAL mutation drill.
+  - PASS artifact shape is locked.
+  - zombie completion rejection is explicitly marked pending.
+- 20D: Cold restart drill artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- Real Redis local cold restart drill:
+  - `python scripts/cold_restart_drill.py --json`
+  - `status=PASS`
+  - `recovery_requeue_status=TASK_REQUEUED`
+  - `mutation_attempted=true`
+  - `proof_allowed=true`
+  - task moved from `running` to `ready`
+  - running zset entry removed
+  - ready queue score written
+  - `claim_epoch` remained monotonic/unchanged.
+- Fake Redis CI-compatible artifact:
+  - `status=SKIPPED`
+  - `recovery_requeue_status=REAL_REDIS_REQUIRED`
+- Sprint 20 mini-gate:
+  - `tests/core/test_cold_restart_drill.py`
+  - `tests/core/test_recovery_requeue_drill.py`
+  - `tests/core/test_artifact_backed_recovery_proof.py`
+  - `tests/core/test_recovery_requeue.py`
+  - `tests/core/test_recovery_audit.py`
+  - `16 passed`
+
+Production readiness impact:
+
+- Cold restart recovery path is now validated through a controlled drill harness.
+- Artifact-backed proof and Redis-backed canonical requeue mutation are composed end-to-end.
+- CI emits a skipped artifact under fake Redis because real Redis Lua EVAL is required.
+- Zombie/stale-owner completion rejection remains pending explicit completion harness integration.
+- Automatic recovery daemon remains disabled.

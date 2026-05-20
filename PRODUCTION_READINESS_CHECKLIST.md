@@ -139,3 +139,19 @@ Production-like readiness requires:
 - [x] Drill artifact uploaded by Authority Gate CI.
 - [ ] Automatic recovery daemon remains disabled.
 - [ ] Staging cold restart drill remains required before production enablement.
+
+## Sprint 20 Staging Cold Restart Drill
+
+- [x] Staging cold restart drill contract documented.
+- [x] Controlled cold restart drill harness added.
+- [x] Fake Redis skip behavior locked.
+- [x] Real Redis local cold restart drill reached `TASK_REQUEUED`.
+- [x] Artifact-backed proof used in cold restart drill.
+- [x] Task moved from running to ready.
+- [x] Running zset entry removed.
+- [x] Ready queue entry written.
+- [x] `claim_epoch` remains monotonic/unchanged on requeue.
+- [x] Cold restart drill artifact uploaded by Authority Gate CI.
+- [ ] Zombie/stale-owner completion rejection remains pending explicit completion harness integration.
+- [ ] Automatic recovery daemon remains disabled.
+- [ ] Production auto-enable remains blocked.
