@@ -601,3 +601,34 @@ Production readiness impact:
 - Staging-only cold restart and zombie completion SKIPPED states are explicitly tolerated.
 - Optional CI-only deployment/Redis smoke artifacts are reported when present and must PASS if present.
 - The rollup performs no Redis/runtime mutation.
+
+## Sprint 28 Production Readiness Decision Gate
+
+Sprint 28A-28D completed on `sprint/28-production-readiness-decision-gate`.
+
+Completed:
+
+- 28A: Production readiness decision gate contract documented in `docs/architecture/production_readiness_decision_gate_contract.md`.
+- 28B: Production readiness decision artifact generator added:
+  - `scripts/production_readiness_decision.py`
+  - writes `docs/dashboard/artifacts/latest_production_readiness_decision.json`.
+- 28C/28D: Production readiness decision artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/production_readiness_decision.py --json`
+  - `status=PASS`
+  - `decision=READY`
+  - `rollup_status=PASS`
+  - `reasons=[]`
+- Sprint 28 mini-gate:
+  - `tests/core/test_production_readiness_decision.py`
+  - `tests/core/test_production_readiness_rollup.py`
+  - `11 passed`
+
+Production readiness impact:
+
+- Production readiness now has a top-level human-readable decision artifact.
+- Decision states are constrained to `READY` or `NOT_READY`.
+- Missing, malformed, or non-PASS rollup input fails closed to `NOT_READY`.
+- The decision gate performs no Redis/runtime mutation and does not enable deployment.
