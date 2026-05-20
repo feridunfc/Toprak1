@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import sys
 from dataclasses import asdict, dataclass
@@ -13,20 +14,35 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-for candidate in (
-    REPO_ROOT,
-    REPO_ROOT / "hfa-agents" / "src",
-    REPO_ROOT / "hfa-semantic" / "src",
-):
-    if candidate.exists() and str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
-
-from hfa_agents.integration.semantic_bridge import (
-    ADVISORY_ONLY_SURFACE,
-    CANONICAL_AUTHORITY_WRITES_ALLOWED,
-    SemanticBridge,
-    evaluate_semantic_gate_decision,
+SEMANTIC_BRIDGE_PATH = (
+    REPO_ROOT / "hfa-agents" / "src" / "hfa_agents" / "integration" / "semantic_bridge.py"
 )
+
+
+def _load_semantic_bridge_module() -> Any:
+    """Load semantic_bridge.py without importing hfa_agents package __init__.
+
+    Authority Gate installs only lightweight dependencies. Importing the package
+    pulls pydantic-backed contracts that are not needed for this static artifact.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "semantic_bridge_contract_module",
+        SEMANTIC_BRIDGE_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable_to_load_semantic_bridge:{SEMANTIC_BRIDGE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_semantic_bridge = _load_semantic_bridge_module()
+
+ADVISORY_ONLY_SURFACE = _semantic_bridge.ADVISORY_ONLY_SURFACE
+CANONICAL_AUTHORITY_WRITES_ALLOWED = _semantic_bridge.CANONICAL_AUTHORITY_WRITES_ALLOWED
+SemanticBridge = _semantic_bridge.SemanticBridge
+evaluate_semantic_gate_decision = _semantic_bridge.evaluate_semantic_gate_decision
 
 
 DEFAULT_OUTPUT = Path("docs/dashboard/artifacts/latest_semanticbridge_gate.json")
@@ -57,7 +73,7 @@ async def _boom(*args: Any, **kwargs: Any) -> Any:
 
 
 async def _run_hook_cases() -> list[SemanticBridgeGateCase]:
-    import hfa_agents.integration.semantic_bridge as bridge_module
+    bridge_module = _semantic_bridge
 
     cases: list[SemanticBridgeGateCase] = []
 
