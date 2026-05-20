@@ -255,3 +255,16 @@ Production-like readiness requires:
 - [x] Production readiness rollup artifact uploaded by Authority Gate CI.
 - [x] Local production readiness rollup artifact passes.
 - [ ] Production auto-enforcement remains a future authority-reviewed sprint.
+
+## Sprint 28 Production Readiness Decision Gate
+
+- [x] Production readiness decision gate contract documented.
+- [x] Production readiness decision artifact generator added.
+- [x] Decision states constrained to `READY` / `NOT_READY`.
+- [x] Missing rollup fails closed to `NOT_READY`.
+- [x] Malformed rollup fails closed to `NOT_READY`.
+- [x] Non-PASS rollup fails closed to `NOT_READY`.
+- [x] Required component missing produces explicit reason.
+- [x] Decision artifact uploaded by Authority Gate CI.
+- [x] Local decision artifact reports `READY` when rollup is `PASS`.
+- [ ] Production auto-deployment remains a future authority-reviewed sprint.
