@@ -362,3 +362,32 @@ Production readiness impact:
 - Requeue clears stale worker identity fields.
 - Post-requeue zombie completion fails closed via `illegal_transition`.
 - Automatic recovery daemon remains disabled.
+
+## Sprint 22B Cognitive Governance Hardening
+
+Sprint 22B-A through 22B-C completed on `sprint/22b-cognitive-governance-hardening`.
+
+Completed:
+
+- 22B-A: Cognitive governance hardening contract documented in `docs/ops/cognitive_governance_hardening.md`.
+- 22B-B: Cognitive governance boundary audit added:
+  - `scripts/cognitive_governance_audit.py`
+  - checks FeedbackWriter, SemanticBridge, cognitive executor, semantic memory, validation, and policy surfaces.
+  - flags direct canonical runtime authority writes.
+  - writes `docs/dashboard/artifacts/latest_cognitive_governance_audit.json`.
+- 22B-C: Cognitive governance audit artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/cognitive_governance_audit.py --json`
+  - `status=PASS`
+  - `checked_files=26`
+  - `findings_count=0`
+- `python -m pytest tests/core/test_cognitive_governance_audit.py -q --tb=short`
+  - `2 passed`
+
+Production readiness impact:
+
+- Cognitive, semantic, and feedback surfaces are explicitly classified as advisory, feedback, memory, validation, policy, or governance-local.
+- Hidden canonical runtime authority writes from cognitive surfaces are now statically audited.
+- Runtime truth authority remains in runtime/Lua/control-plane canonical paths.

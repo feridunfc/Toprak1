@@ -170,3 +170,14 @@ Production-like readiness requires:
 - [x] Zombie completion drill artifact uploaded by Authority Gate CI.
 - [ ] Automatic recovery daemon remains disabled.
 - [ ] Production auto-enable remains blocked.
+
+## Sprint 22B Cognitive Governance Hardening
+
+- [x] Cognitive governance hardening contract documented.
+- [x] FeedbackWriter / SemanticBridge / cognitive surfaces classified as non-authoritative.
+- [x] Static cognitive governance audit added.
+- [x] Audit covers feedback, semantic bridge, cognitive executor, semantic memory, validation, and policy surfaces.
+- [x] Audit flags direct canonical runtime authority writes.
+- [x] Cognitive governance audit artifact uploaded by Authority Gate CI.
+- [x] Local audit passes with zero findings.
+- [ ] Cognitive features remain advisory unless explicitly promoted by a future authority-reviewed sprint.
