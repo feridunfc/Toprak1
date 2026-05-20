@@ -21,6 +21,7 @@ CANONICAL_AUTHORITY_WRITES_ALLOWED = False
 import inspect
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 try:
@@ -35,6 +36,77 @@ except Exception:  # pragma: no cover - compatibility when semantic package abse
     evaluate_gate_semantics = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+_SEMANTIC_GATE_MIN_CONFIDENCE = 0.70
+
+
+@dataclass(frozen=True)
+class SemanticBridgeGateDecision:
+    mode: str
+    allowed: bool
+    reason: str
+    confidence: float
+    replay_visible: bool = True
+    audit_visible: bool = True
+
+    @property
+    def rejected(self) -> bool:
+        return not self.allowed
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "allowed": self.allowed,
+            "reason": self.reason,
+            "confidence": self.confidence,
+            "replay_visible": self.replay_visible,
+            "audit_visible": self.audit_visible,
+        }
+
+
+def evaluate_semantic_gate_decision(
+    verdict: Any,
+    *,
+    min_confidence: float = _SEMANTIC_GATE_MIN_CONFIDENCE,
+) -> SemanticBridgeGateDecision:
+    """Normalize semantic gate output into an explicit fail-closed decision.
+
+    This decision is advisory/gate metadata only. It must not mutate canonical
+    runtime truth.
+    """
+    if verdict is None:
+        return SemanticBridgeGateDecision(
+            mode="gate",
+            allowed=False,
+            reason="semantic_gate_missing_verdict",
+            confidence=0.0,
+        )
+
+    if isinstance(verdict, dict):
+        allowed = bool(verdict.get("allowed", False))
+        reason = str(verdict.get("reason", "") or ("allowed" if allowed else "rejected"))
+        confidence = float(verdict.get("confidence", 0.0) or 0.0)
+        return SemanticBridgeGateDecision(
+            mode=str(verdict.get("mode", "gate") or "gate"),
+            allowed=allowed and confidence >= min_confidence,
+            reason=reason if confidence >= min_confidence else f"confidence_below_threshold:{confidence:.3f}",
+            confidence=confidence,
+            replay_visible=bool(verdict.get("replay_visible", True)),
+            audit_visible=bool(verdict.get("audit_visible", True)),
+        )
+
+    allowed = bool(getattr(verdict, "allowed", False))
+    reason = str(getattr(verdict, "reason", "") or ("allowed" if allowed else "rejected"))
+    confidence = float(getattr(verdict, "confidence", 0.0) or 0.0)
+
+    return SemanticBridgeGateDecision(
+        mode=str(getattr(verdict, "mode", "gate") or "gate"),
+        allowed=allowed and confidence >= min_confidence,
+        reason=reason if confidence >= min_confidence else f"confidence_below_threshold:{confidence:.3f}",
+        confidence=confidence,
+        replay_visible=bool(getattr(verdict, "replay_visible", True)),
+        audit_visible=bool(getattr(verdict, "audit_visible", True)),
+    )
 
 
 def _get_or_generate_trace_id(raw_event: Dict[str, Any]) -> str:
@@ -97,18 +169,29 @@ class SemanticBridge:
             return {"mode": "advisory", "allowed": True, "reason": "semantic_hook_unavailable"}
         return await evaluate_advisory_semantics(self.semantic_pipeline, raw_event)
 
-    async def evaluate_gate(self, raw_event: Dict[str, Any]) -> Any:
-        """Return a gate semantic verdict; v3 gate mode fails closed."""
+    async def evaluate_gate(self, raw_event: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a structured gate semantic decision; gate mode fails closed."""
 
         if evaluate_gate_semantics is None:
-            return {
-                "mode": "gate",
-                "allowed": False,
-                "reason": "semantic_hook_unavailable",
-                "replay_visible": True,
-                "audit_visible": True,
-            }
-        return await evaluate_gate_semantics(self.gate_evaluator, raw_event)
+            return SemanticBridgeGateDecision(
+                mode="gate",
+                allowed=False,
+                reason="semantic_hook_unavailable",
+                confidence=0.0,
+            ).as_dict()
+
+        try:
+            verdict = await evaluate_gate_semantics(self.gate_evaluator, raw_event)
+        except Exception as exc:
+            logger.warning("SemanticBridge: gate evaluation failed closed error=%s", exc)
+            return SemanticBridgeGateDecision(
+                mode="gate",
+                allowed=False,
+                reason="semantic_gate_exception",
+                confidence=0.0,
+            ).as_dict()
+
+        return evaluate_semantic_gate_decision(verdict).as_dict()
 
     # ── Strict advisory enrichment path ───────────────────────────────────────
 

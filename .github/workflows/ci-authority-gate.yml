@@ -84,6 +84,10 @@ jobs:
         run: |
           python scripts/feedbackwriter_governance.py --json
 
+      - name: Generate SemanticBridge gate artifact
+        run: |
+          python scripts/semanticbridge_gate.py --json
+
       - name: Upload authority, replay, deployment, and recovery evidence artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -103,6 +107,7 @@ jobs:
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json
             docs/dashboard/artifacts/latest_semantic_advisory_contract.json
             docs/dashboard/artifacts/latest_feedbackwriter_governance.json
+            docs/dashboard/artifacts/latest_semanticbridge_gate.json
             docs/dashboard/artifacts/latest_zombie_completion_drill.json
           if-no-files-found: error
 
