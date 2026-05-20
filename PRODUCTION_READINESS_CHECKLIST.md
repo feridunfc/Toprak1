@@ -237,3 +237,21 @@ Production-like readiness requires:
 - [x] Rollup artifact uploaded by Authority Gate CI.
 - [x] Rollup performs no Redis/runtime mutation.
 - [ ] Production auto-enforcement remains a future authority-reviewed sprint.
+
+## Sprint 27 Production Readiness Rollup Gate
+
+- [x] Production readiness rollup contract documented.
+- [x] Authority proof included.
+- [x] Replay proof included.
+- [x] Recovery audit proof included.
+- [x] Recovery requeue proof included.
+- [x] Recovery requeue drill proof included.
+- [x] Cold restart drill proof included with staging SKIPPED allowance.
+- [x] Zombie completion drill proof included with staging SKIPPED allowance.
+- [x] Recovery auto-resume guardrail proof included.
+- [x] Advisory governance rollup proof included.
+- [x] Optional CI-only deployment/Redis smoke artifacts reported when present.
+- [x] Production readiness rollup artifact generator added.
+- [x] Production readiness rollup artifact uploaded by Authority Gate CI.
+- [x] Local production readiness rollup artifact passes.
+- [ ] Production auto-enforcement remains a future authority-reviewed sprint.
