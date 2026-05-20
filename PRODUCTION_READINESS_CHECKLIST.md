@@ -223,3 +223,17 @@ Production-like readiness requires:
 - [x] SemanticBridge gate artifact uploaded by Authority Gate CI.
 - [x] Local SemanticBridge gate artifact passes.
 - [ ] Production runtime enforcement remains a future authority-reviewed sprint.
+
+## Sprint 26 Advisory Governance Rollup
+
+- [x] Advisory governance rollup contract documented.
+- [x] Cognitive governance audit included.
+- [x] Semantic advisory contract included.
+- [x] FeedbackWriter governance included.
+- [x] SemanticBridge gate enforcement included.
+- [x] Rollup artifact generator added.
+- [x] Rollup artifact reports `components_checked=4`.
+- [x] Rollup artifact passes locally.
+- [x] Rollup artifact uploaded by Authority Gate CI.
+- [x] Rollup performs no Redis/runtime mutation.
+- [ ] Production auto-enforcement remains a future authority-reviewed sprint.

@@ -518,3 +518,42 @@ Production readiness impact:
 - Gate decisions are explicit, structured, replay-visible, and audit-visible.
 - Semantic gate failure fails closed for advisory gate metadata.
 - SemanticBridge does not mutate canonical runtime truth.
+
+## Sprint 26 Advisory Governance Rollup
+
+Sprint 26A-26D completed on `sprint/26-advisory-governance-rollup`.
+
+Completed:
+
+- 26A: Advisory governance rollup contract documented in `docs/architecture/advisory_governance_rollup_contract.md`.
+- 26B: Advisory governance rollup artifact generator added:
+  - `scripts/advisory_governance_rollup.py`
+  - writes `docs/dashboard/artifacts/latest_advisory_governance_rollup.json`.
+- 26C/26D: Advisory governance rollup artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/advisory_governance_rollup.py --json`
+  - `status=PASS`
+  - `components_checked=4`
+  - cognitive governance audit PASS
+  - semantic advisory contract PASS
+  - FeedbackWriter governance PASS
+  - SemanticBridge gate PASS
+- Sprint 26 mini-gate:
+  - `tests/core/test_advisory_governance_rollup.py`
+  - `tests/core/test_semanticbridge_gate_enforcement.py`
+  - `tests/core/test_semanticbridge_gate_artifact.py`
+  - `tests/core/test_feedbackwriter_governance.py`
+  - `tests/core/test_feedbackwriter_governance_artifact.py`
+  - `tests/core/test_semantic_advisory_contract.py`
+  - `tests/core/test_semantic_advisory_contract_artifact.py`
+  - `tests/core/test_cognitive_governance_audit.py`
+  - `25 passed`
+
+Production readiness impact:
+
+- Advisory/cognitive governance proof is now available as a single rollup artifact.
+- Cognitive, semantic, and feedback surfaces remain advisory/non-authoritative.
+- FeedbackWriter and SemanticBridge dedicated governance artifacts remain included.
+- Canonical runtime truth authority remains in runtime/Lua/control-plane approved paths.
