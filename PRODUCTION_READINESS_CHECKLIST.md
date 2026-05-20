@@ -268,3 +268,21 @@ Production-like readiness requires:
 - [x] Decision artifact uploaded by Authority Gate CI.
 - [x] Local decision artifact reports `READY` when rollup is `PASS`.
 - [ ] Production auto-deployment remains a future authority-reviewed sprint.
+
+## Sprint 29 Production Readiness Evidence Freeze
+
+- [x] Production readiness evidence freeze contract documented.
+- [x] Evidence freeze artifact generator added.
+- [x] Required artifact set declared.
+- [x] Decision artifact must be `READY`.
+- [x] Rollup artifact must be `PASS`.
+- [x] Missing artifacts fail closed.
+- [x] Malformed artifacts fail closed.
+- [x] Decision `NOT_READY` fails closed.
+- [x] Rollup non-PASS fails closed.
+- [x] Deterministic `evidence_manifest_hash` generated.
+- [x] Manifest hash changes when artifact content changes.
+- [x] Evidence freeze reports `mutation_attempted=false`.
+- [x] Evidence freeze artifact uploaded by Authority Gate CI.
+- [x] Local evidence freeze artifact passes.
+- [ ] Release-candidate promotion remains a future authority-reviewed sprint.
