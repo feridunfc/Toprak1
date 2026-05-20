@@ -8,6 +8,13 @@ explicit gate path that is separate from advisory enrichment. Advisory may fail
 open; gate must fail closed and return an audit/replay-visible verdict.
 """
 
+
+# Sprint 23 semantic advisory contract marker.
+# This module may emit advisory/feedback/validation signals only.
+# It must not directly mutate canonical runtime truth.
+ADVISORY_ONLY_SURFACE = True
+CANONICAL_AUTHORITY_WRITES_ALLOWED = False
+
 from __future__ import annotations
 
 import inspect
