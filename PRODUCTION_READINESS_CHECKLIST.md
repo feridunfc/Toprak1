@@ -111,3 +111,15 @@ Production-like readiness requires:
 - [x] Recovery requeue dry-run artifact uploaded by Authority Gate CI.
 - [ ] Automatic recovery loop remains disabled pending staging drill.
 - [ ] Full Redis-backed mutation drill remains required before production enablement.
+
+## Sprint 18 Artifact-Backed Recovery Proof
+
+- [x] Artifact-backed recovery proof contract documented.
+- [x] Recovery requeue command supports artifact-backed proof mode.
+- [x] Missing proof artifacts fail closed.
+- [x] Missing recovery candidate fails closed.
+- [x] Authority banned findings fail closed.
+- [x] Passing replay/authority/audit candidate allows proof.
+- [x] Authority Gate CI uses artifact-backed recovery requeue dry-run.
+- [ ] Redis-backed mutation drill remains required before production enablement.
+- [ ] Automatic recovery loop remains disabled.

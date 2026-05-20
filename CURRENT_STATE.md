@@ -185,3 +185,38 @@ Production readiness impact:
 - Recovery mutation now has an explicit proof-gated single-task command.
 - Automatic recovery loop remains disabled.
 - Requeue mutation remains routed through `TaskRecoveryManager.requeue_stale_task(...)`.
+
+## Sprint 18 Artifact-Backed Recovery Proof
+
+Sprint 18A-18D completed on `sprint/18-artifact-backed-recovery-proof`.
+
+Completed:
+
+- 18A: Artifact-backed recovery proof contract documented in `docs/ops/artifact_backed_recovery_proof.md`.
+- 18B: `scripts/recovery_requeue.py` gained `--proof-mode artifacts`.
+- 18C: Artifact-backed proof behavior tests added:
+  - missing artifacts fail closed.
+  - missing recovery candidate fails closed.
+  - banned authority findings fail closed.
+  - passing replay/authority/audit candidate allows proof.
+- 18D: Authority Gate CI recovery requeue dry-run now uses artifact-backed proof mode.
+
+Latest verified gates:
+
+- `USE_FAKE_REDIS=1 python scripts/recovery_requeue.py --run-id ci-missing-run --tenant-id ci --proof-mode artifacts --dry-run --json`
+  - `status=BLOCKED`
+  - `proof_mode=artifacts`
+  - `proof_allowed=false`
+  - missing proof artifacts fail closed.
+- Sprint 18 mini-gate:
+  - `tests/core/test_artifact_backed_recovery_proof.py`
+  - `tests/core/test_recovery_requeue.py`
+  - `tests/core/test_recovery_audit.py`
+  - `12 passed`
+
+Production readiness impact:
+
+- Recovery requeue proof is no longer limited to manual flags.
+- Artifact-backed proof decisions are fail-closed.
+- Automatic recovery loop remains disabled.
+- Redis-backed mutation drill remains pending.
