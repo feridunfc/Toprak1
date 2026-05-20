@@ -676,3 +676,19 @@ Production readiness impact:
 - Required readiness artifacts are frozen by SHA-256.
 - Missing, malformed, non-ready, or non-PASS evidence fails closed.
 - Evidence freeze performs no Redis/runtime mutation and does not enable deployment.
+
+
+
+## Authority Gate / Staging Release Candidate Status
+
+- **Production-ready claim:** Not yet applied. The READY decision does **not** trigger any deployment or Redis/runtime changes.
+- **Evidence-backed release candidate (RC) declaration:** Present.
+  - `latest_production_readiness_decision.json == READY`
+  - Freeze evidence set (`latest_production_readiness_evidence_freeze.json`) is PASS and hash-verified
+  - No Redis/runtime mutation (`mutation_attempted: false`)
+  - Deployment or release tag not performed
+- **Fail-closed behavior:** Missing, malformed, non-PASS, or NOT_READY artifacts will cause `RC_BLOCKED`.
+
+### Notes
+- RC artifact chain is read-only and deterministic before any production-ready claim.
+- Future sprints will implement production-ready claim with controlled deployment steps.
