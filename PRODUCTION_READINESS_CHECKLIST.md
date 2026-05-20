@@ -181,3 +181,16 @@ Production-like readiness requires:
 - [x] Cognitive governance audit artifact uploaded by Authority Gate CI.
 - [x] Local audit passes with zero findings.
 - [ ] Cognitive features remain advisory unless explicitly promoted by a future authority-reviewed sprint.
+
+## Sprint 23 SemanticBridge Advisory Contract Lock
+
+- [x] Semantic advisory contract documented.
+- [x] SemanticBridge marked advisory-only.
+- [x] FeedbackWriter marked non-authoritative.
+- [x] Canonical authority writes remain disallowed from advisory surfaces.
+- [x] Semantic advisory contract artifact generator added.
+- [x] Semantic advisory contract artifact uploaded by Authority Gate CI.
+- [x] Local semantic advisory contract artifact passes.
+- [x] Cognitive governance audit remains zero findings.
+- [ ] FeedbackWriter hard governance enforcement remains a future sprint.
+- [ ] SemanticBridge gate enforcement remains a future sprint.

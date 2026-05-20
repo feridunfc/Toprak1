@@ -391,3 +391,43 @@ Production readiness impact:
 - Cognitive, semantic, and feedback surfaces are explicitly classified as advisory, feedback, memory, validation, policy, or governance-local.
 - Hidden canonical runtime authority writes from cognitive surfaces are now statically audited.
 - Runtime truth authority remains in runtime/Lua/control-plane canonical paths.
+
+## Sprint 23 SemanticBridge Advisory Contract Lock
+
+Sprint 23A-23E completed on `sprint/23-semantic-advisory-contract-lock`.
+
+Completed:
+
+- 23A: Semantic advisory contract documented in `docs/architecture/semantic_advisory_contract.md`.
+- 23B: Advisory-only markers added to:
+  - `hfa-agents/src/hfa_agents/integration/semantic_bridge.py`
+  - `hfa-worker/src/hfa_worker/feedback_writer.py`
+- 23C: Semantic advisory contract tests added:
+  - SemanticBridge is marked advisory-only.
+  - FeedbackWriter is marked non-authoritative.
+  - semantic advisory surfaces have no canonical authority writes.
+- 23D: Semantic advisory contract artifact generator added:
+  - `scripts/semantic_advisory_contract.py`
+  - writes `docs/dashboard/artifacts/latest_semantic_advisory_contract.json`.
+- 23E: Semantic advisory contract artifact uploaded by Authority Gate CI.
+
+Latest verified gates:
+
+- `python scripts/semantic_advisory_contract.py --json`
+  - `status=PASS`
+  - `contract_doc_exists=true`
+  - `surfaces_checked=2`
+  - `governance_audit_status=PASS`
+  - `governance_audit_findings_count=0`
+- Sprint 23 mini-gate:
+  - `tests/core/test_semantic_advisory_contract.py`
+  - `tests/core/test_semantic_advisory_contract_artifact.py`
+  - `tests/core/test_cognitive_governance_audit.py`
+  - `7 passed`
+
+Production readiness impact:
+
+- SemanticBridge and FeedbackWriter are explicitly locked as advisory/non-authoritative surfaces.
+- Advisory surfaces may enrich, persist feedback, validate, score, and report.
+- Advisory surfaces must not directly mutate canonical runtime truth.
+- Future promotion to authoritative behavior requires a separate authority-reviewed sprint.
