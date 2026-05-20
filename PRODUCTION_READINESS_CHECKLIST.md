@@ -89,3 +89,13 @@ Production-like readiness requires:
 - [x] Explicit StateStore compatibility contract test added.
 - [ ] Deployment smoke repaired and verified with `docker compose config`.
 - [ ] Minimal Redis + control + worker local smoke verified.
+
+## Sprint 16 Cold Restart Recovery
+
+- [x] Cold restart + in-flight recovery contract documented.
+- [x] Read-only recovery audit script added.
+- [x] Recovery audit artifact generated locally.
+- [x] Recovery audit candidate detection tests added.
+- [x] Recovery audit artifact uploaded by Authority Gate CI.
+- [ ] Automatic recovery/requeue loop remains disabled pending replay/proof gate integration.
+- [ ] Staging cold restart drill remains required.
