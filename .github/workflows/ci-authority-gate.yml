@@ -20,7 +20,7 @@ jobs:
       redis:
         image: redis:7
         ports:
-          - 6379:6379
+          - 6389:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 10s
@@ -232,4 +232,5 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
 
