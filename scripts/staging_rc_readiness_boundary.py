@@ -137,7 +137,7 @@ def build_boundary() -> dict[str, Any]:
     }
 
 
-def main() -> int:
+def main_args(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate read-only staging RC readiness boundary artifact."
     )
@@ -151,7 +151,7 @@ def main() -> int:
         action="store_true",
         help="Print generated artifact JSON to stdout.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     artifact = build_boundary()
 
@@ -169,6 +169,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main_args())
+
 
 
