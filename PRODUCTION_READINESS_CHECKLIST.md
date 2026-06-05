@@ -487,3 +487,5 @@ Safety boundaries verified:
 Known limitation:
 
 This readiness state does not claim full scheduler-dispatched task execution. Scheduler dispatch remains a future product-core hardening target.
+
+- [x] Sprint 39 scheduler-dispatched task execution proof: tenant task is enqueued/dispatch-created through `SchedulerLua`, `RunRequested` is emitted to the shard stream, `WorkerConsumer` completes it, and manual worker injection is forbidden.

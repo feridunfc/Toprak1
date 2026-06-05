@@ -1094,3 +1094,41 @@ Safety boundaries:
 Known limitation:
 
 This is not yet full scheduler-dispatched task execution. The proof starts from a serialized RunRequestedEvent and validates the canonical WorkerConsumer process-message lifecycle.
+
+## Sprint 39 — Scheduler-Dispatched Task Execution Binding
+
+Status: Complete
+
+Claim:
+
+`TENANT_SCOPED_TASK_EXECUTION_BOUND_TO_SCHEDULER_DISPATCH_AND_WORKER_COMPLETION`
+
+What changed:
+
+- Tenant-scoped task proof now starts before the worker.
+- `SchedulerLua.dispatch_commit_detailed` creates the dispatch output.
+- Dispatch output writes a `RunRequested` event to the shard stream.
+- `WorkerConsumer` processes the scheduler-produced stream message.
+- `FakeExecutor` executes through the worker path.
+- StateStore-compatible result, transition, completion, and ack paths are verified.
+- Manual worker message injection is explicitly forbidden and tested.
+
+Verified:
+
+- `scheduler_dispatch_used=true`
+- `dispatch_output_created=true`
+- `run_requested_event_from_dispatch=true`
+- `manual_worker_message_injection_used=false`
+- `worker_consumer_process_message_used=true`
+- `state_store_result_written=true`
+- `state_store_mark_completed_called=true`
+- `message_acknowledged=true`
+- `result_readable=true`
+
+Known limitations:
+
+- Uses `FakeExecutor` only.
+- Test/fakeredis path uses `SchedulerLua` Python fallback instead of production Lua EVAL path.
+- Does not call production LLMs.
+- Does not prove multi-tenant fairness under load.
+- Does not assert production deployment readiness.
