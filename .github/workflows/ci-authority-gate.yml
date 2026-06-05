@@ -16,6 +16,16 @@ jobs:
   authority-gate:
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +69,10 @@ jobs:
       - name: Run canonical worker task execution tests
         run: |
           python -m pytest tests/core/test_canonical_worker_task_execution.py -q --tb=short
+
+      - name: Run production Lua dispatch path tests
+        run: |
+          python -m pytest tests/core/test_production_lua_dispatch_path_contract.py tests/integration/test_production_lua_dispatch_path.py -q --tb=short
 
       - name: Run e2e task execution product path tests
         run: |
@@ -117,6 +131,10 @@ jobs:
       - name: Generate canonical worker task execution artifact
         run: |
           python scripts/canonical_worker_task_execution.py --json
+
+      - name: Generate production Lua dispatch path artifact
+        run: |
+          python scripts/production_lua_dispatch_path.py --json --redis-url redis://localhost:6379/0
 
       - name: Generate cognitive governance audit artifact
         run: |
@@ -194,6 +212,7 @@ jobs:
             docs/dashboard/artifacts/latest_scheduler_control_signal.json
             docs/dashboard/artifacts/latest_task_execution_demo.json
             docs/dashboard/artifacts/latest_canonical_worker_task_execution.json
+            docs/dashboard/artifacts/latest_production_lua_dispatch_path.json
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json
             docs/dashboard/artifacts/latest_semantic_advisory_contract.json
             docs/dashboard/artifacts/latest_feedbackwriter_governance.json
