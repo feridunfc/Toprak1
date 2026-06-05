@@ -135,6 +135,44 @@ class FakeRedis:
         return 1
 
 
+
+    async def eval(self, source: str, num_keys: int, *keys_and_args):
+        keys = list(keys_and_args[:num_keys])
+        args = list(keys_and_args[num_keys:])
+
+        if not keys:
+            return ["error", "missing_key"]
+
+        state_key = keys[0]
+
+        target_state = None
+        expected_state = None
+        ttl = None
+
+        for value in args:
+            text = str(value)
+            if text in {"queued", "scheduled", "running", "done", "failed"}:
+                if target_state is None:
+                    target_state = text
+                elif expected_state is None:
+                    expected_state = text
+
+        for value in args:
+            try:
+                ttl = int(value)
+                break
+            except (TypeError, ValueError):
+                continue
+
+        current = self.values.get(state_key)
+        if expected_state not in (None, "", "None") and current not in (None, expected_state):
+            return [0, current or "missing"]
+
+        if target_state is None:
+            target_state = "queued"
+
+        await self.set(state_key, target_state, ex=ttl)
+        return [1, target_state]
 class RecordingFakeExecutor(FakeExecutor):
     def __init__(self) -> None:
         super().__init__()
@@ -417,5 +455,8 @@ def main_args(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main_args())
+
+
+
 
 

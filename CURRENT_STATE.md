@@ -1132,3 +1132,47 @@ Known limitations:
 - Does not call production LLMs.
 - Does not prove multi-tenant fairness under load.
 - Does not assert production deployment readiness.
+
+## Sprint 40 — Production Lua Dispatch Path Binding
+
+Status: Complete
+
+Claim:
+
+`TENANT_SCOPED_TASK_EXECUTION_BOUND_TO_PRODUCTION_LUA_DISPATCH_AND_WORKER_COMPLETION`
+
+What changed:
+
+- Scheduler dispatch proof now requires real Redis.
+- `SchedulerLua.initialise()` loads Lua scripts into Redis.
+- `dispatch_commit.lua` is loaded and executed through the production Lua/EVALSHA path.
+- Python fallback is explicitly rejected for PASS.
+- Lua dispatch emits `RunRequested` to the shard stream.
+- `WorkerConsumer` processes the Lua-produced message.
+- `FakeExecutor` executes through the worker path.
+- StateStore-compatible result, transition, completion, and ack paths are verified.
+
+Verified:
+
+- `redis_backend=real_redis`
+- `scheduler_lua_initialised=true`
+- `dispatch_commit_loader_used=true`
+- `dispatch_commit_sha_loaded=true`
+- `production_lua_evalsha_path_used=true`
+- `scheduler_lua_python_fallback_used=false`
+- `dispatch_output_created=true`
+- `run_requested_event_from_lua_dispatch=true`
+- `manual_worker_message_injection_used=false`
+- `worker_consumer_process_message_used=true`
+- `state_store_result_written=true`
+- `state_store_mark_completed_called=true`
+- `message_acknowledged=true`
+- `target_claim_supported=true`
+
+Known limitations:
+
+- Uses `FakeExecutor` only.
+- Does not call production LLMs.
+- Does not prove multi-tenant fairness under load.
+- Does not prove the long-running worker stream consume loop.
+- Does not assert production deployment readiness.
