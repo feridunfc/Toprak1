@@ -1058,3 +1058,39 @@ Not claimed:
 - operator-triggered requeue action
 - operator-triggered auto-resume action
 - production-ready status
+
+<!-- SPRINT_38_CANONICAL_WORKER_TASK_EXECUTION_BINDING -->
+
+## Sprint 38 — Canonical Worker Task Execution Binding
+
+Status: PASS
+
+Sprint 38 binds the task execution product proof to the real WorkerConsumer process-message lifecycle.
+
+Verified path:
+
+- serialized RunRequestedEvent
+- WorkerConsumer._process_message
+- IdempotencyGuard claim / should_execute
+- FakeExecutor invocation through BaseExecutor contract
+- StateStore.store_result
+- StateStore.transition_state
+- StateStore.mark_completed
+- Redis stream ack
+
+Current product claim:
+
+TENANT_SCOPED_TASK_EXECUTION_BOUND_TO_WORKER_CONSUMER_PROCESS_MESSAGE
+
+Safety boundaries:
+
+- no production LLM call
+- no deployment
+- no release tag
+- no noncanonical Redis mutation
+- no operator action buttons
+- no production-ready claim
+
+Known limitation:
+
+This is not yet full scheduler-dispatched task execution. The proof starts from a serialized RunRequestedEvent and validates the canonical WorkerConsumer process-message lifecycle.
