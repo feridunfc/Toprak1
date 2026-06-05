@@ -891,3 +891,88 @@ Not claimed:
 - automatic production enforcement
 - operator-triggered release action
 - dashboard-triggered release action
+
+## Sprint 36 Worker/Scheduler Health Signal Artifacts
+
+Sprint 36A-36E completed on `sprint/36-worker-scheduler-health-signal-artifacts`.
+
+Completed:
+
+- 36A: Worker/scheduler health signal contract documented in `docs/dashboard/worker_scheduler_health_signals.md`.
+- 36B: Read-only worker/scheduler signal generator added:
+  - `scripts/worker_scheduler_health_signals.py`
+  - writes `docs/dashboard/artifacts/latest_worker_health_signal.json`
+  - writes `docs/dashboard/artifacts/latest_scheduler_control_signal.json`
+- 36C: Deterministic worker/scheduler signal tests added:
+  - worker PASS evidence => `WORKER_HEARTBEAT_VISIBLE`
+  - scheduler PASS evidence => `SCHEDULER_CONTROL_VISIBLE`
+  - missing worker evidence => `WORKER_HEARTBEAT_DEGRADED`
+  - missing scheduler evidence => `SCHEDULER_CONTROL_DEGRADED`
+  - malformed worker evidence => `WORKER_HEALTH_INVALID`
+  - malformed scheduler evidence => `SCHEDULER_CONTROL_INVALID`
+  - source FAIL => degraded signal
+  - safety flags => `SAFETY_VIOLATION`
+  - exposed actions/actionable => `SAFETY_VIOLATION`
+  - degraded signal generation exits zero
+  - invalid/safety signal generation exits non-zero
+- 36D: Worker/scheduler signal tests and artifacts wired into Authority Gate CI.
+- 36E: Current state and readiness docs updated.
+
+Latest verified gates:
+
+- `python scripts/worker_scheduler_health_signals.py --json`
+  - worker:
+    - `status=PASS`
+    - `signal_status=WORKER_HEARTBEAT_VISIBLE`
+    - `worker_heartbeat_visible=true`
+    - `actionable=false`
+    - `actions=[]`
+    - `redis_mutation_attempted=false`
+    - `runtime_mutation_attempted=false`
+    - `requeue_attempted=false`
+    - `auto_resume_attempted=false`
+  - scheduler:
+    - `status=PASS`
+    - `signal_status=SCHEDULER_CONTROL_VISIBLE`
+    - `scheduler_control_visible=true`
+    - `actionable=false`
+    - `actions=[]`
+    - `redis_mutation_attempted=false`
+    - `runtime_mutation_attempted=false`
+    - `requeue_attempted=false`
+    - `auto_resume_attempted=false`
+- Sprint 36 mini-gate:
+  - `tests/core/test_worker_scheduler_health_signals.py`
+  - `tests/core/test_runtime_health_panel.py`
+  - `tests/core/test_operator_rc_dashboard_panel.py`
+  - `tests/core/test_operator_rc_evidence_panel.py`
+  - `tests/core/test_staging_rc_evidence_index.py`
+  - `tests/core/test_staging_rc_readiness_boundary.py`
+  - `94 passed`
+
+Production readiness impact:
+
+- Worker heartbeat and scheduler/control visibility are now represented by explicit read-only dashboard signal artifacts.
+- The runtime health panel can move from indirect inference toward canonical worker/scheduler health evidence.
+- The signal artifacts do not connect to Redis for mutation.
+- The signal artifacts do not mutate Redis, runtime state, or canonical state.
+- The signal artifacts do not authorize requeue, auto-resume, recovery execution, deployment, or release tagging.
+- Missing, malformed, failing, degraded, or safety-violating source evidence is surfaced as non-actionable signal status.
+
+## Current worker/scheduler health signal state
+
+Current dashboard-visible claim:
+
+`READ_ONLY_WORKER_SCHEDULER_HEALTH_SIGNALS_VISIBLE`
+
+Not claimed:
+
+- production-ready deployment
+- release tag
+- runtime mutation authorization
+- Redis mutation authorization
+- recovery execution authorization
+- requeue authorization
+- auto-resume authorization
+- operator-triggered runtime action
+- automatic production enforcement
