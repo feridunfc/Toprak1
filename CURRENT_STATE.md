@@ -756,3 +756,68 @@ Not claimed:
 - runtime mutation authorization
 - Redis mutation authorization
 - automatic production enforcement
+
+## Sprint 33 Operator Dashboard RC Evidence Panel
+
+Sprint 33A-33E completed on `sprint/33-operator-dashboard-rc-evidence-panel`.
+
+Completed:
+
+- 33A: Operator RC evidence panel contract documented in `docs/dashboard/operator_rc_evidence_panel.md`.
+- 33B: Operator RC evidence panel read model added:
+  - `scripts/operator_rc_evidence_panel.py`
+  - writes `docs/dashboard/artifacts/latest_operator_rc_evidence_panel.json`.
+- 33C: Deterministic operator RC evidence panel tests added:
+  - PASS index => `RC_ALLOWED_INDEXED`
+  - missing index => `PANEL_UNAVAILABLE`
+  - malformed index => `PANEL_INVALID`
+  - index FAIL => `RC_BLOCKED_OR_NOT_READY`
+  - `staging_rc_indexed=false` => `RC_NOT_INDEXED`
+  - invalid decision scope => `SAFETY_VIOLATION`
+  - missing evidence manifest hash => `RC_BLOCKED_OR_NOT_READY`
+  - production/deploy/tag/Redis/runtime/canonical mutation flags => `SAFETY_VIOLATION`
+  - `actionable=false` invariant verified
+- 33D: Operator RC evidence panel artifact generated and uploaded by Authority Gate CI.
+- 33E: Current state and readiness docs updated.
+
+Latest verified gates:
+
+- `python scripts/operator_rc_evidence_panel.py --json`
+  - `status=PASS`
+  - `panel_status=RC_ALLOWED_INDEXED`
+  - `actionable=false`
+  - `production_ready_claim=false`
+  - `deployment_attempted=false`
+  - `release_tag_created=false`
+  - `redis_mutation_attempted=false`
+  - `runtime_mutation_attempted=false`
+  - `operator_message=Staging RC evidence is indexed and allowed. This is not a production deployment.`
+- Sprint 33 mini-gate:
+  - `tests/core/test_operator_rc_evidence_panel.py`
+  - `tests/core/test_staging_rc_evidence_index.py`
+  - `tests/core/test_staging_rc_readiness_boundary.py`
+  - `30 passed`
+
+Production readiness impact:
+
+- The indexed staging RC evidence chain is now visible through an operator-facing read-only panel.
+- The panel has a single source of truth: `latest_staging_rc_evidence_index.json`.
+- The panel does not recompute production readiness.
+- The panel does not expose deployment, release tag, retry, approval, mutation, or auto-enforcement actions.
+- The panel surfaces degraded or failing evidence as non-actionable operator messages.
+- The panel always preserves the `NOT_PRODUCTION_DEPLOYMENT` badge when RC evidence is shown.
+
+## Current operator-visible staging RC state
+
+Current operator-visible claim:
+
+`OPERATOR_VISIBLE_EVIDENCE_BACKED_STAGING_RELEASE_CANDIDATE_DECLARATION_INDEXED`
+
+Not claimed:
+
+- production-ready deployment
+- release tag
+- runtime mutation authorization
+- Redis mutation authorization
+- automatic production enforcement
+- operator-triggered release action
