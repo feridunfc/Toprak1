@@ -26,6 +26,7 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +72,8 @@ jobs:
           python -m pytest tests/core/test_canonical_worker_task_execution.py -q --tb=short
 
       - name: Run production Lua dispatch path tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
         run: |
           python -m pytest tests/core/test_production_lua_dispatch_path_contract.py tests/integration/test_production_lua_dispatch_path.py -q --tb=short
 
@@ -133,8 +136,10 @@ jobs:
           python scripts/canonical_worker_task_execution.py --json
 
       - name: Generate production Lua dispatch path artifact
+        env:
+          REDIS_URL: redis://localhost:6389/0
         run: |
-          python scripts/production_lua_dispatch_path.py --json --redis-url redis://localhost:6379/0
+          python scripts/production_lua_dispatch_path.py --json --redis-url redis://localhost:6389/0
 
       - name: Generate cognitive governance audit artifact
         run: |
@@ -232,5 +237,3 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
-
-
