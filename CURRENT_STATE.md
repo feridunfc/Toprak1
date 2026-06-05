@@ -692,3 +692,67 @@ Production readiness impact:
 ### Notes
 - RC artifact chain is read-only and deterministic before any production-ready claim.
 - Future sprints will implement production-ready claim with controlled deployment steps.
+## Sprint 32 Staging RC Evidence Index
+
+Sprint 32A-32E completed on `sprint/32-staging-rc-evidence-index`.
+
+Completed:
+
+- 32A: Staging RC evidence index contract documented in `docs/ops/staging_rc_evidence_index.md`.
+- 32B: Staging RC evidence index artifact generator added:
+  - `scripts/staging_rc_evidence_index.py`
+  - writes `docs/dashboard/artifacts/latest_staging_rc_evidence_index.json`.
+- 32C: Deterministic staging RC evidence index tests added:
+  - complete READY/PASS/RC_ALLOWED/boundary PASS chain => PASS
+  - missing decision artifact => FAIL
+  - malformed artifact => FAIL
+  - production decision NOT_READY => FAIL
+  - evidence freeze FAIL => FAIL
+  - staging RC gate RC_BLOCKED => FAIL
+  - staging RC boundary FAIL => FAIL
+  - stable artifact ordering verified
+- 32D: Staging RC evidence index artifact generated and uploaded by Authority Gate CI.
+- 32E: Current state and readiness docs updated.
+
+Latest verified gates:
+
+- `python scripts/staging_rc_evidence_index.py --json`
+  - `status=PASS`
+  - `decision_scope=EVIDENCE_BACKED_STAGING_RELEASE_CANDIDATE_ONLY`
+  - `staging_rc_indexed=true`
+  - `production_readiness_rollup_status=PASS`
+  - `production_readiness_decision=READY`
+  - `evidence_freeze_status=PASS`
+  - `staging_rc_decision=RC_ALLOWED`
+  - `staging_rc_boundary_status=PASS`
+  - `production_ready_claim=false`
+  - `deployment_attempted=false`
+  - `release_tag_created=false`
+  - `redis_mutation_attempted=false`
+  - `runtime_mutation_attempted=false`
+- Sprint 32 mini-gate:
+  - `tests/core/test_staging_rc_evidence_index.py`
+  - `tests/core/test_staging_rc_readiness_boundary.py`
+  - `16 passed`
+
+Production readiness impact:
+
+- The evidence-backed staging release candidate declaration is now indexed in one audit-friendly artifact.
+- The index binds the readiness rollup, readiness decision, evidence freeze, staging RC gate, and staging RC boundary artifacts.
+- Missing, malformed, NOT_READY, non-PASS, RC_BLOCKED, or boundary-failing inputs fail closed.
+- The index performs no Redis/runtime/canonical-state mutation.
+- The index does not deploy, create a release tag, or assert production-ready status.
+
+## Current indexed staging RC claim
+
+Current claim:
+
+`EVIDENCE_BACKED_STAGING_RELEASE_CANDIDATE_DECLARATION_INDEXED`
+
+Not claimed:
+
+- production-ready deployment
+- release tag
+- runtime mutation authorization
+- Redis mutation authorization
+- automatic production enforcement
