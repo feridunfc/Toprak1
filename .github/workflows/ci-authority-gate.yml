@@ -9,6 +9,7 @@ on:
     branches:
       - baseline/local-import
       - sprint/11-authority-evidence-hardening
+      - sprint/31-staging-rc-readiness-boundary
 
 jobs:
   authority-gate:
@@ -24,11 +25,15 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest fakeredis
+          python -m pip install pytest fakeredis pyyaml
 
       - name: Run authority tool tests
         run: |
           python -m pytest tests/core/test_authority_audit_tool.py tests/core/test_full_auto_smoke_script.py -q --tb=short
+
+      - name: Run staging RC readiness boundary tests
+        run: |
+          python -m pytest tests/core/test_staging_rc_readiness_boundary.py -q --tb=short
 
       - name: Generate authority dashboard artifact
         run: |
@@ -104,44 +109,6 @@ jobs:
         run: |
           python scripts/production_readiness_evidence_freeze.py --json
 
-      - name: Upload authority, replay, deployment, and recovery evidence artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: authority-replay-deployment-evidence
-          path: |
-            docs/dashboard/artifacts/latest_authority.json
-            docs/dashboard/artifacts/latest_authority_heatmap.json
-            docs/dashboard/artifacts/latest_replay.json
-            docs/dashboard/artifacts/latest_deployment_smoke.json
-            docs/dashboard/artifacts/latest_redis_failover_smoke.json
-            docs/dashboard/artifacts/latest_recovery_audit.json
-            docs/dashboard/artifacts/latest_recovery_requeue.json
-            docs/dashboard/artifacts/latest_recovery_requeue_drill.json
-            docs/dashboard/artifacts/latest_cold_restart_drill.json
-            docs/dashboard/artifacts/latest_zombie_completion_drill.json
-            docs/dashboard/artifacts/latest_recovery_auto_resume_guardrail.json
-            docs/dashboard/artifacts/latest_cognitive_governance_audit.json
-            docs/dashboard/artifacts/latest_semantic_advisory_contract.json
-            docs/dashboard/artifacts/latest_feedbackwriter_governance.json
-            docs/dashboard/artifacts/latest_semanticbridge_gate.json
-            docs/dashboard/artifacts/latest_advisory_governance_rollup.json
-            docs/dashboard/artifacts/latest_production_readiness_rollup.json
-            docs/dashboard/artifacts/latest_production_readiness_decision.json
-            docs/dashboard/artifacts/latest_production_readiness_evidence_freeze.json
-            docs/dashboard/artifacts/latest_zombie_completion_drill.json
-          if-no-files-found: error
-
-      - name: Smoke command dry run
-        run: |
-          python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
-      - name: Generate production readiness decision artifact
-        run: |
-          python scripts/production_readiness_decision.py --json
-
-      - name: Generate production readiness evidence freeze artifact
-        run: |
-          python scripts/production_readiness_evidence_freeze.py --json
-
       - name: Generate staging RC gate artifact
         run: |
           python scripts/staging_release_candidate_gate.py --json
@@ -150,10 +117,10 @@ jobs:
         run: |
           python scripts/staging_rc_readiness_boundary.py --json
 
-      - name: Upload authority, replay, deployment, and recovery evidence artifacts
+      - name: Upload Authority Gate evidence artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: authority-replay-deployment-evidence
+          name: authority-gate-evidence-${{ github.run_id }}
           path: |
             docs/dashboard/artifacts/latest_authority.json
             docs/dashboard/artifacts/latest_authority_heatmap.json
