@@ -976,3 +976,85 @@ Not claimed:
 - auto-resume authorization
 - operator-triggered runtime action
 - automatic production enforcement
+
+## Sprint 37 End-to-End Task Execution Product Path
+
+Sprint 37A-37E completed on `sprint/37-e2e-task-execution-product-path`.
+
+Completed:
+
+- 37A: End-to-end task execution product path contract documented in `docs/product/task_execution_flow.md`.
+- 37B: Safe task execution product path adapter added:
+  - `scripts/task_execution_product_path.py`
+  - supports `submit`, `run-worker-once`, `get-result`, and `demo`
+  - writes `docs/dashboard/artifacts/latest_task_execution_demo.json`
+- 37C: Deterministic E2E product path tests added:
+  - tenant-scoped task submission
+  - queued task claim
+  - safe echo executor execution
+  - task completion
+  - result readable by run id
+  - dashboard demo artifact written
+  - tenant scoping verified
+  - one worker call claims exactly one task
+  - unsupported task types rejected
+  - CLI demo supports `--message` without JSON quoting
+- 37D: E2E task execution product path tests and demo artifact generation wired into Authority Gate CI.
+- 37E: Current state and readiness docs updated.
+
+Latest verified gates:
+
+- `python scripts/task_execution_product_path.py demo --tenant demo --message hello`
+  - `status=PASS`
+  - `executor=EchoExecutor`
+  - `fallback_mode=artifact_backed_safe_local_adapter`
+  - lifecycle:
+    - `SUBMITTED`
+    - `QUEUED`
+    - `CLAIMED`
+    - `EXECUTED`
+    - `COMPLETED`
+  - result:
+    - `echo=hello`
+  - `production_llm_call_attempted=false`
+  - `deployment_attempted=false`
+  - `release_tag_created=false`
+  - `noncanonical_redis_mutation_attempted=false`
+  - `operator_action_buttons=false`
+- Sprint 37 mini-gate:
+  - `tests/integration/test_task_execution_product_path.py`
+  - `tests/core/test_worker_scheduler_health_signals.py`
+  - `tests/core/test_runtime_health_panel.py`
+  - `tests/core/test_operator_rc_dashboard_panel.py`
+  - `tests/core/test_operator_rc_evidence_panel.py`
+  - `tests/core/test_staging_rc_evidence_index.py`
+  - `tests/core/test_staging_rc_readiness_boundary.py`
+  - `101 passed`
+
+Product readiness impact:
+
+- The system now demonstrates a tenant-scoped task execution product path.
+- A task can be submitted, queued, claimed, executed with a safe echo executor, completed, and read by run id.
+- The product path produces a dashboard-readable demo artifact.
+- The implementation uses an artifact-backed safe local adapter because no stable repository task submit/worker entrypoint was found during Sprint 37A discovery.
+- The fallback is explicitly documented in the demo artifact and tests.
+- The path does not call production LLMs.
+- The path does not deploy or create release tags.
+- The path does not perform noncanonical Redis mutation.
+- The path does not expose operator action buttons.
+
+## Current product-core task execution state
+
+Current product claim:
+
+`TENANT_SCOPED_TASK_EXECUTION_PATH_VISIBLE`
+
+Not claimed:
+
+- production-ready deployment
+- release tag
+- production LLM execution
+- noncanonical Redis mutation
+- operator-triggered requeue action
+- operator-triggered auto-resume action
+- production-ready status
