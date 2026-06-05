@@ -25,7 +25,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest fakeredis pyyaml
+          python -m pip install pytest pytest-asyncio fakeredis pyyaml
 
       - name: Run authority tool tests
         run: |
