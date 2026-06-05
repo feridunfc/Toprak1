@@ -10,7 +10,7 @@ on:
       - baseline/local-import
       - sprint/11-authority-evidence-hardening
       - sprint/37-e2e-task-execution-product-path
-      - sprint/38-canonical-worker-task-execution-binding
+      - sprint/39-scheduler-dispatched-task-execution-binding
 
 jobs:
   authority-gate:
