@@ -10,6 +10,7 @@ on:
       - baseline/local-import
       - sprint/11-authority-evidence-hardening
       - sprint/37-e2e-task-execution-product-path
+      - sprint/38-canonical-worker-task-execution-binding
 
 jobs:
   authority-gate:
@@ -54,6 +55,10 @@ jobs:
       - name: Run worker scheduler health signal tests
         run: |
           python -m pytest tests/core/test_worker_scheduler_health_signals.py -q --tb=short
+
+      - name: Run canonical worker task execution tests
+        run: |
+          python -m pytest tests/core/test_canonical_worker_task_execution.py -q --tb=short
 
       - name: Run e2e task execution product path tests
         run: |
@@ -108,6 +113,10 @@ jobs:
       - name: Generate task execution demo artifact
         run: |
           python scripts/task_execution_product_path.py demo --tenant demo --message hello
+
+      - name: Generate canonical worker task execution artifact
+        run: |
+          python scripts/canonical_worker_task_execution.py --json
 
       - name: Generate cognitive governance audit artifact
         run: |
@@ -184,6 +193,7 @@ jobs:
             docs/dashboard/artifacts/latest_worker_health_signal.json
             docs/dashboard/artifacts/latest_scheduler_control_signal.json
             docs/dashboard/artifacts/latest_task_execution_demo.json
+            docs/dashboard/artifacts/latest_canonical_worker_task_execution.json
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json
             docs/dashboard/artifacts/latest_semantic_advisory_contract.json
             docs/dashboard/artifacts/latest_feedbackwriter_governance.json
