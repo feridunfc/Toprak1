@@ -9,7 +9,7 @@ on:
     branches:
       - baseline/local-import
       - sprint/11-authority-evidence-hardening
-      - sprint/32-staging-rc-evidence-index
+      - sprint/33-operator-dashboard-rc-evidence-panel
 
 jobs:
   authority-gate:
@@ -38,6 +38,10 @@ jobs:
       - name: Run staging RC evidence index tests
         run: |
           python -m pytest tests/core/test_staging_rc_evidence_index.py -q --tb=short
+
+      - name: Run operator RC evidence panel tests
+        run: |
+          python -m pytest tests/core/test_operator_rc_evidence_panel.py -q --tb=short
 
       - name: Generate authority dashboard artifact
         run: |
@@ -125,6 +129,10 @@ jobs:
         run: |
           python scripts/staging_rc_evidence_index.py --json
 
+      - name: Generate operator RC evidence panel artifact
+        run: |
+          python scripts/operator_rc_evidence_panel.py --json
+
       - name: Upload Authority Gate evidence artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -152,6 +160,7 @@ jobs:
             docs/dashboard/artifacts/latest_staging_release_candidate_gate.json
             docs/dashboard/artifacts/latest_staging_rc_readiness_boundary.json
             docs/dashboard/artifacts/latest_staging_rc_evidence_index.json
+            docs/dashboard/artifacts/latest_operator_rc_evidence_panel.json
           if-no-files-found: error
 
       - name: Smoke command dry run
