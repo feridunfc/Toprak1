@@ -821,3 +821,73 @@ Not claimed:
 - Redis mutation authorization
 - automatic production enforcement
 - operator-triggered release action
+
+## Sprint 34 Operator Dashboard RC Panel UI Wiring
+
+Sprint 34A-34E completed on `sprint/34-operator-dashboard-rc-panel-ui-wiring`.
+
+Completed:
+
+- 34A: Operator RC panel UI wiring contract documented in `docs/dashboard/operator_rc_panel_ui_wiring.md`.
+- 34B: Operator RC dashboard panel loader added:
+  - `scripts/operator_rc_dashboard_panel.py`
+  - writes `docs/dashboard/artifacts/latest_operator_rc_dashboard_panel.json`.
+- 34C: Deterministic operator RC dashboard panel rendering tests added:
+  - PASS operator panel => `RC_ALLOWED_INDEXED`
+  - missing input => `PANEL_UNAVAILABLE`
+  - malformed input => `PANEL_INVALID`
+  - operator panel FAIL => degraded read-only panel
+  - invalid decision scope => `SAFETY_VIOLATION`
+  - `actionable=true` => `SAFETY_VIOLATION`
+  - missing evidence manifest hash => `RC_BLOCKED_OR_NOT_READY`
+  - production/deploy/tag/Redis/runtime/canonical mutation flags => `SAFETY_VIOLATION`
+  - forbidden action labels are never rendered as actions
+  - `NOT_PRODUCTION_DEPLOYMENT` badge is always present when evidence renders
+- 34D: Operator RC dashboard panel tests and artifact generation wired into Authority Gate CI.
+- 34E: Current state and readiness docs updated.
+
+Latest verified gates:
+
+- `python scripts/operator_rc_dashboard_panel.py --json`
+  - `status=PASS`
+  - `title=Staging RC Evidence`
+  - `panel_status=RC_ALLOWED_INDEXED`
+  - `actionable=false`
+  - `actions=[]`
+  - `NOT_PRODUCTION_DEPLOYMENT` badge present
+  - `production_ready_claim=false`
+  - `deployment_attempted=false`
+  - `release_tag_created=false`
+  - `redis_mutation_attempted=false`
+  - `runtime_mutation_attempted=false`
+- Sprint 34 mini-gate:
+  - `tests/core/test_operator_rc_dashboard_panel.py`
+  - `tests/core/test_operator_rc_evidence_panel.py`
+  - `tests/core/test_staging_rc_evidence_index.py`
+  - `tests/core/test_staging_rc_readiness_boundary.py`
+  - `46 passed`
+
+Production readiness impact:
+
+- The operator-visible staging RC evidence panel is now available as a dashboard-renderable read-only model.
+- The dashboard panel has a single source of truth: `latest_operator_rc_evidence_panel.json`.
+- The dashboard panel does not recompute production readiness or RC state.
+- The dashboard panel does not expose deployment, release tag, retry, approval, mutation, promotion, or auto-enforcement actions.
+- The dashboard panel surfaces degraded or failing evidence as non-actionable operator messages.
+- The dashboard panel always preserves the `NOT_PRODUCTION_DEPLOYMENT` badge when evidence is shown.
+
+## Current dashboard-visible staging RC state
+
+Current dashboard-visible claim:
+
+`EVIDENCE_BACKED_STAGING_RELEASE_CANDIDATE_DECLARATION_INDEXED_AND_OPERATOR_VISIBLE`
+
+Not claimed:
+
+- production-ready deployment
+- release tag
+- runtime mutation authorization
+- Redis mutation authorization
+- automatic production enforcement
+- operator-triggered release action
+- dashboard-triggered release action
