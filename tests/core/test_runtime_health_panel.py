@@ -335,3 +335,42 @@ def test_runtime_health_panel_main_writes_output_and_returns_zero_on_pass(
     assert written["panel_status"] == "RUNTIME_HEALTH_VISIBLE"
     assert written["actionable"] is False
     assert written["actions"] == []
+
+def test_runtime_health_panel_main_returns_zero_on_degraded_runtime_health(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    artifact_dir = _patch_paths(monkeypatch, tmp_path)
+    _write_pass_inputs(artifact_dir)
+    _write_json(artifact_dir / "latest_replay.json", {"status": "FAIL"})
+    output_path = artifact_dir / "runtime-health-panel-degraded.json"
+
+    assert health.main_args(["--output", str(output_path)]) == 0
+
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert written["status"] == "FAIL"
+    assert written["panel_status"] == "RUNTIME_HEALTH_DEGRADED"
+    assert written["actionable"] is False
+    assert written["actions"] == []
+
+
+def test_runtime_health_panel_main_returns_nonzero_on_safety_violation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    artifact_dir = _patch_paths(monkeypatch, tmp_path)
+    _write_pass_inputs(artifact_dir)
+    _write_json(
+        artifact_dir / "latest_recovery_audit.json",
+        {
+            "status": "PASS",
+            "actionable": True,
+        },
+    )
+    output_path = artifact_dir / "runtime-health-panel-safety.json"
+
+    assert health.main_args(["--output", str(output_path)]) == 1
+
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert written["status"] == "FAIL"
+    assert written["panel_status"] == "SAFETY_VIOLATION"

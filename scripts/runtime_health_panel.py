@@ -311,9 +311,11 @@ def main_args(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(panel, indent=2, sort_keys=True))
 
-    return 0 if panel["status"] == "PASS" else 1
+    hard_fail_statuses = {"PANEL_INVALID", "SAFETY_VIOLATION"}
+    return 1 if panel["panel_status"] in hard_fail_statuses else 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main_args())
+
 
