@@ -151,6 +151,24 @@ class RecordingFakeExecutor(FakeExecutor):
         return await super().execute(run_event)
 
 
+
+def evaluate_safety(artifact: dict[str, Any]) -> list[str]:
+    required_false = [
+        "manual_worker_message_injection_used",
+        "fallback_used",
+        "product_fallback_used",
+        "production_llm_call_attempted",
+        "deployment_attempted",
+        "release_tag_created",
+        "noncanonical_redis_mutation_attempted",
+        "operator_action_buttons",
+    ]
+
+    failing_reasons: list[str] = []
+    for key in required_false:
+        if artifact.get(key) is not False:
+            failing_reasons.append(f"{key} is not false")
+    return failing_reasons
 async def build_artifact() -> dict[str, Any]:
     redis = FakeRedis()
 
@@ -399,4 +417,5 @@ def main_args(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main_args())
+
 
