@@ -9,7 +9,7 @@ on:
     branches:
       - baseline/local-import
       - sprint/11-authority-evidence-hardening
-      - sprint/35-dashboard-runtime-health-panel
+      - sprint/36-worker-scheduler-health-signal-artifacts
 
 jobs:
   authority-gate:
@@ -50,6 +50,10 @@ jobs:
       - name: Run runtime health panel tests
         run: |
           python -m pytest tests/core/test_runtime_health_panel.py -q --tb=short
+
+      - name: Run worker scheduler health signal tests
+        run: |
+          python -m pytest tests/core/test_worker_scheduler_health_signals.py -q --tb=short
 
       - name: Generate authority dashboard artifact
         run: |
@@ -92,6 +96,10 @@ jobs:
       - name: Generate recovery auto-resume guardrail artifact
         run: |
           python scripts/recovery_auto_resume_guardrail.py --json
+
+      - name: Generate worker scheduler health signal artifacts
+        run: |
+          python scripts/worker_scheduler_health_signals.py --json
 
       - name: Generate cognitive governance audit artifact
         run: |
@@ -165,6 +173,8 @@ jobs:
             docs/dashboard/artifacts/latest_cold_restart_drill.json
             docs/dashboard/artifacts/latest_zombie_completion_drill.json
             docs/dashboard/artifacts/latest_recovery_auto_resume_guardrail.json
+            docs/dashboard/artifacts/latest_worker_health_signal.json
+            docs/dashboard/artifacts/latest_scheduler_control_signal.json
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json
             docs/dashboard/artifacts/latest_semantic_advisory_contract.json
             docs/dashboard/artifacts/latest_feedbackwriter_governance.json
