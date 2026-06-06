@@ -11,6 +11,9 @@ on:
       - sprint/11-authority-evidence-hardening
       - sprint/37-e2e-task-execution-product-path
       - sprint/40-production-lua-dispatch-path-binding
+      - sprint/41-worker-stream-consume-loop-binding
+      - sprint/42-e2e-tenant-submit-worker-stream
+      - sprint/42-e2e-tenant-submit-worker-stream-result-read
 
 jobs:
   authority-gate:
@@ -239,6 +242,8 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
+
 
 
 
