@@ -1176,3 +1176,43 @@ Known limitations:
 - Does not prove multi-tenant fairness under load.
 - Does not prove the long-running worker stream consume loop.
 - Does not assert production deployment readiness.
+
+<!-- SPRINT_43_THIN_PRODUCT_TASK_CLI -->
+
+## Sprint 43 — Thin Product Task CLI
+
+Status: PASS
+
+Sprint 43 exposes the proven Sprint 42 runtime path through user-visible CLI commands.
+
+User-visible commands:
+
+- scripts/ironclad_submit.py
+- scripts/ironclad_demo.py
+- scripts/ironclad_result.py
+
+Current product claim:
+
+USER_VISIBLE_TENANT_TASK_SUBMIT_AND_RESULT_READ_BOUND
+
+Verified product flow:
+
+- user-visible submit command returns tenant, task, and run metadata
+- demo command executes the Sprint 42 runtime path
+- production Lua/EVALSHA dispatch is used
+- Redis stream worker consume loop is used
+- direct _process_message injection is not used as the product path
+- FakeExecutor executes through the worker path
+- StateStore result/completion is written
+- result command reads the completed result by run id
+- submitted message is surfaced in the product-visible result
+
+Known limitations:
+
+- FakeExecutor only
+- no production LLM call
+- no HTTP/API endpoint yet
+- submit command is still a thin CLI envelope; full runtime execution is performed by ironclad_demo.py
+- underlying Sprint 42 runtime artifact may still contain raw 
+o_prompt; Sprint 43 normalizes the product-visible result
+- no deployment or release tag claim
