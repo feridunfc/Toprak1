@@ -66,6 +66,12 @@ jobs:
         run: |
           python -m pytest tests/core/test_production_lua_dispatch_path_contract.py tests/integration/test_production_lua_dispatch_path.py -q --tb=short
 
+
+      - name: Run worker stream consume loop tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python -m pytest tests/integration/test_worker_stream_consume_loop.py -q --tb=short
       - name: Run e2e task execution product path tests
         run: |
           python -m pytest tests/integration/test_task_execution_product_path.py -q --tb=short
@@ -130,6 +136,12 @@ jobs:
         run: |
           python scripts/production_lua_dispatch_path.py --json --redis-url redis://localhost:6389/0
 
+
+      - name: Generate worker stream consume loop artifact
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python scripts/worker_stream_consume_loop.py --json --redis-url redis://localhost:6389/0
       - name: Generate cognitive governance audit artifact
         run: |
           python scripts/cognitive_governance_audit.py --json
@@ -207,6 +219,7 @@ jobs:
             docs/dashboard/artifacts/latest_task_execution_demo.json
             docs/dashboard/artifacts/latest_canonical_worker_task_execution.json
             docs/dashboard/artifacts/latest_production_lua_dispatch_path.json
+            docs/dashboard/artifacts/latest_worker_stream_consume_loop.json
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json
             docs/dashboard/artifacts/latest_semantic_advisory_contract.json
             docs/dashboard/artifacts/latest_feedbackwriter_governance.json
@@ -226,6 +239,8 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
+
 
 
 
