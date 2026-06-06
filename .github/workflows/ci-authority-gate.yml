@@ -1,4 +1,4 @@
-﻿name: Authority Gate
+﻿﻿name: Authority Gate
 
 on:
   pull_request:
@@ -270,6 +270,8 @@ jobs:
             docs/dashboard/artifacts/latest_runtime_health_panel.json
           if-no-files-found: error
 
+
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+        
