@@ -1,4 +1,4 @@
-# Toprak1 / IRONCLAD - Current State
+﻿# Toprak1 / IRONCLAD - Current State
 
 ## Current branch line
 
@@ -67,7 +67,7 @@ Sprint 12 starts the replay evidence gate work. Current replay dashboard support
 
 ## Sprint 12 status
 
-Sprint 12 — Replay Evidence Gate MVP is complete.
+Sprint 12 â€” Replay Evidence Gate MVP is complete.
 
 Completed:
 
@@ -1061,7 +1061,7 @@ Not claimed:
 
 <!-- SPRINT_38_CANONICAL_WORKER_TASK_EXECUTION_BINDING -->
 
-## Sprint 38 — Canonical Worker Task Execution Binding
+## Sprint 38 â€” Canonical Worker Task Execution Binding
 
 Status: PASS
 
@@ -1095,7 +1095,7 @@ Known limitation:
 
 This is not yet full scheduler-dispatched task execution. The proof starts from a serialized RunRequestedEvent and validates the canonical WorkerConsumer process-message lifecycle.
 
-## Sprint 39 — Scheduler-Dispatched Task Execution Binding
+## Sprint 39 â€” Scheduler-Dispatched Task Execution Binding
 
 Status: Complete
 
@@ -1133,7 +1133,7 @@ Known limitations:
 - Does not prove multi-tenant fairness under load.
 - Does not assert production deployment readiness.
 
-## Sprint 40 — Production Lua Dispatch Path Binding
+## Sprint 40 â€” Production Lua Dispatch Path Binding
 
 Status: Complete
 
@@ -1176,3 +1176,44 @@ Known limitations:
 - Does not prove multi-tenant fairness under load.
 - Does not prove the long-running worker stream consume loop.
 - Does not assert production deployment readiness.
+
+<!-- SPRINT_43_THIN_PRODUCT_TASK_CLI -->
+
+## Sprint 43 â€” Thin Product Task CLI
+
+Status: PASS
+
+Sprint 43 exposes the proven Sprint 42 runtime path through user-visible CLI commands.
+
+User-visible commands:
+
+- scripts/ironclad_submit.py
+- scripts/ironclad_demo.py
+- scripts/ironclad_result.py
+
+Current product claim:
+
+USER_VISIBLE_TENANT_TASK_SUBMIT_AND_RESULT_READ_BOUND
+
+Verified product flow:
+
+- user-visible submit command returns tenant, task, and run metadata
+- demo command executes the Sprint 42 runtime path
+- production Lua/EVALSHA dispatch is used
+- Redis stream worker consume loop is used
+- direct _process_message injection is not used as the product path
+- FakeExecutor executes through the worker path
+- StateStore result/completion is written
+- result command reads the completed result by run id
+- submitted message is surfaced in the product-visible result
+
+Known limitations:
+
+- FakeExecutor only
+- no production LLM call
+- no HTTP/API endpoint yet
+- submit command is still a thin CLI envelope; full runtime execution is performed by ironclad_demo.py
+- underlying Sprint 42 runtime artifact may still contain raw 
+no_prompt; Sprint 43 normalizes the product-visible result
+- no deployment or release tag claim
+
