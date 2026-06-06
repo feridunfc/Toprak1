@@ -1,4 +1,4 @@
-# Toprak1 / IRONCLAD - Current State
+﻿# Toprak1 / IRONCLAD - Current State
 
 ## Current branch line
 
@@ -67,7 +67,7 @@ Sprint 12 starts the replay evidence gate work. Current replay dashboard support
 
 ## Sprint 12 status
 
-Sprint 12 — Replay Evidence Gate MVP is complete.
+Sprint 12 â€” Replay Evidence Gate MVP is complete.
 
 Completed:
 
@@ -1061,7 +1061,7 @@ Not claimed:
 
 <!-- SPRINT_38_CANONICAL_WORKER_TASK_EXECUTION_BINDING -->
 
-## Sprint 38 — Canonical Worker Task Execution Binding
+## Sprint 38 â€” Canonical Worker Task Execution Binding
 
 Status: PASS
 
@@ -1095,7 +1095,7 @@ Known limitation:
 
 This is not yet full scheduler-dispatched task execution. The proof starts from a serialized RunRequestedEvent and validates the canonical WorkerConsumer process-message lifecycle.
 
-## Sprint 39 — Scheduler-Dispatched Task Execution Binding
+## Sprint 39 â€” Scheduler-Dispatched Task Execution Binding
 
 Status: Complete
 
@@ -1133,7 +1133,7 @@ Known limitations:
 - Does not prove multi-tenant fairness under load.
 - Does not assert production deployment readiness.
 
-## Sprint 40 — Production Lua Dispatch Path Binding
+## Sprint 40 â€” Production Lua Dispatch Path Binding
 
 Status: Complete
 
@@ -1179,7 +1179,7 @@ Known limitations:
 
 <!-- SPRINT_43_THIN_PRODUCT_TASK_CLI -->
 
-## Sprint 43 — Thin Product Task CLI
+## Sprint 43 â€” Thin Product Task CLI
 
 Status: PASS
 
@@ -1214,5 +1214,6 @@ Known limitations:
 - no HTTP/API endpoint yet
 - submit command is still a thin CLI envelope; full runtime execution is performed by ironclad_demo.py
 - underlying Sprint 42 runtime artifact may still contain raw 
-o_prompt; Sprint 43 normalizes the product-visible result
+no_prompt; Sprint 43 normalizes the product-visible result
 - no deployment or release tag claim
+

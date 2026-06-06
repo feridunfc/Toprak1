@@ -1,4 +1,4 @@
-# Toprak1 / IRONCLAD - Production Readiness Checklist
+﻿# Toprak1 / IRONCLAD - Production Readiness Checklist
 
 ## Current readiness level
 
@@ -447,7 +447,7 @@ Current product claim:
 
 <!-- SPRINT_38_CANONICAL_WORKER_TASK_EXECUTION_BINDING -->
 
-## Sprint 38 — Canonical Worker Task Execution Binding Readiness
+## Sprint 38 â€” Canonical Worker Task Execution Binding Readiness
 
 Status: PASS
 
@@ -494,7 +494,7 @@ This readiness state does not claim full scheduler-dispatched task execution. Sc
 
 <!-- SPRINT_43_THIN_PRODUCT_TASK_CLI -->
 
-## Sprint 43 — Thin Product Task CLI Readiness
+## Sprint 43 â€” Thin Product Task CLI Readiness
 
 Status: PASS
 
@@ -503,7 +503,7 @@ Readiness evidence:
 - scripts/ironclad_submit.py
 - scripts/ironclad_demo.py
 - scripts/ironclad_result.py
-- 	ests/integration/test_thin_product_task_cli.py
+- 	tests/integration/test_thin_product_task_cli.py
 - docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json
 - Authority Gate CI runs thin product CLI integration tests
 - Authority Gate CI generates the thin product CLI demo artifact
@@ -539,3 +539,4 @@ Known limitations:
 - no production LLM
 - no HTTP/API endpoint yet
 - no production-ready claim
+
