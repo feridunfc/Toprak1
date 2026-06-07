@@ -1,11 +1,12 @@
-﻿import json
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
 ARTIFACT_PATH = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json")
-REDIS_URL = "redis://localhost:6389/0"
 
 
 def run_command(args):
