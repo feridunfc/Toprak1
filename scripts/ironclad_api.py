@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import redis.asyncio as redis_async
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -205,8 +207,28 @@ def _evaluate(artifact: dict[str, Any]) -> list[str]:
     return failing
 
 
+async def _wait_for_redis(redis_url: str, timeout_s: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    last_error: Exception | None = None
+
+    while asyncio.get_running_loop().time() < deadline:
+        client = redis_async.from_url(redis_url, decode_responses=True)
+        try:
+            await client.ping()
+            await client.aclose()
+            return
+        except Exception as exc:
+            last_error = exc
+            await client.aclose()
+            await asyncio.sleep(0.2)
+
+    raise RuntimeError(f"Redis did not become ready for API self-test: {last_error!r}")
+
+
 async def self_test(redis_url: str, tenant_id: str, message: str) -> dict[str, Any]:
     from httpx import ASGITransport, AsyncClient
+
+    await _wait_for_redis(redis_url)
 
     test_app = create_app(redis_url)
     transport = ASGITransport(app=test_app)
@@ -304,3 +326,4 @@ def main_args(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main_args())
+
