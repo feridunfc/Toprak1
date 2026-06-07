@@ -101,11 +101,39 @@ jobs:
         run: |
           python -m pytest tests/integration/test_worker_stream_consume_loop.py -q --tb=short
 
+      - name: Reset integration Redis before thin product CLI tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python - <<'PY'
+          import os
+          import redis
+
+          url = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
+          client = redis.Redis.from_url(url, decode_responses=True)
+          client.flushdb()
+          print(f"Redis FLUSHDB completed for {url}")
+          PY
+
       - name: Run thin product task CLI tests
         env:
           REDIS_URL: redis://localhost:6389/0
         run: |
           python -m pytest tests/integration/test_thin_product_task_cli.py -q --tb=short
+
+      - name: Reset integration Redis before HTTP and payload tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python - <<'PY'
+          import os
+          import redis
+
+          url = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
+          client = redis.Redis.from_url(url, decode_responses=True)
+          client.flushdb()
+          print(f"Redis FLUSHDB completed for {url}")
+          PY
 
       - name: Run minimal product task HTTP API tests
         env:
@@ -336,6 +364,8 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
+
 
 
 
