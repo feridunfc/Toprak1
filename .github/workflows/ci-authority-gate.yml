@@ -62,9 +62,32 @@ jobs:
           python -m pytest tests/core/test_canonical_worker_task_execution.py -q --tb=short
 
       - name: Start integration Redis for Redis-backed tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
         run: |
+          docker compose -f docker-compose.integration.yml down --remove-orphans
           docker compose -f docker-compose.integration.yml up -d --remove-orphans
-          sleep 5
+          docker compose -f docker-compose.integration.yml ps
+          python - <<'PY'
+          import os
+          import time
+          import redis
+
+          url = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
+          last_error = None
+
+          for attempt in range(40):
+              try:
+                  client = redis.Redis.from_url(url, decode_responses=True)
+                  assert client.ping() is True
+                  print(f"Redis ready at {url} on attempt {attempt + 1}")
+                  raise SystemExit(0)
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(0.5)
+
+          raise SystemExit(f"Redis did not become ready at {url}: {last_error!r}")
+          PY
 
       - name: Run production Lua dispatch path tests
         env:
@@ -79,6 +102,8 @@ jobs:
           python -m pytest tests/integration/test_worker_stream_consume_loop.py -q --tb=short
 
       - name: Run thin product task CLI tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
         run: |
           python -m pytest tests/integration/test_thin_product_task_cli.py -q --tb=short
 
@@ -311,4 +336,6 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
+
 
