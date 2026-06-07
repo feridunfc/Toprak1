@@ -145,7 +145,7 @@ async def _wait_until(predicate, timeout_s: float = 5.0, interval_s: float = 0.0
     return predicate()
 
 
-async def build_artifact(redis_url: str | None = None) -> dict[str, Any]:
+async def build_artifact(redis_url: str | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6389/0")
 
     try:
@@ -161,7 +161,7 @@ async def build_artifact(redis_url: str | None = None) -> dict[str, Any]:
     shard = 0
     worker_group = "default"
     worker_id = "worker-e2e-tenant-submit-worker-stream-result-read-demo"
-    payload = {"prompt": "hello e2e tenant submit worker stream result read"}
+    payload = payload or {"prompt": "hello e2e tenant submit worker stream result read"}
 
     calls: dict[str, list[Any]] = {
         "should_execute": [],
@@ -372,6 +372,15 @@ async def build_artifact(redis_url: str | None = None) -> dict[str, Any]:
             "pending_count_after_consume": pending_count,
             "calls": calls,
             "executor_invocations": executor.invocations,
+            "submitted_payload": payload,
+            "run_requested_payload": payload,
+            "executor_payload": executor.invocations[0].get("payload", {}) if executor.invocations else {},
+            "state_store_result_input": result_payload.get("input", {}) if isinstance(result_payload, dict) else {},
+            "runtime_payload_propagated": (
+                bool(executor.invocations)
+                and executor.invocations[0].get("payload", {}) == payload
+                and result_payload.get("input", {}) == payload
+            ),
         }
 
         failing = evaluate_artifact(artifact)
@@ -424,4 +433,5 @@ def main_args(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main_args())
+
 
