@@ -16,6 +16,7 @@ on:
       - sprint/42-e2e-tenant-submit-worker-stream-result-read
       - sprint/43-thin-product-task-cli
       - sprint/44-minimal-product-task-http-api
+      - fix/sprint-45-authority-gate-yaml-wiring
 
 jobs:
   authority-gate:
@@ -93,6 +94,12 @@ jobs:
         run: |
           python -m pytest tests/integration/test_e2e_tenant_submit_worker_stream.py -q --tb=short
 
+
+      - name: Run runtime payload propagation tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python -m pytest tests/integration/test_runtime_payload_propagation.py -q --tb=short
       - name: Run e2e tenant submit worker stream result read tests
         env:
           REDIS_URL: redis://localhost:6389/0
@@ -190,6 +197,12 @@ jobs:
         run: |
           python scripts/e2e_tenant_submit_worker_stream.py --json --redis-url redis://localhost:6389/0
 
+
+      - name: Generate runtime payload propagation artifact
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python scripts/runtime_payload_propagation.py --json --redis-url redis://localhost:6389/0
       - name: Generate e2e tenant submit worker stream result read artifact
         env:
           REDIS_URL: redis://localhost:6389/0
@@ -277,6 +290,7 @@ jobs:
             docs/dashboard/artifacts/latest_e2e_tenant_submit_worker_stream.json
             docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json
             docs/dashboard/artifacts/latest_minimal_product_task_http_api.json
+            docs/dashboard/artifacts/latest_runtime_payload_propagation.json
             docs/dashboard/artifacts/latest_e2e_tenant_submit_worker_stream_result_read.json
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json
             docs/dashboard/artifacts/latest_semantic_advisory_contract.json
@@ -298,5 +312,7 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
+
 
 
