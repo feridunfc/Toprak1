@@ -1,6 +1,7 @@
-﻿﻿name: Authority Gate
+﻿name: Authority Gate
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - baseline/local-import
@@ -8,15 +9,9 @@ on:
   push:
     branches:
       - baseline/local-import
-      - sprint/11-authority-evidence-hardening
-      - sprint/37-e2e-task-execution-product-path
-      - sprint/40-production-lua-dispatch-path-binding
-      - sprint/41-worker-stream-consume-loop-binding
-      - sprint/42-e2e-tenant-submit-worker-stream
-      - sprint/42-e2e-tenant-submit-worker-stream-result-read
-      - sprint/43-thin-product-task-cli
-      - sprint/44-minimal-product-task-http-api
-      - fix/sprint-45-authority-gate-yaml-wiring
+      - main
+      - "sprint/**"
+      - "fix/**"
 
 jobs:
   authority-gate:
@@ -82,24 +77,24 @@ jobs:
         run: |
           python -m pytest tests/integration/test_thin_product_task_cli.py -q --tb=short
 
-
       - name: Run minimal product task HTTP API tests
         env:
           REDIS_URL: redis://localhost:6389/0
         run: |
           python -m pytest tests/integration/test_minimal_product_task_http_api.py -q --tb=short
+
       - name: Run e2e tenant submit worker stream tests
         env:
           REDIS_URL: redis://localhost:6389/0
         run: |
           python -m pytest tests/integration/test_e2e_tenant_submit_worker_stream.py -q --tb=short
 
-
       - name: Run runtime payload propagation tests
         env:
           REDIS_URL: redis://localhost:6389/0
         run: |
           python -m pytest tests/integration/test_runtime_payload_propagation.py -q --tb=short
+
       - name: Run e2e tenant submit worker stream result read tests
         env:
           REDIS_URL: redis://localhost:6389/0
@@ -185,24 +180,24 @@ jobs:
         run: |
           python scripts/ironclad_demo.py --tenant demo --message "hello from product CLI" --redis-url redis://localhost:6389/0 --json
 
-
       - name: Generate minimal product task HTTP API artifact
         env:
           REDIS_URL: redis://localhost:6389/0
         run: |
           python scripts/ironclad_api.py --self-test --tenant demo --message "hello from HTTP API" --redis-url redis://localhost:6389/0 --json
+
       - name: Generate e2e tenant submit worker stream artifact
         env:
           REDIS_URL: redis://localhost:6389/0
         run: |
           python scripts/e2e_tenant_submit_worker_stream.py --json --redis-url redis://localhost:6389/0
 
-
       - name: Generate runtime payload propagation artifact
         env:
           REDIS_URL: redis://localhost:6389/0
         run: |
           python scripts/runtime_payload_propagation.py --json --redis-url redis://localhost:6389/0
+
       - name: Generate e2e tenant submit worker stream result read artifact
         env:
           REDIS_URL: redis://localhost:6389/0
@@ -308,11 +303,6 @@ jobs:
             docs/dashboard/artifacts/latest_runtime_health_panel.json
           if-no-files-found: error
 
-
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
-
-
-
-
