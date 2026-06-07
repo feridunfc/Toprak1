@@ -17,6 +17,16 @@ jobs:
   authority-gate:
     runs-on: ubuntu-latest
 
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -63,53 +73,51 @@ jobs:
 
       - name: Start integration Redis for Redis-backed tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
-          docker compose -f docker-compose.integration.yml down --remove-orphans
-          docker compose -f docker-compose.integration.yml up -d --remove-orphans
-          docker compose -f docker-compose.integration.yml ps
           python - <<'PY'
           import os
           import time
           import redis
 
-          url = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
+          url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
           last_error = None
 
           for attempt in range(40):
               try:
                   client = redis.Redis.from_url(url, decode_responses=True)
-                  assert client.ping() is True
-                  print(f"Redis ready at {url} on attempt {attempt + 1}")
+                  client.ping()
+                  client.flushdb()
+                  print(f"Redis ready at {url}")
                   raise SystemExit(0)
               except Exception as exc:
                   last_error = exc
-                  time.sleep(0.5)
+                  time.sleep(1)
 
-          raise SystemExit(f"Redis did not become ready at {url}: {last_error!r}")
+          raise SystemExit(f"Redis not ready at {url}: {last_error}")
+
           PY
-
       - name: Run production Lua dispatch path tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/core/test_production_lua_dispatch_path_contract.py tests/integration/test_production_lua_dispatch_path.py -q --tb=short
 
       - name: Run worker stream consume loop tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/integration/test_worker_stream_consume_loop.py -q --tb=short
 
       - name: Reset integration Redis before thin product CLI tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python - <<'PY'
           import os
           import redis
 
-          url = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
+          url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
           client = redis.Redis.from_url(url, decode_responses=True)
           client.flushdb()
           print(f"Redis FLUSHDB completed for {url}")
@@ -117,19 +125,19 @@ jobs:
 
       - name: Run thin product task CLI tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/integration/test_thin_product_task_cli.py -q --tb=short
 
       - name: Reset integration Redis before HTTP and payload tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python - <<'PY'
           import os
           import redis
 
-          url = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
+          url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
           client = redis.Redis.from_url(url, decode_responses=True)
           client.flushdb()
           print(f"Redis FLUSHDB completed for {url}")
@@ -137,25 +145,25 @@ jobs:
 
       - name: Run minimal product task HTTP API tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/integration/test_minimal_product_task_http_api.py -q --tb=short
 
       - name: Run e2e tenant submit worker stream tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/integration/test_e2e_tenant_submit_worker_stream.py -q --tb=short
 
       - name: Run runtime payload propagation tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/integration/test_runtime_payload_propagation.py -q --tb=short
 
       - name: Run e2e tenant submit worker stream result read tests
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/integration/test_e2e_tenant_submit_worker_stream_result_read.py -q --tb=short
 
@@ -224,43 +232,43 @@ jobs:
 
       - name: Generate production Lua dispatch path artifact
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
-          python scripts/production_lua_dispatch_path.py --json --redis-url redis://localhost:6389/0
+          python scripts/production_lua_dispatch_path.py --json --redis-url redis://localhost:6379/0
 
       - name: Generate worker stream consume loop artifact
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
-          python scripts/worker_stream_consume_loop.py --json --redis-url redis://localhost:6389/0
+          python scripts/worker_stream_consume_loop.py --json --redis-url redis://localhost:6379/0
 
       - name: Generate thin product task CLI demo artifact
         run: |
-          python scripts/ironclad_demo.py --tenant demo --message "hello from product CLI" --redis-url redis://localhost:6389/0 --json
+          python scripts/ironclad_demo.py --tenant demo --message "hello from product CLI" --redis-url redis://localhost:6379/0 --json
 
       - name: Generate minimal product task HTTP API artifact
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
-          python scripts/ironclad_api.py --self-test --tenant demo --message "hello from HTTP API" --redis-url redis://localhost:6389/0 --json
+          python scripts/ironclad_api.py --self-test --tenant demo --message "hello from HTTP API" --redis-url redis://localhost:6379/0 --json
 
       - name: Generate e2e tenant submit worker stream artifact
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
-          python scripts/e2e_tenant_submit_worker_stream.py --json --redis-url redis://localhost:6389/0
+          python scripts/e2e_tenant_submit_worker_stream.py --json --redis-url redis://localhost:6379/0
 
       - name: Generate runtime payload propagation artifact
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
-          python scripts/runtime_payload_propagation.py --json --redis-url redis://localhost:6389/0
+          python scripts/runtime_payload_propagation.py --json --redis-url redis://localhost:6379/0
 
       - name: Generate e2e tenant submit worker stream result read artifact
         env:
-          REDIS_URL: redis://localhost:6389/0
+          REDIS_URL: redis://localhost:6379/0
         run: |
-          python scripts/e2e_tenant_submit_worker_stream_result_read.py --json --redis-url redis://localhost:6389/0
+          python scripts/e2e_tenant_submit_worker_stream_result_read.py --json --redis-url redis://localhost:6379/0
 
       - name: Generate cognitive governance audit artifact
         run: |
@@ -364,8 +372,4 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
-
-
-
-
 
