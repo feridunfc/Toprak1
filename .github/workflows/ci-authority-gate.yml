@@ -61,6 +61,11 @@ jobs:
         run: |
           python -m pytest tests/core/test_canonical_worker_task_execution.py -q --tb=short
 
+      - name: Start integration Redis for Redis-backed tests
+        run: |
+          docker compose -f docker-compose.integration.yml up -d --remove-orphans
+          sleep 5
+
       - name: Run production Lua dispatch path tests
         env:
           REDIS_URL: redis://localhost:6389/0
@@ -306,3 +311,4 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
