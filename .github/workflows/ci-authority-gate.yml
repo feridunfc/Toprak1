@@ -14,6 +14,8 @@ on:
       - sprint/41-worker-stream-consume-loop-binding
       - sprint/42-e2e-tenant-submit-worker-stream
       - sprint/42-e2e-tenant-submit-worker-stream-result-read
+      - sprint/43-thin-product-task-cli
+      - sprint/44-minimal-product-task-http-api
 
 jobs:
   authority-gate:
@@ -29,7 +31,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-asyncio fakeredis pyyaml redis
+          python -m pip install pytest pytest-asyncio fakeredis pyyaml redis fastapi uvicorn httpx
 
       - name: Run authority tool tests
         run: |
@@ -79,6 +81,12 @@ jobs:
         run: |
           python -m pytest tests/integration/test_thin_product_task_cli.py -q --tb=short
 
+
+      - name: Run minimal product task HTTP API tests
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python -m pytest tests/integration/test_minimal_product_task_http_api.py -q --tb=short
       - name: Run e2e tenant submit worker stream tests
         env:
           REDIS_URL: redis://localhost:6389/0
@@ -170,6 +178,12 @@ jobs:
         run: |
           python scripts/ironclad_demo.py --tenant demo --message "hello from product CLI" --redis-url redis://localhost:6389/0 --json
 
+
+      - name: Generate minimal product task HTTP API artifact
+        env:
+          REDIS_URL: redis://localhost:6389/0
+        run: |
+          python scripts/ironclad_api.py --self-test --tenant demo --message "hello from HTTP API" --redis-url redis://localhost:6389/0 --json
       - name: Generate e2e tenant submit worker stream artifact
         env:
           REDIS_URL: redis://localhost:6389/0
@@ -262,6 +276,7 @@ jobs:
             docs/dashboard/artifacts/latest_worker_stream_consume_loop.json
             docs/dashboard/artifacts/latest_e2e_tenant_submit_worker_stream.json
             docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json
+            docs/dashboard/artifacts/latest_minimal_product_task_http_api.json
             docs/dashboard/artifacts/latest_e2e_tenant_submit_worker_stream_result_read.json
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json
             docs/dashboard/artifacts/latest_semantic_advisory_contract.json
@@ -283,4 +298,5 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
+
 
