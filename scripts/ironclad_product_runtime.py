@@ -20,12 +20,7 @@ _LAST_RESULTS: dict[str, dict[str, Any]] = {}
 
 def _extract_output_text(artifact: dict[str, Any], message: str) -> str:
     result = artifact.get("result", {}) or {}
-    output_text = result.get("output_text") or ""
-
-    if message and message not in output_text:
-        return f"{output_text} | submitted_message: {message}".strip()
-
-    return output_text
+    return result.get("output_text") or ""
 
 
 async def run_demo(
@@ -33,7 +28,8 @@ async def run_demo(
     message: str,
     redis_url: str = "redis://localhost:6389/0",
 ) -> dict[str, Any]:
-    artifact = await build_artifact(redis_url)
+    runtime_payload = {"prompt": message}
+    artifact = await build_artifact(redis_url, payload=runtime_payload)
 
     run_id = artifact.get("run_id")
     task_id = artifact.get("task_id")
@@ -138,3 +134,5 @@ def read_result_sync(
 if __name__ == "__main__":
     demo = run_demo_sync("demo", "hello from product runtime")
     print(json.dumps(demo, indent=2, sort_keys=True))
+
+

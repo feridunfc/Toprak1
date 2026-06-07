@@ -1,7 +1,7 @@
-"""
+﻿"""
 hfa-worker/src/hfa_worker/consumer.py
 
-Sprint 7.3 — Import Sanitization
+Sprint 7.3 â€” Import Sanitization
 
 Changes:
   * Removed: from hfa_worker.execution_types import ExecutionRequest
@@ -9,7 +9,7 @@ Changes:
   * Added:   executor receives RunRequestedEvent directly (canonical path)
   * Errors:  ExecutionPermanentError, ExecutionTransientError now from hfa_worker.models
 
-executor.execute() accepts RunRequestedEvent directly — all canonical executors
+executor.execute() accepts RunRequestedEvent directly â€” all canonical executors
 (FakeExecutor, OpenAIExecutor, CognitiveExecutor) use getattr duck-typing so
 both RunRequestedEvent and the old ExecutionRequest continue to work.
 """
@@ -280,7 +280,55 @@ class WorkerConsumer:
             exec_start = time.monotonic()
 
             try:
-                # Sprint 7.3: pass RunRequestedEvent directly — no ExecutionRequest adapter
+                # Sprint 7.3: pass RunRequestedEvent directly â€” no ExecutionRequest adapter
+                # Sprint 45: normalize runtime payload before executor invocation.
+                # Lua dispatch may expose payload as "payload" / "payload_json";
+                # enqueue_admitted also persists original payload at RedisKey.run_payload(run_id).
+                existing_payload = getattr(event, "payload", None)
+                if not isinstance(existing_payload, dict) or not existing_payload or "prompt" not in existing_payload:
+                    import json as _json
+
+                    decoded_payload = None
+                    raw_candidates = []
+
+                    if isinstance(data, dict):
+                        raw_candidates.extend(
+                            [
+                                data.get(b"payload"),
+                                data.get("payload"),
+                                data.get(b"payload_json"),
+                                data.get("payload_json"),
+                            ]
+                        )
+
+                    for raw_payload in raw_candidates:
+                        if not raw_payload:
+                            continue
+                        try:
+                            if isinstance(raw_payload, bytes):
+                                raw_payload = raw_payload.decode("utf-8")
+                            candidate = _json.loads(raw_payload or "{}")
+                            if isinstance(candidate, dict) and candidate:
+                                decoded_payload = candidate
+                                break
+                        except Exception:
+                            continue
+
+                    if decoded_payload is None:
+                        try:
+                            stored_payload = await self._redis.get(RedisKey.run_payload(event.run_id))
+                            if stored_payload:
+                                if isinstance(stored_payload, bytes):
+                                    stored_payload = stored_payload.decode("utf-8")
+                                candidate = _json.loads(stored_payload or "{}")
+                                if isinstance(candidate, dict) and candidate:
+                                    decoded_payload = candidate
+                        except Exception:
+                            decoded_payload = None
+
+                    if isinstance(decoded_payload, dict):
+                        event.payload = decoded_payload
+
                 result = await self._executor.execute(event)
                 duration_ms = (time.monotonic() - exec_start) * 1000.0
 
@@ -440,3 +488,4 @@ class WorkerConsumer:
 
         except Exception as exc:
             logger.error("Message process error: %s", exc, exc_info=True)
+

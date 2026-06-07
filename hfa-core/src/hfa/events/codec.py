@@ -1,6 +1,6 @@
-"""
+﻿"""
 hfa-core/src/hfa/events/codec.py
-IRONCLAD Sprint 10/11 — Event codec (serialise / deserialise)
+IRONCLAD Sprint 10/11 â€” Event codec (serialise / deserialise)
 
 Redis Streams store values as byte-strings.
 serialize_event()  -> dict[str, str]  ready for XADD
@@ -8,9 +8,9 @@ decode_field()     -> typed Python     called by HFAEvent.from_redis()
 
 IRONCLAD rules
 --------------
-* No print() — logging only.
-* Never raise from decode_field() — return safe defaults on parse error.
-* cost_cents always int — no float USD.
+* No print() â€” logging only.
+* Never raise from decode_field() â€” return safe defaults on parse error.
+* cost_cents always int â€” no float USD.
 """
 
 from __future__ import annotations
@@ -176,7 +176,7 @@ def deserialize_run_requested(data: Dict[bytes, bytes]) -> Any:
         tenant_id=safe_decode_str(data, "tenant_id"),
         agent_type=safe_decode_str(data, "agent_type"),
         priority=safe_decode_int(data, "priority", 5),
-        payload=safe_decode_json(data, "payload", {}),
+        payload=safe_decode_json(data, "payload", safe_decode_json(data, "payload_json", {})),
         idempotency_key=safe_decode_str(data, "idempotency_key"),
         trace_parent=safe_decode_str(data, "trace_parent") or None,
         trace_state=safe_decode_str(data, "trace_state") or None,
@@ -186,7 +186,7 @@ def deserialize_run_requested(data: Dict[bytes, bytes]) -> Any:
 def deserialize_run_completed(data: Dict[bytes, bytes]) -> Any:
     """
     Deserialise a RunCompletedEvent from a Redis Streams payload.
-    Missing / unknown fields are tolerated — returns safe defaults.
+    Missing / unknown fields are tolerated â€” returns safe defaults.
     """
     from hfa.events.schema import RunCompletedEvent
 
@@ -196,7 +196,7 @@ def deserialize_run_completed(data: Dict[bytes, bytes]) -> Any:
         worker_id=safe_decode_str(data, "worker_id"),
         cost_cents=safe_decode_int(data, "cost_cents", 0),
         tokens_used=safe_decode_int(data, "tokens_used", 0),
-        payload=safe_decode_json(data, "payload", {}),
+        payload=safe_decode_json(data, "payload", safe_decode_json(data, "payload_json", {})),
         trace_parent=safe_decode_str(data, "trace_parent") or None,
         trace_state=safe_decode_str(data, "trace_state") or None,
     )
@@ -205,7 +205,7 @@ def deserialize_run_completed(data: Dict[bytes, bytes]) -> Any:
 def deserialize_run_failed(data: Dict[bytes, bytes]) -> Any:
     """
     Deserialise a RunFailedEvent from a Redis Streams payload.
-    Missing / unknown fields are tolerated — returns safe defaults.
+    Missing / unknown fields are tolerated â€” returns safe defaults.
     """
     from hfa.events.schema import RunFailedEvent
 
@@ -216,7 +216,8 @@ def deserialize_run_failed(data: Dict[bytes, bytes]) -> Any:
         error=safe_decode_str(data, "error"),
         cost_cents=safe_decode_int(data, "cost_cents", 0),
         tokens_used=safe_decode_int(data, "tokens_used", 0),
-        payload=safe_decode_json(data, "payload", {}),
+        payload=safe_decode_json(data, "payload", safe_decode_json(data, "payload_json", {})),
         trace_parent=safe_decode_str(data, "trace_parent") or None,
         trace_state=safe_decode_str(data, "trace_state") or None,
     )
+
