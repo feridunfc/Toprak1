@@ -14,6 +14,8 @@ if str(ROOT) not in sys.path:
 
 from typing import Any
 
+from scripts.ironclad_executor_mode import apply_executor_mode_boundary
+
 
 OUTPUT_PATH = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json")
 
@@ -108,7 +110,7 @@ async def _demo(tenant_id: str, message: str, redis_url: str, write_artifact: bo
     if write_artifact:
         _write_artifact(payload)
 
-    return payload
+    return apply_executor_mode_boundary(payload)
 
 
 def main(argv: list[str] | None = None) -> int:
