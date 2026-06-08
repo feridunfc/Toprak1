@@ -71,6 +71,10 @@ jobs:
         run: |
           python -m pytest tests/core/test_canonical_worker_task_execution.py -q --tb=short
 
+      - name: Run executor mode boundary tests
+        run: |
+          python -m pytest tests/core/test_executor_mode_boundary.py -q --tb=short
+
       - name: Start integration Redis for Redis-backed tests
         env:
           REDIS_URL: redis://localhost:6379/0

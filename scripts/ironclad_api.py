@@ -8,11 +8,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import redis.asyncio as redis_async
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scripts.ironclad_executor_mode import apply_executor_mode_boundary
+
+import redis.asyncio as redis_async
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -281,7 +283,7 @@ async def self_test(redis_url: str, tenant_id: str, message: str) -> dict[str, A
     if artifact["status"] != "PASS":
         artifact["target_claim_supported"] = False
 
-    return artifact
+    return apply_executor_mode_boundary(artifact)
 
 
 def write_artifact(artifact: dict[str, Any]) -> None:

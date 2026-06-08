@@ -1217,3 +1217,70 @@ Known limitations:
 no_prompt; Sprint 43 normalizes the product-visible result
 - no deployment or release tag claim
 
+<!-- SPRINT_46_EXECUTOR_MODE_BOUNDARY -->
+
+## Sprint 46 - Executor Mode Boundary
+
+Sprint 46 exposes an explicit executor mode boundary across product-visible CLI/API/artifact surfaces without enabling real production LLM execution.
+
+Claim:
+
+- `EXECUTOR_MODE_BOUNDARY_VISIBLE_AND_REAL_LLM_BLOCKED_BY_DEFAULT`
+
+Delivered:
+
+- Added central executor mode boundary helper:
+  - `scripts/ironclad_executor_mode.py`
+- Added executor mode boundary tests:
+  - `tests/core/test_executor_mode_boundary.py`
+- Default executor mode remains `fake`.
+- `IRONCLAD_EXECUTOR_MODE=production_llm_enabled` without `IRONCLAD_ALLOW_REAL_LLM=1` resolves to `production_llm_blocked`.
+- `production_llm_call_attempted` remains `false` by default and in blocked mode.
+- Product-visible outputs now expose:
+  - `executor_mode`
+  - `requested_executor_mode`
+  - `real_llm_blocked`
+  - `blocked_reason`
+- Executor mode boundary is visible in:
+  - thin product CLI demo
+  - minimal product HTTP API self-test artifact
+  - runtime payload propagation artifact
+  - e2e tenant submit worker stream result-read artifact
+- Authority Gate now runs executor mode boundary tests.
+
+Latest verified gates:
+
+- `python -m pytest tests/core/test_executor_mode_boundary.py -q --tb=short`
+  - `4 passed`
+- `python -m pytest tests/integration/test_runtime_payload_propagation.py -q --tb=short`
+  - `1 passed`
+- `python -m pytest tests/integration/test_minimal_product_task_http_api.py -q --tb=short`
+  - `4 passed`
+- `python -m pytest tests/integration/test_e2e_tenant_submit_worker_stream_result_read.py -q --tb=short`
+  - `3 passed`
+- `python -m pytest tests/integration/test_thin_product_task_cli.py -q --tb=short`
+  - `4 passed`
+- `python scripts/runtime_payload_propagation.py --json --redis-url redis://127.0.0.1:6389/0`
+  - `status=PASS`
+  - `executor_mode=fake`
+  - `production_llm_call_attempted=false`
+- `python scripts/ironclad_api.py --self-test --tenant demo --message "hello executor mode api" --redis-url redis://127.0.0.1:6389/0 --json`
+  - `status=PASS`
+  - `executor_mode=fake`
+  - `production_llm_call_attempted=false`
+- `python scripts/authority_audit.py --repo-root . --format dashboard --output docs/dashboard/artifacts/latest_authority_debug.json --fail-on none`
+  - `authority_status=PASS_WITH_RISKS`
+  - `banned=0`
+
+Product readiness impact:
+
+- Real LLM execution is now guarded by an explicit product-visible boundary.
+- Product/API/artifact surfaces can report whether the requested executor mode is fake, blocked, or explicitly enabled.
+- This sprint does not enable production LLM calls; it makes the boundary visible and fail-closed by default.
+
+Non-claims:
+
+- Does not call OpenAI, Anthropic, or any production LLM.
+- Does not enable `production_llm_enabled` execution in CI.
+- Does not create a deployment or release tag.
+- Does not claim production deployment readiness.

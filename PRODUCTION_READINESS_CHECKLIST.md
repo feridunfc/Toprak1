@@ -540,3 +540,49 @@ Known limitations:
 - no HTTP/API endpoint yet
 - no production-ready claim
 
+<!-- SPRINT_46_EXECUTOR_MODE_BOUNDARY -->
+
+## Sprint 46 - Executor Mode Boundary Readiness
+
+Status: PASS
+
+Readiness evidence:
+
+- `scripts/ironclad_executor_mode.py`
+- `tests/core/test_executor_mode_boundary.py`
+- `scripts/ironclad_demo.py`
+- `scripts/ironclad_product_runtime.py`
+- `scripts/ironclad_api.py`
+- `scripts/runtime_payload_propagation.py`
+- `scripts/e2e_tenant_submit_worker_stream_result_read.py`
+- `.github/workflows/ci-authority-gate.yml`
+
+Verified:
+
+- [x] Default executor mode is `fake`.
+- [x] Product-visible outputs expose `executor_mode`.
+- [x] Product-visible outputs expose `requested_executor_mode`.
+- [x] Product-visible outputs expose `real_llm_blocked`.
+- [x] Product-visible outputs expose `blocked_reason`.
+- [x] `production_llm_call_attempted` remains `false` by default.
+- [x] `IRONCLAD_EXECUTOR_MODE=production_llm_enabled` without `IRONCLAD_ALLOW_REAL_LLM=1` resolves to `production_llm_blocked`.
+- [x] Blocked mode does not attempt a production LLM call.
+- [x] Runtime payload propagation artifact exposes executor mode boundary fields.
+- [x] Minimal product HTTP API self-test artifact exposes executor mode boundary fields.
+- [x] E2E tenant submit worker stream result-read artifact exposes executor mode boundary fields.
+- [x] Thin product CLI demo exposes executor mode boundary fields.
+- [x] Authority Gate runs `tests/core/test_executor_mode_boundary.py`.
+- [x] Authority audit remains `banned=0`.
+
+Explicit non-claims:
+
+- [ ] Real OpenAI/Anthropic executor execution is not enabled.
+- [ ] Production LLM calls are not attempted in CI.
+- [ ] Deployment is not attempted.
+- [ ] Release tag is not created.
+- [ ] Production deployment readiness is not claimed.
+
+Next recommended hardening:
+
+- Add a dry-run production executor adapter boundary that reports provider/key/config readiness without network calls.
+- Keep CI fail-closed: real LLM calls require explicit opt-in and must remain disabled by default.

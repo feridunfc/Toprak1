@@ -8,11 +8,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import redis.asyncio as redis_async
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from scripts.ironclad_executor_mode import apply_executor_mode_boundary
+
+import redis.asyncio as redis_async
 
 from scripts.e2e_tenant_submit_worker_stream_result_read import build_artifact as build_runtime_artifact
 
@@ -165,7 +167,7 @@ async def build_artifact(redis_url: str, message: str) -> dict[str, Any]:
     if failing:
         artifact["target_claim_supported"] = False
 
-    return artifact
+    return apply_executor_mode_boundary(artifact)
 
 
 def write_artifact(artifact: dict[str, Any]) -> None:

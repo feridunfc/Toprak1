@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from scripts.ironclad_executor_mode import apply_executor_mode_boundary
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -89,7 +91,7 @@ async def run_demo(
     if run_id:
         _LAST_RESULTS[str(run_id)] = result
 
-    return demo
+    return apply_executor_mode_boundary(demo)
 
 
 async def submit_task(
