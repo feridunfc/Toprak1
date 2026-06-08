@@ -10,11 +10,20 @@ ARTIFACT_PATH = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo
 
 
 def run_command(args):
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parents[2])
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        repo_root if not existing_pythonpath else repo_root + os.pathsep + existing_pythonpath
+    )
+
     completed = subprocess.run(
         [sys.executable, *args],
         check=False,
         capture_output=True,
         text=True,
+        env=env,
+        cwd=repo_root,
     )
 
     if completed.returncode != 0:
