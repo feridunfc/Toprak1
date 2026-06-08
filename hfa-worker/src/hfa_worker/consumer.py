@@ -282,8 +282,7 @@ class WorkerConsumer:
             try:
                 # Sprint 7.3: pass RunRequestedEvent directly â€” no ExecutionRequest adapter
                 # Sprint 45: normalize runtime payload before executor invocation.
-                # Lua dispatch may expose payload as "payload" / "payload_json";
-                # enqueue_admitted also persists original payload at RedisKey.run_payload(run_id).
+                # Lua dispatch may expose payload as "payload" / "payload_json".
                 existing_payload = getattr(event, "payload", None)
                 if not isinstance(existing_payload, dict) or not existing_payload or "prompt" not in existing_payload:
                     import json as _json
@@ -313,19 +312,6 @@ class WorkerConsumer:
                                 break
                         except Exception:
                             continue
-
-                    if decoded_payload is None:
-                        try:
-                            stored_payload = await self._redis.get(RedisKey.run_payload(event.run_id))
-                            if stored_payload:
-                                if isinstance(stored_payload, bytes):
-                                    stored_payload = stored_payload.decode("utf-8")
-                                candidate = _json.loads(stored_payload or "{}")
-                                if isinstance(candidate, dict) and candidate:
-                                    decoded_payload = candidate
-                        except Exception:
-                            decoded_payload = None
-
                     if isinstance(decoded_payload, dict):
                         event.payload = decoded_payload
 

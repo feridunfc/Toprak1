@@ -76,6 +76,7 @@ if ARGV[17] ~= "" then
         "worker_group", ARGV[4],
         "shard", ARGV[5],
         "priority", ARGV[11],
+        "payload_json", ARGV[12],
         "trace_parent", ARGV[13],
         "trace_state", ARGV[14]
     )
@@ -91,6 +92,7 @@ if ARGV[18] ~= "" then
         "worker_group", ARGV[4],
         "shard", ARGV[5],
         "priority", ARGV[11],
+        "payload_json", ARGV[12],
         "trace_parent", ARGV[13],
         "trace_state", ARGV[14]
     )

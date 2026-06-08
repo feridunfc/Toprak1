@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
+import os
+
 import pytest
 
 from scripts.runtime_payload_propagation import build_artifact
 
-REDIS_URL = "redis://localhost:6389/0"
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
 
 
 @pytest.mark.asyncio
