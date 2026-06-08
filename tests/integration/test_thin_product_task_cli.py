@@ -1,20 +1,40 @@
-﻿import json
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6389/0")
 
 ARTIFACT_PATH = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json")
-REDIS_URL = "redis://localhost:6389/0"
 
 
 def run_command(args):
+    env = os.environ.copy()
+    repo_root = str(Path(__file__).resolve().parents[2])
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        repo_root if not existing_pythonpath else repo_root + os.pathsep + existing_pythonpath
+    )
+
     completed = subprocess.run(
         [sys.executable, *args],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
+        env=env,
+        cwd=repo_root,
     )
+
+    if completed.returncode != 0:
+        raise AssertionError(
+            "Command failed\n"
+            f"returncode={completed.returncode}\n"
+            f"cmd={[sys.executable, *args]}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}\n"
+        )
+
     return json.loads(completed.stdout)
 
 

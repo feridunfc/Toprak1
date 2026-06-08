@@ -1,4 +1,4 @@
-﻿"""
+"""
 hfa-core/src/hfa/events/codec.py
 IRONCLAD Sprint 10/11 â€” Event codec (serialise / deserialise)
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 hfa-worker/src/hfa_worker/consumer.py
 
 Sprint 7.3 â€” Import Sanitization
