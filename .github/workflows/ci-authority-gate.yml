@@ -185,6 +185,8 @@ jobs:
           python scripts/replay_compare.py --json --output docs/dashboard/artifacts/latest_replay.json
 
       - name: Generate deployment smoke artifacts
+        env:
+          REDIS_SMOKE_PORT: "6390"
         run: |
           python scripts/deployment_smoke.py --json
           python scripts/redis_failover_smoke.py --json

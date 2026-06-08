@@ -3,7 +3,7 @@
     image: redis:7.2-alpine
     container_name: hfa-redis-smoke
     ports:
-      - "6379:6379"
+      - "${REDIS_SMOKE_PORT:-6379}:6379"
     command: >
       redis-server
       --appendonly yes
