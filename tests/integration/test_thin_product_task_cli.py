@@ -12,10 +12,20 @@ ARTIFACT_PATH = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo
 def run_command(args):
     completed = subprocess.run(
         [sys.executable, *args],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+
+    if completed.returncode != 0:
+        raise AssertionError(
+            "Command failed\n"
+            f"returncode={completed.returncode}\n"
+            f"cmd={[sys.executable, *args]}\n"
+            f"stdout={completed.stdout}\n"
+            f"stderr={completed.stderr}\n"
+        )
+
     return json.loads(completed.stdout)
 
 
