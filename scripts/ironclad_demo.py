@@ -3,7 +3,15 @@
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
+
+# Allow this file to be executed as `python scripts/ironclad_demo.py`
+# while still importing sibling modules through the repo-root `scripts.*` package path.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from typing import Any
 
 
