@@ -9,8 +9,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ironclad_executor_mode import apply_executor_mode_boundary
+
 
 for rel in ("hfa-core/src", "hfa-worker/src", "hfa-control/src"):
     path = ROOT / rel
@@ -389,7 +393,7 @@ async def build_artifact(redis_url: str | None = None, payload: dict[str, Any] |
         if artifact["status"] != "PASS":
             artifact["target_claim_supported"] = False
 
-        return artifact
+        return apply_executor_mode_boundary(artifact)
 
     finally:
         if consumer is not None:
