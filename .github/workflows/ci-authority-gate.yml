@@ -75,6 +75,10 @@ jobs:
         run: |
           python -m pytest tests/core/test_executor_mode_boundary.py -q --tb=short
 
+      - name: Run production executor dry-run boundary tests
+        run: |
+          python -m pytest tests/core/test_production_executor_dry_run_boundary.py -q --tb=short
+
       - name: Start integration Redis for Redis-backed tests
         env:
           REDIS_URL: redis://localhost:6379/0
@@ -264,6 +268,10 @@ jobs:
         run: |
           python scripts/e2e_tenant_submit_worker_stream.py --json --redis-url redis://localhost:6379/0
 
+      - name: Generate production executor dry-run boundary artifact
+        run: |
+          python scripts/ironclad_production_executor_dry_run.py --json > docs/dashboard/artifacts/latest_production_executor_dry_run_boundary.json
+
       - name: Generate runtime payload propagation artifact
         env:
           REDIS_URL: redis://localhost:6379/0
@@ -357,6 +365,7 @@ jobs:
             docs/dashboard/artifacts/latest_e2e_tenant_submit_worker_stream.json
             docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json
             docs/dashboard/artifacts/latest_minimal_product_task_http_api.json
+            docs/dashboard/artifacts/latest_production_executor_dry_run_boundary.json
             docs/dashboard/artifacts/latest_runtime_payload_propagation.json
             docs/dashboard/artifacts/latest_e2e_tenant_submit_worker_stream_result_read.json
             docs/dashboard/artifacts/latest_cognitive_governance_audit.json

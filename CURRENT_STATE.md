@@ -1284,3 +1284,66 @@ Non-claims:
 - Does not enable `production_llm_enabled` execution in CI.
 - Does not create a deployment or release tag.
 - Does not claim production deployment readiness.
+
+<!-- SPRINT_47_PRODUCTION_EXECUTOR_DRY_RUN_BOUNDARY -->
+
+## Sprint 47 - Production Executor Dry-Run Boundary
+
+Sprint 47 adds a production executor adapter dry-run boundary without enabling real production LLM network calls.
+
+Claim:
+
+- `PRODUCTION_EXECUTOR_ADAPTER_DRY_RUN_VISIBLE_AND_NETWORK_CALL_BLOCKED`
+
+Delivered:
+
+- Added production executor dry-run artifact helper:
+  - `scripts/ironclad_production_executor_dry_run.py`
+- Added dry-run boundary tests:
+  - `tests/core/test_production_executor_dry_run_boundary.py`
+- Added Authority Gate coverage for production executor dry-run boundary tests.
+- Added dashboard artifact generation:
+  - `docs/dashboard/artifacts/latest_production_executor_dry_run_boundary.json`
+- Added artifact upload coverage in Authority Gate.
+- Provider readiness is visible without exposing secrets:
+  - `provider`
+  - `provider_key_env`
+  - `api_key_present`
+  - `api_key_redacted`
+  - `api_key_value_exposed=false`
+- Dry-run boundary reports:
+  - `executor_dry_run=true`
+  - `network_call_attempted=false`
+  - `production_llm_call_attempted=false`
+  - `ready_for_manual_real_smoke=false`
+- `IRONCLAD_EXECUTOR_MODE=production_llm_enabled` without `IRONCLAD_ALLOW_REAL_LLM=1` remains `production_llm_blocked`.
+- `IRONCLAD_EXECUTOR_MODE=production_llm_enabled` with `IRONCLAD_ALLOW_REAL_LLM=1` still keeps network calls blocked by dry-run.
+
+Latest verified gates:
+
+- `python -m pytest tests/core/test_executor_mode_boundary.py tests/core/test_production_executor_dry_run_boundary.py -q --tb=short`
+  - `8 passed`
+- `python -m pytest tests/core/test_production_executor_dry_run_boundary.py -q --tb=short`
+  - `4 passed`
+- `python scripts/ironclad_production_executor_dry_run.py --json`
+  - `status=PASS`
+  - `executor_dry_run=true`
+  - `network_call_attempted=false`
+  - `production_llm_call_attempted=false`
+  - `api_key_value_exposed=false`
+- Authority Gate YAML validates with `YAML_OK`.
+
+Product readiness impact:
+
+- Production executor readiness can now be surfaced safely before the first real LLM call.
+- Secret presence is represented only as a boolean.
+- Secret values are not exposed in artifacts.
+- Real network calls remain fail-closed by default.
+
+Non-claims:
+
+- Does not call OpenAI, Anthropic, or any production LLM.
+- Does not disable dry-run for production executor.
+- Does not enable real executor traffic in CI.
+- Does not create a deployment or release tag.
+- Does not claim production deployment readiness.

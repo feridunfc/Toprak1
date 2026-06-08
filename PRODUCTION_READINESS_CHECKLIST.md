@@ -586,3 +586,51 @@ Next recommended hardening:
 
 - Add a dry-run production executor adapter boundary that reports provider/key/config readiness without network calls.
 - Keep CI fail-closed: real LLM calls require explicit opt-in and must remain disabled by default.
+
+<!-- SPRINT_47_PRODUCTION_EXECUTOR_DRY_RUN_BOUNDARY -->
+
+## Sprint 47 - Production Executor Dry-Run Boundary Readiness
+
+Status: PASS
+
+Readiness evidence:
+
+- `scripts/ironclad_production_executor_dry_run.py`
+- `tests/core/test_production_executor_dry_run_boundary.py`
+- `.github/workflows/ci-authority-gate.yml`
+- `docs/dashboard/artifacts/latest_production_executor_dry_run_boundary.json`
+
+Verified:
+
+- [x] Production executor adapter dry-run artifact exists.
+- [x] Production executor dry-run boundary tests exist.
+- [x] Authority Gate runs `tests/core/test_production_executor_dry_run_boundary.py`.
+- [x] Authority Gate generates `latest_production_executor_dry_run_boundary.json`.
+- [x] Authority Gate uploads `latest_production_executor_dry_run_boundary.json`.
+- [x] `executor_dry_run=true` by default.
+- [x] `network_call_attempted=false`.
+- [x] `production_llm_call_attempted=false`.
+- [x] `api_key_present` is boolean only.
+- [x] `api_key_value_exposed=false`.
+- [x] Secret values are not written to artifact output.
+- [x] `production_llm_enabled` without `IRONCLAD_ALLOW_REAL_LLM=1` remains blocked.
+- [x] `production_llm_enabled` with `IRONCLAD_ALLOW_REAL_LLM=1` still does not attempt network calls while dry-run is enabled.
+- [x] `ready_for_manual_real_smoke=false` while dry-run is enabled.
+
+Explicit non-claims:
+
+- [ ] Real OpenAI/Anthropic executor execution is not enabled.
+- [ ] Production LLM network calls are not attempted.
+- [ ] CI does not make production LLM calls.
+- [ ] Deployment is not attempted.
+- [ ] Release tag is not created.
+- [ ] Production deployment readiness is not claimed.
+
+Next recommended hardening:
+
+- Add a manual-only real executor smoke gate requiring all of:
+  - `IRONCLAD_EXECUTOR_MODE=production_llm_enabled`
+  - `IRONCLAD_ALLOW_REAL_LLM=1`
+  - `IRONCLAD_EXECUTOR_DRY_RUN=0`
+  - explicit provider API key
+- Keep CI fail-closed and dry-run-only.
