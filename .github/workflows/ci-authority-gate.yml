@@ -87,6 +87,10 @@ jobs:
         run: |
           python -m pytest tests/core/test_manual_local_ollama_smoke_gate.py -q --tb=short
 
+      - name: Run manual provider smoke guard tests
+        run: |
+          python -m pytest tests/core/test_manual_provider_smoke_guard.py -q --tb=short
+
       - name: Start integration Redis for Redis-backed tests
         env:
           REDIS_URL: redis://localhost:6379/0
@@ -280,6 +284,10 @@ jobs:
         run: |
           python scripts/ironclad_manual_local_ollama_smoke.py --json > docs/dashboard/artifacts/latest_manual_local_ollama_smoke_gate.json
 
+      - name: Generate manual provider smoke guard artifact
+        run: |
+          python scripts/ironclad_manual_provider_smoke_guard.py --json > docs/dashboard/artifacts/latest_manual_provider_smoke_guard.json
+
       - name: Generate manual real executor smoke gate artifact
         run: |
           python scripts/ironclad_manual_real_executor_smoke.py --json > docs/dashboard/artifacts/latest_manual_real_executor_smoke_gate.json
@@ -382,6 +390,7 @@ jobs:
             docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json
             docs/dashboard/artifacts/latest_minimal_product_task_http_api.json
             docs/dashboard/artifacts/latest_manual_local_ollama_smoke_gate.json
+            docs/dashboard/artifacts/latest_manual_provider_smoke_guard.json
             docs/dashboard/artifacts/latest_manual_real_executor_smoke_gate.json
             docs/dashboard/artifacts/latest_production_executor_dry_run_boundary.json
             docs/dashboard/artifacts/latest_runtime_payload_propagation.json
