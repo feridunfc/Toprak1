@@ -1347,3 +1347,94 @@ Non-claims:
 - Does not enable real executor traffic in CI.
 - Does not create a deployment or release tag.
 - Does not claim production deployment readiness.
+
+<!-- SPRINT_48_MANUAL_REAL_EXECUTOR_SMOKE_GATE -->
+
+## Sprint 48 - Manual Real Executor Smoke Gate
+
+Sprint 48 adds a manual-only real executor smoke gate while keeping CI dry-run / blocked by default.
+
+Claim:
+
+- `MANUAL_ONLY_REAL_EXECUTOR_SMOKE_GATE_EXISTS_AND_CI_REMAINS_DRY_RUN`
+
+Delivered:
+
+- Added manual real executor smoke gate:
+  - `scripts/ironclad_manual_real_executor_smoke.py`
+- Added manual real executor smoke gate tests:
+  - `tests/core/test_manual_real_executor_smoke_gate.py`
+- Added optional local Ollama smoke gate:
+  - `scripts/ironclad_manual_local_ollama_smoke.py`
+- Added optional local Ollama smoke gate tests:
+  - `tests/core/test_manual_local_ollama_smoke_gate.py`
+- Added Authority Gate coverage for both gate test suites.
+- Added dashboard artifact generation and upload coverage:
+  - `docs/dashboard/artifacts/latest_manual_real_executor_smoke_gate.json`
+  - `docs/dashboard/artifacts/latest_manual_local_ollama_smoke_gate.json`
+
+Manual real executor smoke remains blocked unless all required flags are present:
+
+- `IRONCLAD_EXECUTOR_MODE=production_llm_enabled`
+- `IRONCLAD_ALLOW_REAL_LLM=1`
+- `IRONCLAD_EXECUTOR_DRY_RUN=0`
+- provider API key is present
+
+Default CI/product-safe behavior:
+
+- `manual_only=true`
+- `ci_safe=true`
+- `network_call_attempted=false`
+- `production_llm_call_attempted=false`
+- `api_key_value_exposed=false`
+- `prompt_value_exposed=false`
+- `output_text_value_exposed=false`
+
+Optional local Ollama smoke:
+
+- Provider: `ollama`
+- Local model used in local verification: `llama3.2:1b`
+- Requires `IRONCLAD_LOCAL_OLLAMA_SMOKE=1`
+- Does not count as production LLM traffic.
+- Keeps `network_call_attempted=false`.
+- Keeps `production_llm_call_attempted=false`.
+
+Latest verified gates:
+
+- `python -m pytest tests/core/test_manual_real_executor_smoke_gate.py -q --tb=short`
+  - `4 passed`
+- `python -m pytest tests/core/test_manual_local_ollama_smoke_gate.py -q --tb=short`
+  - `4 passed`
+- `python scripts/ironclad_manual_real_executor_smoke.py --json`
+  - `status=BLOCKED`
+  - `manual_real_smoke_ready=false`
+  - `network_call_attempted=false`
+  - `production_llm_call_attempted=false`
+  - `api_key_value_exposed=false`
+- `python scripts/ironclad_manual_local_ollama_smoke.py --json`
+  - `status=BLOCKED`
+  - `local_model_call_attempted=false`
+  - `network_call_attempted=false`
+  - `production_llm_call_attempted=false`
+- Manual local Ollama execution with `IRONCLAD_LOCAL_OLLAMA_SMOKE=1` and `IRONCLAD_OLLAMA_MODEL=llama3.2:1b`
+  - `status=PASS`
+  - `local_model_call_attempted=true`
+  - `network_call_attempted=false`
+  - `production_llm_call_attempted=false`
+  - `output_text_value_exposed=false`
+- Authority Gate YAML validates with `YAML_OK`.
+
+Product readiness impact:
+
+- The repository now has a manual-only gate for the first real executor smoke.
+- CI remains safe and does not attempt production LLM network calls.
+- A local Ollama smoke path can verify local model execution without provider secrets or production network calls.
+- Secret values and model output values remain redacted from artifacts.
+
+Non-claims:
+
+- Does not call OpenAI, Anthropic, or any production LLM in CI.
+- Does not enable production real executor traffic by default.
+- Does not expose API key values, prompts, or model output text values.
+- Does not create a deployment or release tag.
+- Does not claim production deployment readiness.
