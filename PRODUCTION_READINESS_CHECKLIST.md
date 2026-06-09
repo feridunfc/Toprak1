@@ -634,3 +634,55 @@ Next recommended hardening:
   - `IRONCLAD_EXECUTOR_DRY_RUN=0`
   - explicit provider API key
 - Keep CI fail-closed and dry-run-only.
+
+<!-- SPRINT_48_MANUAL_REAL_EXECUTOR_SMOKE_GATE -->
+
+## Sprint 48 - Manual Real Executor Smoke Gate Readiness
+
+Status: PASS
+
+Readiness evidence:
+
+- `scripts/ironclad_manual_real_executor_smoke.py`
+- `tests/core/test_manual_real_executor_smoke_gate.py`
+- `scripts/ironclad_manual_local_ollama_smoke.py`
+- `tests/core/test_manual_local_ollama_smoke_gate.py`
+- `.github/workflows/ci-authority-gate.yml`
+- `docs/dashboard/artifacts/latest_manual_real_executor_smoke_gate.json`
+- `docs/dashboard/artifacts/latest_manual_local_ollama_smoke_gate.json`
+
+Verified:
+
+- [x] Manual real executor smoke gate exists.
+- [x] Manual real executor smoke gate is blocked by default.
+- [x] Manual real executor smoke requires explicit production mode.
+- [x] Manual real executor smoke requires `IRONCLAD_ALLOW_REAL_LLM=1`.
+- [x] Manual real executor smoke requires `IRONCLAD_EXECUTOR_DRY_RUN=0`.
+- [x] Manual real executor smoke requires provider API key presence.
+- [x] CI does not execute real provider calls.
+- [x] `network_call_attempted=false` by default.
+- [x] `production_llm_call_attempted=false` by default.
+- [x] `api_key_value_exposed=false`.
+- [x] `prompt_value_exposed=false`.
+- [x] `output_text_value_exposed=false`.
+- [x] Optional local Ollama smoke gate exists.
+- [x] Optional local Ollama smoke gate is blocked by default.
+- [x] Optional local Ollama smoke requires `IRONCLAD_LOCAL_OLLAMA_SMOKE=1`.
+- [x] Optional local Ollama smoke does not set `production_llm_call_attempted=true`.
+- [x] Authority Gate runs both Sprint 48 gate test suites.
+- [x] Authority Gate generates/uploads both Sprint 48 gate artifacts.
+
+Explicit non-claims:
+
+- [ ] Real OpenAI/Anthropic executor execution is not enabled in CI.
+- [ ] Production LLM network calls are not attempted in CI.
+- [ ] Local Ollama smoke is optional and manual-only.
+- [ ] Deployment is not attempted.
+- [ ] Release tag is not created.
+- [ ] Production deployment readiness is not claimed.
+
+Next recommended hardening:
+
+- Add a manual-only provider smoke runbook documenting exact environment variables and rollback.
+- Add a budget/cost guard before allowing any production LLM smoke.
+- Add model/provider allowlist for manual smoke.
