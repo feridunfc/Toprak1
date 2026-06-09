@@ -686,3 +686,49 @@ Next recommended hardening:
 - Add a manual-only provider smoke runbook documenting exact environment variables and rollback.
 - Add a budget/cost guard before allowing any production LLM smoke.
 - Add model/provider allowlist for manual smoke.
+
+<!-- SPRINT_49_MANUAL_PROVIDER_SMOKE_RUNBOOK_BUDGET_GUARD -->
+
+## Sprint 49 - Manual Provider Smoke Runbook and Budget Guard Readiness
+
+Status: PASS
+
+Readiness evidence:
+
+- `scripts/ironclad_manual_provider_smoke_guard.py`
+- `tests/core/test_manual_provider_smoke_guard.py`
+- `.github/workflows/ci-authority-gate.yml`
+- `docs/product/manual_real_provider_smoke_runbook.md`
+- `docs/dashboard/artifacts/latest_manual_provider_smoke_guard.json`
+
+Verified:
+
+- [x] Manual provider smoke guard exists.
+- [x] Manual provider smoke guard is blocked by default.
+- [x] Provider allowlist exists.
+- [x] Model allowlist exists.
+- [x] Token budget guard exists.
+- [x] Cost budget guard exists.
+- [x] Operator confirmation gate exists.
+- [x] CI does not execute real provider calls.
+- [x] `network_call_attempted=false` by default.
+- [x] `production_llm_call_attempted=false` by default.
+- [x] `api_key_value_exposed=false`.
+- [x] `prompt_value_exposed=false`.
+- [x] `output_text_value_exposed=false`.
+- [x] Authority Gate runs `tests/core/test_manual_provider_smoke_guard.py`.
+- [x] Authority Gate generates/uploads `latest_manual_provider_smoke_guard.json`.
+- [x] Manual provider smoke runbook exists.
+
+Explicit non-claims:
+
+- [ ] Real OpenAI/Anthropic executor execution is not enabled in CI.
+- [ ] Production LLM network calls are not attempted in CI.
+- [ ] Deployment is not attempted.
+- [ ] Release tag is not created.
+- [ ] Production deployment readiness is not claimed.
+
+Next recommended hardening:
+
+- Wire the manual provider smoke guard into `ironclad_manual_real_executor_smoke.py` before `--execute` can run.
+- Add final preflight that refuses manual provider smoke unless guard artifact is READY.

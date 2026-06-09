@@ -1438,3 +1438,67 @@ Non-claims:
 - Does not expose API key values, prompts, or model output text values.
 - Does not create a deployment or release tag.
 - Does not claim production deployment readiness.
+
+<!-- SPRINT_49_MANUAL_PROVIDER_SMOKE_RUNBOOK_BUDGET_GUARD -->
+
+## Sprint 49 - Manual Provider Smoke Runbook and Budget Guard
+
+Sprint 49 adds a manual provider smoke guard and runbook before any real OpenAI/Anthropic smoke is allowed.
+
+Claim:
+
+- `MANUAL_REAL_PROVIDER_SMOKE_RUNBOOK_AND_BUDGET_GUARD_READY`
+
+Delivered:
+
+- Added manual provider smoke guard:
+  - `scripts/ironclad_manual_provider_smoke_guard.py`
+- Added guard tests:
+  - `tests/core/test_manual_provider_smoke_guard.py`
+- Wired guard tests into Authority Gate.
+- Added dashboard artifact generation/upload coverage:
+  - `docs/dashboard/artifacts/latest_manual_provider_smoke_guard.json`
+- Added manual real provider smoke runbook:
+  - `docs/product/manual_real_provider_smoke_runbook.md`
+
+Guard requirements:
+
+- `IRONCLAD_EXECUTOR_MODE=production_llm_enabled`
+- `IRONCLAD_ALLOW_REAL_LLM=1`
+- `IRONCLAD_EXECUTOR_DRY_RUN=0`
+- provider API key present
+- provider allowlisted
+- model allowlisted
+- budget guard passed
+- operator confirmation present
+
+Default CI/product-safe behavior:
+
+- `status=BLOCKED`
+- `manual_provider_smoke_ready=false`
+- `network_call_attempted=false`
+- `production_llm_call_attempted=false`
+- `api_key_value_exposed=false`
+- `prompt_value_exposed=false`
+- `output_text_value_exposed=false`
+
+Latest verified gates:
+
+- `python -m pytest tests/core/test_manual_provider_smoke_guard.py -q --tb=short`
+  - `5 passed`
+- `python scripts/ironclad_manual_provider_smoke_guard.py --json`
+  - `status=BLOCKED`
+  - `budget_guard_passed=true`
+  - `network_call_attempted=false`
+  - `production_llm_call_attempted=false`
+  - `api_key_value_exposed=false`
+- Authority Gate YAML validates with `YAML_OK`.
+
+Non-claims:
+
+- Does not call OpenAI, Anthropic, or any production LLM in CI.
+- Does not enable production real executor traffic by default.
+- Does not expose API key values, prompts, or model output text values.
+- Does not deploy.
+- Does not create a release tag.
+- Does not claim production deployment readiness.
