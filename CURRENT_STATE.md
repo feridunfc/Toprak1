@@ -1502,3 +1502,58 @@ Non-claims:
 - Does not deploy.
 - Does not create a release tag.
 - Does not claim production deployment readiness.
+
+<!-- SPRINT_50_ENFORCE_PROVIDER_GUARD_BEFORE_REAL_SMOKE -->
+
+## Sprint 50 - Enforce Provider Guard Before Manual Real Executor Smoke
+
+Sprint 50 enforces the manual provider smoke guard inside `ironclad_manual_real_executor_smoke.py` before any `--execute` provider call can run.
+
+Claim:
+
+- `MANUAL_REAL_EXECUTOR_SMOKE_REQUIRES_PROVIDER_GUARD_READY`
+
+Delivered:
+
+- `scripts/ironclad_manual_real_executor_smoke.py` now calls `build_manual_provider_smoke_guard_artifact(...)` before provider execution.
+- Manual real executor smoke now exposes:
+  - `provider_guard_required`
+  - `provider_guard_status`
+  - `provider_guard_ready`
+  - `provider_allowed`
+  - `model_allowed`
+  - `budget_guard_passed`
+  - `operator_confirmed`
+- Updated `tests/core/test_manual_real_executor_smoke_gate.py` to prove provider calls are blocked unless the guard is READY.
+
+Default CI/product-safe behavior:
+
+- `status=BLOCKED`
+- `provider_guard_required=true`
+- `provider_guard_status=BLOCKED`
+- `provider_guard_ready=false`
+- `network_call_attempted=false`
+- `production_llm_call_attempted=false`
+
+Latest verified gates:
+
+- `python -m pytest tests/core/test_manual_real_executor_smoke_gate.py tests/core/test_manual_provider_smoke_guard.py -q --tb=short`
+  - `10 passed`
+- `python scripts/ironclad_manual_real_executor_smoke.py --json`
+  - `status=BLOCKED`
+  - `provider_guard_required=true`
+  - `provider_guard_status=BLOCKED`
+  - `provider_guard_ready=false`
+  - `budget_guard_passed=true`
+  - `operator_confirmed=false`
+  - `network_call_attempted=false`
+  - `production_llm_call_attempted=false`
+
+Non-claims:
+
+- Does not call OpenAI, Anthropic, or any production LLM in CI.
+- Does not execute local Ollama in CI.
+- Does not enable production real executor traffic by default.
+- Does not deploy.
+- Does not create a release tag.
+- Does not claim production deployment readiness.
