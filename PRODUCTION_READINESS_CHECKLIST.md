@@ -732,3 +732,44 @@ Next recommended hardening:
 
 - Wire the manual provider smoke guard into `ironclad_manual_real_executor_smoke.py` before `--execute` can run.
 - Add final preflight that refuses manual provider smoke unless guard artifact is READY.
+
+<!-- SPRINT_50_ENFORCE_PROVIDER_GUARD_BEFORE_REAL_SMOKE -->
+
+## Sprint 50 - Enforce Provider Guard Before Manual Real Executor Smoke Readiness
+
+Status: PASS
+
+Readiness evidence:
+
+- `scripts/ironclad_manual_real_executor_smoke.py`
+- `tests/core/test_manual_real_executor_smoke_gate.py`
+- `scripts/ironclad_manual_provider_smoke_guard.py`
+- `tests/core/test_manual_provider_smoke_guard.py`
+
+Verified:
+
+- [x] Manual real executor smoke requires provider guard.
+- [x] Provider guard status is exposed in manual real smoke artifact.
+- [x] Provider guard readiness is exposed in manual real smoke artifact.
+- [x] Provider allowlist state is exposed.
+- [x] Model allowlist state is exposed.
+- [x] Budget guard state is exposed.
+- [x] Operator confirmation state is exposed.
+- [x] Provider call is blocked when provider guard is not READY.
+- [x] Provider call can only proceed in tests when provider guard is READY.
+- [x] `network_call_attempted=false` by default.
+- [x] `production_llm_call_attempted=false` by default.
+- [x] CI remains fail-closed.
+
+Explicit non-claims:
+
+- [ ] Real OpenAI/Anthropic executor execution is not enabled in CI.
+- [ ] Local Ollama execution is not enabled in CI.
+- [ ] Production LLM network calls are not attempted in CI.
+- [ ] Deployment is not attempted.
+- [ ] Release tag is not created.
+- [ ] Production deployment readiness is not claimed.
+
+Next recommended hardening:
+
+- Sprint 51 can perform a manual local guarded OpenAI smoke only after explicit operator confirmation and low budget limits.

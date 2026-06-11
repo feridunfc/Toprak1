@@ -18,6 +18,7 @@ from scripts.ironclad_production_executor_dry_run import (
     dry_run_enabled,
     requested_provider,
 )
+from scripts.ironclad_manual_provider_smoke_guard import build_manual_provider_smoke_guard_artifact
 
 REQUIRED_ENV = {
     "IRONCLAD_EXECUTOR_MODE": "production_llm_enabled",
@@ -137,13 +138,32 @@ async def build_manual_real_executor_smoke_artifact(
     artifact["prompt_value_exposed"] = False
     artifact["prompt_length"] = len(prompt)
 
+    provider_guard = build_manual_provider_smoke_guard_artifact(source)
+    artifact["provider_guard_required"] = True
+    artifact["provider_guard_status"] = provider_guard.get("status")
+    artifact["provider_guard_ready"] = bool(provider_guard.get("manual_provider_smoke_ready"))
+    artifact["provider_allowed"] = bool(provider_guard.get("provider_allowed"))
+    artifact["model_allowed"] = bool(provider_guard.get("model_allowed"))
+    artifact["budget_guard_passed"] = bool(provider_guard.get("budget_guard_passed"))
+    artifact["operator_confirmed"] = bool(provider_guard.get("operator_confirmed"))
+
     if not artifact["manual_real_smoke_ready"]:
         artifact["status"] = "BLOCKED"
         return artifact
 
+    if not artifact["provider_guard_ready"]:
+        artifact["status"] = "BLOCKED"
+        artifact["blocked_reason"] = (
+            "manual provider smoke guard is not READY: "
+            + str(provider_guard.get("blocked_reason") or "unknown guard block")
+        )
+        artifact["network_call_attempted"] = False
+        artifact["production_llm_call_attempted"] = False
+        return artifact
+
     if not execute:
         artifact["status"] = "READY"
-        artifact["blocked_reason"] = "manual gate ready; pass --execute to attempt real provider call"
+        artifact["blocked_reason"] = "manual gate and provider guard ready; pass --execute to attempt real provider call"
         return artifact
 
     artifact["network_call_attempted"] = True
