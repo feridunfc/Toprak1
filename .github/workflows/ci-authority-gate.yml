@@ -292,6 +292,25 @@ jobs:
         run: |
           python scripts/ironclad_manual_real_executor_smoke.py --json > docs/dashboard/artifacts/latest_manual_real_executor_smoke_gate.json
 
+      - name: Verify manual real executor smoke provider guard artifact
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("docs/dashboard/artifacts/latest_manual_real_executor_smoke_gate.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          assert data.get("status") == "BLOCKED"
+          assert data.get("provider_guard_required") is True
+          assert data.get("provider_guard_status") == "BLOCKED"
+          assert data.get("provider_guard_ready") is False
+          assert data.get("network_call_attempted") is False
+          assert data.get("production_llm_call_attempted") is False
+          assert data.get("api_key_value_exposed") is False
+          print("MANUAL_REAL_PROVIDER_GUARD_ARTIFACT_OK")
+          PY
+
       - name: Generate production executor dry-run boundary artifact
         run: |
           python scripts/ironclad_production_executor_dry_run.py --json > docs/dashboard/artifacts/latest_production_executor_dry_run_boundary.json
