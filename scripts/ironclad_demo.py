@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ if str(ROOT) not in sys.path:
 from typing import Any
 
 from scripts.ironclad_executor_mode import apply_executor_mode_boundary
+from scripts.ironclad_product_runtime import build_product_runtime_guarded_real_executor_boundary
 
 
 OUTPUT_PATH = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json")
@@ -106,6 +108,26 @@ async def _demo(tenant_id: str, message: str, redis_url: str, write_artifact: bo
         "failing_reasons": runtime.get("failing_reasons", []),
         "runtime_artifact": runtime,
     }
+
+    real_executor_boundary = build_product_runtime_guarded_real_executor_boundary(
+        os.environ,
+        message=message,
+    )
+
+    payload["guarded_real_executor_runtime_path_supported"] = bool(
+        real_executor_boundary.get("guarded_real_executor_runtime_path_supported")
+    )
+    payload["guarded_real_executor_requested"] = bool(
+        real_executor_boundary.get("guarded_real_executor_requested")
+    )
+    payload["provider_guard_required"] = bool(real_executor_boundary.get("provider_guard_required"))
+    payload["provider_guard_status"] = real_executor_boundary.get("provider_guard_status")
+    payload["provider_guard_ready"] = bool(real_executor_boundary.get("provider_guard_ready"))
+    payload["real_executor_boundary_reachable"] = bool(
+        real_executor_boundary.get("real_executor_boundary_reachable")
+    )
+    payload["real_executor_boundary_status"] = real_executor_boundary.get("status")
+    payload["real_executor_boundary"] = real_executor_boundary
 
     if write_artifact:
         _write_artifact(payload)

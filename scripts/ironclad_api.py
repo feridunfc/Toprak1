@@ -59,6 +59,13 @@ def _submitted_response(demo: dict[str, Any]) -> dict[str, Any]:
         "direct_process_message_call_used": bool(demo.get("direct_process_message_call_used")),
         "fake_executor_used": bool(demo.get("fake_executor_used")),
         "result": result,
+        "guarded_real_executor_runtime_path_supported": bool(demo.get("guarded_real_executor_runtime_path_supported")),
+        "guarded_real_executor_requested": bool(demo.get("guarded_real_executor_requested")),
+        "provider_guard_required": bool(demo.get("provider_guard_required")),
+        "provider_guard_status": demo.get("provider_guard_status"),
+        "provider_guard_ready": bool(demo.get("provider_guard_ready")),
+        "real_executor_boundary_reachable": bool(demo.get("real_executor_boundary_reachable")),
+        "real_executor_boundary_status": demo.get("real_executor_boundary_status"),
     }
 
 
@@ -87,6 +94,13 @@ def _completed_response(demo: dict[str, Any]) -> dict[str, Any]:
         "deployment_attempted": bool(demo.get("deployment_attempted")),
         "release_tag_created": bool(demo.get("release_tag_created")),
         "operator_action_buttons": bool(demo.get("operator_action_buttons")),
+        "guarded_real_executor_runtime_path_supported": bool(demo.get("guarded_real_executor_runtime_path_supported")),
+        "guarded_real_executor_requested": bool(demo.get("guarded_real_executor_requested")),
+        "provider_guard_required": bool(demo.get("provider_guard_required")),
+        "provider_guard_status": demo.get("provider_guard_status"),
+        "provider_guard_ready": bool(demo.get("provider_guard_ready")),
+        "real_executor_boundary_reachable": bool(demo.get("real_executor_boundary_reachable")),
+        "real_executor_boundary_status": demo.get("real_executor_boundary_status"),
     }
 
 
@@ -268,6 +282,28 @@ async def self_test(redis_url: str, tenant_id: str, message: str) -> dict[str, A
         "worker_stream_consume_loop_used": bool(submitted.get("worker_stream_consume_loop_used") or result.get("worker_stream_consume_loop_used")),
         "direct_process_message_call_used": bool(submitted.get("direct_process_message_call_used") or result.get("direct_process_message_call_used")),
         "fake_executor_used": bool(submitted.get("fake_executor_used") or result.get("fake_executor_used")),
+        "guarded_real_executor_runtime_path_supported": bool(
+            submitted.get("guarded_real_executor_runtime_path_supported")
+            or result.get("guarded_real_executor_runtime_path_supported")
+        ),
+        "guarded_real_executor_requested": bool(
+            submitted.get("guarded_real_executor_requested")
+            or result.get("guarded_real_executor_requested")
+        ),
+        "provider_guard_required": bool(
+            submitted.get("provider_guard_required")
+            or result.get("provider_guard_required")
+        ),
+        "provider_guard_status": submitted.get("provider_guard_status") or result.get("provider_guard_status"),
+        "provider_guard_ready": bool(submitted.get("provider_guard_ready") or result.get("provider_guard_ready")),
+        "real_executor_boundary_reachable": bool(
+            submitted.get("real_executor_boundary_reachable")
+            or result.get("real_executor_boundary_reachable")
+        ),
+        "real_executor_boundary_status": (
+            submitted.get("real_executor_boundary_status")
+            or result.get("real_executor_boundary_status")
+        ),
         "production_llm_call_attempted": bool(result.get("production_llm_call_attempted")),
         "deployment_attempted": bool(result.get("deployment_attempted")),
         "release_tag_created": bool(result.get("release_tag_created")),
