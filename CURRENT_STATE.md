@@ -1615,3 +1615,58 @@ Non-claims:
 - Does not deploy.
 - Does not create a release tag.
 - Does not claim production deployment readiness.
+
+<!-- SPRINT_52_WIRE_GUARDED_REAL_EXECUTOR_INTO_PRODUCT_RUNTIME -->
+
+## Sprint 52 - Wire Guarded Real Executor Into Product Runtime Path
+
+Sprint 52 moves the guarded real executor boundary from side smoke scripts into the product/runtime path.
+
+Claim:
+
+- `GUARDED_REAL_EXECUTOR_IS_REACHABLE_FROM_PRODUCT_RUNTIME_PATH`
+
+Delivered:
+
+- Added product runtime guarded real executor boundary:
+  - `scripts/ironclad_product_runtime.py`
+- Surfaced guarded real executor boundary fields in thin product CLI artifact:
+  - `scripts/ironclad_demo.py`
+  - `docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json`
+- Surfaced guarded real executor boundary fields in minimal HTTP API responses and self-test artifact:
+  - `scripts/ironclad_api.py`
+  - `docs/dashboard/artifacts/latest_minimal_product_task_http_api.json`
+- Added product runtime boundary tests:
+  - `tests/core/test_product_runtime_guarded_real_executor_boundary.py`
+- Extended thin CLI and minimal HTTP API integration tests.
+- Added Authority Gate verification:
+  - `PRODUCT_RUNTIME_GUARDED_REAL_EXECUTOR_BOUNDARY_OK`
+
+Default CI-safe product runtime artifact:
+
+- `guarded_real_executor_runtime_path_supported=true`
+- `guarded_real_executor_requested=false`
+- `provider_guard_required=true`
+- `provider_guard_status=BLOCKED`
+- `provider_guard_ready=false`
+- `real_executor_boundary_reachable=false`
+- `production_llm_call_attempted=false`
+- `network_call_attempted=false`
+- `api_key_value_exposed=false`
+- `prompt_value_exposed=false`
+- `output_text_value_exposed=false`
+
+Verified locally:
+
+- `python -m py_compile scripts/ironclad_product_runtime.py scripts/ironclad_demo.py scripts/ironclad_api.py`
+- Focused test gate:
+  - `21 passed`
+
+Explicit non-claims:
+
+- Real OpenAI/Anthropic execution is not enabled in CI.
+- Production LLM network calls are not attempted in CI.
+- The product runtime can reach the guarded real executor boundary only after explicit request and READY provider guard.
+- The Sprint does not execute a real production provider call from the product runtime.
+- The Sprint does not deploy.
+- The Sprint does not create a release tag.

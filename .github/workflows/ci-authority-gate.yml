@@ -268,6 +268,34 @@ jobs:
         run: |
           python scripts/ironclad_demo.py --tenant demo --message "hello from product CLI" --redis-url redis://localhost:6379/0 --json
 
+
+      - name: Verify product runtime guarded real executor boundary artifact
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          assert data.get("guarded_real_executor_runtime_path_supported") is True
+          assert data.get("guarded_real_executor_requested") is False
+          assert data.get("provider_guard_required") is True
+          assert data.get("provider_guard_status") == "BLOCKED"
+          assert data.get("provider_guard_ready") is False
+          assert data.get("real_executor_boundary_reachable") is False
+          assert data.get("production_llm_call_attempted") is False
+          assert data.get("deployment_attempted") is False
+          assert data.get("release_tag_created") is False
+          boundary = data.get("real_executor_boundary") or {}
+          assert boundary.get("network_call_attempted") is False
+          assert boundary.get("production_llm_call_attempted") is False
+          assert boundary.get("api_key_value_exposed") is False
+          assert boundary.get("prompt_value_exposed") is False
+          assert boundary.get("output_text_value_exposed") is False
+          print("PRODUCT_RUNTIME_GUARDED_REAL_EXECUTOR_BOUNDARY_OK")
+          PY
+
       - name: Generate minimal product task HTTP API artifact
         env:
           REDIS_URL: redis://localhost:6379/0

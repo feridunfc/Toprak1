@@ -117,6 +117,18 @@ def test_ironclad_demo_cli_executes_sprint_42_runtime_and_writes_artifact():
     assert payload["message_acknowledged"] is True
 
     assert payload["artifact_backed_safe_local_adapter_used"] is False
+    assert payload["guarded_real_executor_runtime_path_supported"] is True
+    assert payload["guarded_real_executor_requested"] is False
+    assert payload["provider_guard_required"] is True
+    assert payload["provider_guard_status"] == "BLOCKED"
+    assert payload["provider_guard_ready"] is False
+    assert payload["real_executor_boundary_reachable"] is False
+    assert payload["real_executor_boundary_status"] == "BLOCKED"
+    assert payload["real_executor_boundary"]["network_call_attempted"] is False
+    assert payload["real_executor_boundary"]["production_llm_call_attempted"] is False
+    assert payload["real_executor_boundary"]["api_key_value_exposed"] is False
+    assert payload["real_executor_boundary"]["prompt_value_exposed"] is False
+    assert payload["real_executor_boundary"]["output_text_value_exposed"] is False
     assert payload["production_llm_call_attempted"] is False
     assert payload["deployment_attempted"] is False
     assert payload["release_tag_created"] is False
@@ -129,6 +141,11 @@ def test_ironclad_demo_cli_executes_sprint_42_runtime_and_writes_artifact():
     assert written["status"] == "PASS"
     assert written["result_readable"] is True
     assert written["result"]["output_text"] == "FAKE_RESPONSE: Hello IRONCLAD..."
+    assert written["guarded_real_executor_runtime_path_supported"] is True
+    assert written["guarded_real_executor_requested"] is False
+    assert written["provider_guard_required"] is True
+    assert written["provider_guard_ready"] is False
+    assert written["real_executor_boundary_reachable"] is False
 
 
 def test_ironclad_result_cli_reads_latest_demo_result():

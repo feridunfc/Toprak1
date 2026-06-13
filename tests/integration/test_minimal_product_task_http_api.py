@@ -49,6 +49,11 @@ async def test_minimal_product_task_http_api_submit_and_result() -> None:
         assert submitted["worker_stream_consume_loop_used"] is True
         assert submitted["direct_process_message_call_used"] is False
         assert submitted["fake_executor_used"] is True
+        assert submitted["guarded_real_executor_runtime_path_supported"] is True
+        assert submitted["guarded_real_executor_requested"] is False
+        assert submitted["provider_guard_required"] is True
+        assert submitted["provider_guard_ready"] is False
+        assert submitted["real_executor_boundary_reachable"] is False
 
         result_response = await client.get(f"/runs/{submitted['run_id']}")
 
@@ -66,6 +71,11 @@ async def test_minimal_product_task_http_api_submit_and_result() -> None:
     assert result["worker_stream_consume_loop_used"] is True
     assert result["direct_process_message_call_used"] is False
     assert result["fake_executor_used"] is True
+    assert result["guarded_real_executor_runtime_path_supported"] is True
+    assert result["guarded_real_executor_requested"] is False
+    assert result["provider_guard_required"] is True
+    assert result["provider_guard_ready"] is False
+    assert result["real_executor_boundary_reachable"] is False
     assert result["production_llm_call_attempted"] is False
     assert result["deployment_attempted"] is False
     assert result["release_tag_created"] is False
@@ -107,6 +117,11 @@ async def test_minimal_product_task_http_api_self_test_artifact_shape() -> None:
     assert artifact["worker_stream_consume_loop_used"] is True
     assert artifact["direct_process_message_call_used"] is False
     assert artifact["fake_executor_used"] is True
+    assert artifact["guarded_real_executor_runtime_path_supported"] is True
+    assert artifact["guarded_real_executor_requested"] is False
+    assert artifact["provider_guard_required"] is True
+    assert artifact["provider_guard_ready"] is False
+    assert artifact["real_executor_boundary_reachable"] is False
     assert artifact["production_llm_call_attempted"] is False
     assert artifact["deployment_attempted"] is False
     assert artifact["release_tag_created"] is False
