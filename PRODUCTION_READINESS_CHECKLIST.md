@@ -773,3 +773,34 @@ Explicit non-claims:
 Next recommended hardening:
 
 - Sprint 51 can perform a manual local guarded OpenAI smoke only after explicit operator confirmation and low budget limits.
+
+<!-- SPRINT_51_MANUAL_LOCAL_OLLAMA_SMOKE_ARTIFACT -->
+
+## Sprint 51 - Manual Local Ollama Smoke Artifact Readiness
+
+Status: PASS
+
+Verified:
+
+- [x] Manual local Ollama smoke remains blocked by default.
+- [x] Manual local Ollama smoke can become READY only with `IRONCLAD_LOCAL_OLLAMA_SMOKE=1`.
+- [x] Local Ollama execution is local-only.
+- [x] Ollama model allowlist is enforced.
+- [x] Unallowlisted Ollama models are blocked without local execution.
+- [x] Local execute PASS path is covered by injected runner tests.
+- [x] Manual local real Ollama smoke observed PASS with `llama3.2:1b`.
+- [x] `stderr_value_exposed=false` is reported.
+- [x] `output_text_value_exposed=false` is reported.
+- [x] `network_call_attempted=false` remains true.
+- [x] `production_llm_call_attempted=false` remains true.
+- [x] Authority Gate verifies default local Ollama artifact.
+
+Explicit non-claims:
+
+- [ ] Local Ollama execute is not enabled in CI.
+- [ ] Real OpenAI/Anthropic execution is not enabled in CI.
+- [ ] Production LLM network calls are not attempted in CI.
+- [ ] Model output text is not stored in artifacts.
+- [ ] Deployment is not attempted.
+- [ ] Release tag is not created.
+- [ ] Production deployment readiness is not claimed.
