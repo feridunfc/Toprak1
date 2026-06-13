@@ -10,6 +10,11 @@ def test_local_ollama_smoke_blocks_by_default_without_call():
 
     assert artifact["status"] == "BLOCKED"
     assert artifact["manual_only"] is True
+    assert artifact["manual_local_ollama_smoke_supported"] is True
+    assert artifact["manual_local_ollama_smoke_ready"] is False
+    assert artifact["local_only"] is True
+    assert artifact["ollama_cli_required"] is True
+    assert artifact["model_allowed"] is True
     assert artifact["local_model_call_attempted"] is False
     assert artifact["network_call_attempted"] is False
     assert artifact["production_llm_call_attempted"] is False
@@ -22,6 +27,8 @@ def test_local_ollama_smoke_ready_without_execute():
     )
 
     assert artifact["status"] == "READY"
+    assert artifact["manual_local_ollama_smoke_ready"] is True
+    assert artifact["model_allowed"] is True
     assert artifact["local_model_call_attempted"] is False
     assert artifact["network_call_attempted"] is False
     assert artifact["production_llm_call_attempted"] is False
@@ -44,6 +51,9 @@ def test_local_ollama_smoke_execute_uses_injected_runner():
     assert artifact["status"] == "PASS"
     assert artifact["provider"] == "ollama"
     assert artifact["model"] == "llama3.2:1b"
+    assert artifact["manual_local_ollama_smoke_ready"] is True
+    assert artifact["model_allowed"] is True
+    assert artifact["local_only"] is True
     assert artifact["local_model_call_attempted"] is True
     assert artifact["network_call_attempted"] is False
     assert artifact["production_llm_call_attempted"] is False
@@ -67,4 +77,22 @@ def test_local_ollama_smoke_execute_failure_is_reported_without_output_exposure(
     assert artifact["network_call_attempted"] is False
     assert artifact["production_llm_call_attempted"] is False
     assert artifact["output_text_value_exposed"] is False
+    assert artifact["stderr_value_exposed"] is False
     assert artifact["stderr_present"] is True
+
+def test_local_ollama_smoke_blocks_unallowlisted_model_without_call():
+    artifact = build_local_ollama_smoke_artifact(
+        {
+            "IRONCLAD_LOCAL_OLLAMA_SMOKE": "1",
+            "IRONCLAD_OLLAMA_MODEL": "not-allowed:latest",
+            "IRONCLAD_ALLOWED_OLLAMA_MODELS": "llama3.2:1b",
+        },
+        execute=True,
+    )
+
+    assert artifact["status"] == "BLOCKED"
+    assert artifact["manual_local_ollama_smoke_ready"] is False
+    assert artifact["model_allowed"] is False
+    assert artifact["local_model_call_attempted"] is False
+    assert artifact["network_call_attempted"] is False
+    assert artifact["production_llm_call_attempted"] is False

@@ -8,6 +8,14 @@ from typing import Any
 
 DEFAULT_MODEL = "llama3.2:1b"
 DEFAULT_PROMPT = "Return exactly: IRONCLAD_LOCAL_SMOKE_OK"
+DEFAULT_ALLOWED_MODELS = {"llama3.2:1b"}
+
+
+def _csv_set(value: str | None, default: set[str]) -> set[str]:
+    if not value or not value.strip():
+        return set(default)
+    return {part.strip().lower() for part in value.split(",") if part.strip()}
+
 
 
 def _enabled(env: dict[str, str] | None = None) -> bool:
@@ -24,6 +32,8 @@ def build_local_ollama_smoke_artifact(
     source = env if env is not None else os.environ
     model = (source.get("IRONCLAD_OLLAMA_MODEL") or DEFAULT_MODEL).strip()
     enabled = _enabled(source)
+    allowed_models = _csv_set(source.get("IRONCLAD_ALLOWED_OLLAMA_MODELS"), DEFAULT_ALLOWED_MODELS)
+    model_allowed = model.lower() in allowed_models
 
     artifact: dict[str, Any] = {
         "source": "manual_local_ollama_smoke_gate",
@@ -32,6 +42,12 @@ def build_local_ollama_smoke_artifact(
         "ci_safe": True,
         "provider": "ollama",
         "model": model,
+        "manual_local_ollama_smoke_supported": True,
+        "manual_local_ollama_smoke_ready": bool(enabled and model_allowed),
+        "local_only": True,
+        "ollama_cli_required": True,
+        "allowed_models": sorted(allowed_models),
+        "model_allowed": model_allowed,
         "local_model_call_attempted": False,
         "network_call_attempted": False,
         "production_llm_call_attempted": False,
@@ -41,9 +57,15 @@ def build_local_ollama_smoke_artifact(
         "prompt_length": len(DEFAULT_PROMPT),
         "output_text_present": False,
         "output_text_value_exposed": False,
+        "stderr_value_exposed": False,
         "blocked_reason": None if enabled else "IRONCLAD_LOCAL_OLLAMA_SMOKE=1 is required",
         "failing_reasons": [],
     }
+
+    if not model_allowed:
+        artifact["status"] = "BLOCKED"
+        artifact["blocked_reason"] = f"ollama model {model!r} is not allowlisted"
+        return artifact
 
     if not enabled:
         return artifact

@@ -1557,3 +1557,61 @@ Non-claims:
 - Does not deploy.
 - Does not create a release tag.
 - Does not claim production deployment readiness.
+
+<!-- SPRINT_51_MANUAL_LOCAL_OLLAMA_SMOKE_ARTIFACT -->
+
+## Sprint 51 - Manual Local Ollama Smoke Artifact Hardening
+
+Sprint 51 hardens the manual local Ollama smoke gate as a local-only execution path with redacted artifacts.
+
+Claim:
+
+- `MANUAL_LOCAL_OLLAMA_SMOKE_CAN_RUN_WITH_REDACTED_ARTIFACT`
+
+Delivered:
+
+- `scripts/ironclad_manual_local_ollama_smoke.py` exposes explicit local-only artifact fields.
+- Added local Ollama model allowlist enforcement.
+- Added test coverage for unallowlisted Ollama model blocking.
+- Authority Gate verifies the default local Ollama artifact with `MANUAL_LOCAL_OLLAMA_ARTIFACT_OK`.
+
+Default CI-safe artifact:
+
+- `status=BLOCKED`
+- `manual_local_ollama_smoke_supported=true`
+- `manual_local_ollama_smoke_ready=false`
+- `local_only=true`
+- `model_allowed=true`
+- `local_model_call_attempted=false`
+- `network_call_attempted=false`
+- `production_llm_call_attempted=false`
+- `output_text_value_exposed=false`
+- `stderr_value_exposed=false`
+
+Manual local execute evidence:
+
+- `status=PASS`
+- `provider=ollama`
+- `model=llama3.2:1b`
+- `manual_local_ollama_smoke_ready=true`
+- `local_model_call_attempted=true`
+- `network_call_attempted=false`
+- `production_llm_call_attempted=false`
+- `output_text_present=true`
+- `output_text_value_exposed=false`
+- `stderr_value_exposed=false`
+
+Latest verified gates:
+
+- `YAML_OK`
+- `15 passed`
+
+Non-claims:
+
+- Does not call OpenAI, Anthropic, or any production LLM in CI.
+- Does not execute local Ollama in CI.
+- Does not expose model output text.
+- Does not expose stderr value.
+- Does not deploy.
+- Does not create a release tag.
+- Does not claim production deployment readiness.
