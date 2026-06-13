@@ -284,6 +284,28 @@ jobs:
         run: |
           python scripts/ironclad_manual_local_ollama_smoke.py --json > docs/dashboard/artifacts/latest_manual_local_ollama_smoke_gate.json
 
+      - name: Verify manual local Ollama smoke artifact
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("docs/dashboard/artifacts/latest_manual_local_ollama_smoke_gate.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          assert data.get("status") == "BLOCKED"
+          assert data.get("manual_local_ollama_smoke_supported") is True
+          assert data.get("manual_local_ollama_smoke_ready") is False
+          assert data.get("local_only") is True
+          assert data.get("model_allowed") is True
+          assert data.get("network_call_attempted") is False
+          assert data.get("production_llm_call_attempted") is False
+          assert data.get("output_text_value_exposed") is False
+          assert data.get("stderr_value_exposed") is False
+          print("MANUAL_LOCAL_OLLAMA_ARTIFACT_OK")
+          PY
+
+
       - name: Generate manual provider smoke guard artifact
         run: |
           python scripts/ironclad_manual_provider_smoke_guard.py --json > docs/dashboard/artifacts/latest_manual_provider_smoke_guard.json
@@ -433,4 +455,3 @@ jobs:
       - name: Smoke command dry run
         run: |
           python scripts/full_auto_v3_2_smoke.py --dry-run --redis-mode auto
-
