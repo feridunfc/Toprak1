@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 from scripts.ironclad_manual_provider_smoke_guard import CONFIRMATION_VALUE
-from scripts.ironclad_product_runtime import build_product_runtime_guarded_real_executor_boundary
+from scripts.ironclad_product_runtime import (
+    build_product_runtime_guarded_real_executor_boundary,
+    build_product_runtime_guarded_real_executor_execute_artifact,
+)
 
 
 class BuiltExecutor:
@@ -100,3 +105,135 @@ def test_product_runtime_real_executor_boundary_reachable_when_provider_guard_re
     assert calls[0]["executor_mode"] == "openai"
     assert calls[0]["openai_model"] == "gpt-4o-mini"
     assert calls[0]["openai_api_key"] == "sk-test-secret"
+
+
+class ExecutingExecutor:
+    async def execute(self, event):
+        return {
+            "status": "done",
+            "output_text": "SECRET PRODUCT RUNTIME EXECUTION OUTPUT",
+            "run_id": event.run_id,
+        }
+
+
+def _ready_env() -> dict[str, str]:
+    return {
+        "IRONCLAD_PRODUCT_RUNTIME_REAL_EXECUTOR": "1",
+        "IRONCLAD_EXECUTOR_MODE": "production_llm_enabled",
+        "IRONCLAD_ALLOW_REAL_LLM": "1",
+        "IRONCLAD_EXECUTOR_DRY_RUN": "0",
+        "OPENAI_API_KEY": "sk-test-secret",
+        "OPENAI_MODEL": "gpt-4o-mini",
+        "IRONCLAD_ALLOWED_PROVIDERS": "openai",
+        "IRONCLAD_ALLOWED_MODELS": "gpt-4o-mini",
+        "IRONCLAD_REAL_SMOKE_MAX_TOKENS": "64",
+        "IRONCLAD_REAL_SMOKE_MAX_COST_CENTS": "3",
+        "IRONCLAD_MANUAL_PROVIDER_SMOKE_CONFIRM": CONFIRMATION_VALUE,
+    }
+
+
+def test_product_runtime_real_executor_execute_blocks_by_default_without_factory():
+    calls = []
+
+    artifact = asyncio.run(
+        build_product_runtime_guarded_real_executor_execute_artifact(
+            {},
+            tenant_id="demo",
+            message="hello product runtime",
+            executor_builder=lambda config: calls.append(config) or ExecutingExecutor(),
+        )
+    )
+
+    assert artifact["status"] == "BLOCKED"
+    assert artifact["product_runtime_real_executor_execute_supported"] is True
+    assert artifact["product_runtime_real_executor_execute_requested"] is False
+    assert artifact["execution_attempted"] is False
+    assert artifact["real_executor_executed"] is False
+    assert artifact["network_call_attempted"] is False
+    assert artifact["production_llm_call_attempted"] is False
+    assert calls == []
+
+
+def test_product_runtime_real_executor_execute_blocks_when_guard_not_ready():
+    calls = []
+
+    artifact = asyncio.run(
+        build_product_runtime_guarded_real_executor_execute_artifact(
+            {
+                "IRONCLAD_PRODUCT_RUNTIME_REAL_EXECUTOR": "1",
+                "IRONCLAD_PRODUCT_RUNTIME_REAL_EXECUTOR_EXECUTE": "1",
+                "IRONCLAD_EXECUTOR_MODE": "production_llm_enabled",
+                "IRONCLAD_ALLOW_REAL_LLM": "1",
+                "IRONCLAD_EXECUTOR_DRY_RUN": "0",
+                "OPENAI_API_KEY": "sk-test-secret",
+            },
+            tenant_id="demo",
+            message="hello product runtime",
+            executor_builder=lambda config: calls.append(config) or ExecutingExecutor(),
+        )
+    )
+
+    assert artifact["status"] == "BLOCKED"
+    assert artifact["product_runtime_real_executor_execute_requested"] is True
+    assert artifact["provider_guard_ready"] is False
+    assert artifact["execution_attempted"] is False
+    assert artifact["real_executor_executed"] is False
+    assert artifact["network_call_attempted"] is False
+    assert artifact["production_llm_call_attempted"] is False
+    assert "sk-test-secret" not in str(artifact)
+    assert calls == []
+
+
+def test_product_runtime_real_executor_execute_ready_but_not_requested():
+    calls = []
+
+    artifact = asyncio.run(
+        build_product_runtime_guarded_real_executor_execute_artifact(
+            _ready_env(),
+            tenant_id="demo",
+            message="hello product runtime",
+            executor_builder=lambda config: calls.append(config) or ExecutingExecutor(),
+        )
+    )
+
+    assert artifact["status"] == "READY"
+    assert artifact["provider_guard_ready"] is True
+    assert artifact["real_executor_boundary_reachable"] is True
+    assert artifact["product_runtime_real_executor_execute_requested"] is False
+    assert artifact["execution_attempted"] is False
+    assert artifact["real_executor_executed"] is False
+    assert artifact["network_call_attempted"] is False
+    assert artifact["production_llm_call_attempted"] is False
+    assert len(calls) == 1
+
+
+def test_product_runtime_real_executor_execute_runs_only_after_guard_ready_with_injected_executor():
+    calls = []
+    env = _ready_env()
+    env["IRONCLAD_PRODUCT_RUNTIME_REAL_EXECUTOR_EXECUTE"] = "1"
+
+    artifact = asyncio.run(
+        build_product_runtime_guarded_real_executor_execute_artifact(
+            env,
+            tenant_id="demo",
+            message="hello product runtime",
+            executor_builder=lambda config: calls.append(config) or ExecutingExecutor(),
+        )
+    )
+
+    assert artifact["status"] == "PASS"
+    assert artifact["provider_guard_ready"] is True
+    assert artifact["real_executor_boundary_reachable"] is True
+    assert artifact["product_runtime_real_executor_execute_requested"] is True
+    assert artifact["execution_attempted"] is True
+    assert artifact["real_executor_executed"] is True
+    assert artifact["executor_type"] == "ExecutingExecutor"
+    assert artifact["network_call_attempted"] is False
+    assert artifact["production_llm_call_attempted"] is False
+    assert artifact["output_text_present"] is True
+    assert artifact["output_text_value_exposed"] is False
+    assert artifact["prompt_value_exposed"] is False
+    assert artifact["api_key_value_exposed"] is False
+    assert "sk-test-secret" not in str(artifact)
+    assert "SECRET PRODUCT RUNTIME EXECUTION OUTPUT" not in str(artifact)
+    assert len(calls) >= 1

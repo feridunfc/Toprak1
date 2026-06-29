@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import inspect
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from scripts.ironclad_executor_mode import apply_executor_mode_boundary
@@ -109,6 +111,155 @@ def build_product_runtime_guarded_real_executor_boundary(
 
 
 
+
+def _product_runtime_real_executor_config(source: Mapping[str, str]) -> dict[str, Any]:
+    return {
+        "executor_mode": "openai",
+        "openai_api_key": source.get("OPENAI_API_KEY"),
+        "openai_model": source.get("OPENAI_MODEL", "gpt-4o-mini"),
+        "executor_timeout_seconds": float(source.get("IRONCLAD_REAL_SMOKE_TIMEOUT_SECONDS", "30")),
+    }
+
+
+async def _default_product_runtime_executor_runner(
+    executor: Any,
+    *,
+    tenant_id: str,
+    message: str,
+) -> Any:
+    event = SimpleNamespace(
+        run_id="run-product-runtime-real-executor-manual",
+        task_id="task-product-runtime-real-executor-manual",
+        tenant_id=tenant_id,
+        payload={"prompt": message},
+        message=message,
+    )
+    result = executor.execute(event)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+def _result_has_output_text(result: Any) -> bool:
+    if isinstance(result, dict):
+        nested = result.get("result", {})
+        return bool(result.get("output_text") or (isinstance(nested, dict) and nested.get("output_text")))
+    return bool(getattr(result, "output_text", None))
+
+
+async def build_product_runtime_guarded_real_executor_execute_artifact(
+    env: Mapping[str, str] | None = None,
+    *,
+    tenant_id: str = "demo",
+    message: str = "",
+    executor_builder: Callable[[dict[str, Any]], Any] | None = None,
+    executor_runner: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    source = env if env is not None else os.environ
+    execute_requested = (
+        source.get("IRONCLAD_PRODUCT_RUNTIME_REAL_EXECUTOR_EXECUTE") or ""
+    ).strip() == "1"
+
+    boundary = build_product_runtime_guarded_real_executor_boundary(
+        source,
+        message=message,
+        executor_builder=executor_builder,
+    )
+
+    artifact: dict[str, Any] = {
+        "source": "product_runtime_guarded_real_executor_execute",
+        "status": "BLOCKED",
+        "product_runtime_real_executor_execute_supported": True,
+        "product_runtime_real_executor_execute_requested": execute_requested,
+        "guarded_real_executor_runtime_path_supported": bool(
+            boundary.get("guarded_real_executor_runtime_path_supported")
+        ),
+        "guarded_real_executor_requested": bool(boundary.get("guarded_real_executor_requested")),
+        "provider_guard_required": bool(boundary.get("provider_guard_required")),
+        "provider_guard_status": boundary.get("provider_guard_status"),
+        "provider_guard_ready": bool(boundary.get("provider_guard_ready")),
+        "real_executor_boundary_reachable": bool(boundary.get("real_executor_boundary_reachable")),
+        "real_executor_boundary_status": boundary.get("status"),
+        "executor_factory_attempted": bool(boundary.get("executor_factory_attempted")),
+        "execution_attempted": False,
+        "real_executor_executed": False,
+        "executor_type": boundary.get("executor_type"),
+        "provider": boundary.get("provider"),
+        "model": boundary.get("model"),
+        "network_call_attempted": False,
+        "production_llm_call_attempted": False,
+        "deployment_attempted": False,
+        "release_tag_created": False,
+        "prompt_length": len(message or ""),
+        "prompt_value_exposed": False,
+        "output_text_present": False,
+        "output_text_value_exposed": False,
+        "api_key_value_exposed": False,
+        "error_message_exposed": False,
+        "real_executor_boundary": boundary,
+        "failing_reasons": [],
+    }
+
+    if not execute_requested:
+        artifact["blocked_reason"] = (
+            "IRONCLAD_PRODUCT_RUNTIME_REAL_EXECUTOR_EXECUTE=1 is required"
+        )
+        if boundary.get("status") == "READY":
+            artifact["status"] = "READY"
+            artifact["blocked_reason"] = (
+                "guarded real executor boundary READY; manual execute not requested"
+            )
+        return artifact
+
+    if boundary.get("status") != "READY" or not artifact["provider_guard_ready"]:
+        artifact["blocked_reason"] = (
+            "guarded real executor boundary is not READY; execution refused"
+        )
+        return artifact
+
+    config = _product_runtime_real_executor_config(source)
+
+    try:
+        if executor_builder is None:
+            from hfa_worker.executor_factory import build_executor
+
+            executor = build_executor(config)
+        else:
+            executor = executor_builder(config)
+    except Exception as exc:
+        artifact["status"] = "FAILED"
+        artifact["error_type"] = type(exc).__name__
+        artifact["failing_reasons"] = ["guarded real executor factory failed"]
+        return artifact
+
+    artifact["executor_factory_attempted"] = True
+    artifact["executor_type"] = type(executor).__name__
+    artifact["execution_attempted"] = True
+
+    injected_execution = executor_builder is not None or executor_runner is not None
+    artifact["network_call_attempted"] = not injected_execution
+    artifact["production_llm_call_attempted"] = not injected_execution
+
+    try:
+        runner = executor_runner or _default_product_runtime_executor_runner
+        result = runner(executor, tenant_id=tenant_id, message=message)
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception as exc:
+        artifact["status"] = "FAILED"
+        artifact["error_type"] = type(exc).__name__
+        artifact["failing_reasons"] = ["guarded real executor execution failed"]
+        return artifact
+
+    artifact["status"] = "PASS"
+    artifact["blocked_reason"] = None
+    artifact["real_executor_executed"] = True
+    artifact["output_text_present"] = _result_has_output_text(result)
+    artifact["output_text_value_exposed"] = False
+    return artifact
+
+
+
 async def run_demo(
     tenant_id: str,
     message: str,
@@ -191,6 +342,27 @@ async def run_demo(
     )
     demo["real_executor_boundary_status"] = real_executor_boundary.get("status")
     demo["real_executor_boundary"] = real_executor_boundary
+
+    real_executor_execute = await build_product_runtime_guarded_real_executor_execute_artifact(
+        os.environ,
+        tenant_id=tenant_id,
+        message=message,
+    )
+
+    demo["product_runtime_real_executor_execute_supported"] = bool(
+        real_executor_execute.get("product_runtime_real_executor_execute_supported")
+    )
+    demo["product_runtime_real_executor_execute_requested"] = bool(
+        real_executor_execute.get("product_runtime_real_executor_execute_requested")
+    )
+    demo["product_runtime_real_executor_execution_attempted"] = bool(
+        real_executor_execute.get("execution_attempted")
+    )
+    demo["product_runtime_real_executor_executed"] = bool(
+        real_executor_execute.get("real_executor_executed")
+    )
+    demo["product_runtime_real_executor_execute_status"] = real_executor_execute.get("status")
+    demo["product_runtime_real_executor_execute"] = real_executor_execute
 
     if run_id:
         _LAST_RESULTS[str(run_id)] = result
