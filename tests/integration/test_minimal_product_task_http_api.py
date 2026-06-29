@@ -54,6 +54,11 @@ async def test_minimal_product_task_http_api_submit_and_result() -> None:
         assert submitted["provider_guard_required"] is True
         assert submitted["provider_guard_ready"] is False
         assert submitted["real_executor_boundary_reachable"] is False
+        assert submitted["product_runtime_real_executor_execute_supported"] is True
+        assert submitted["product_runtime_real_executor_execute_requested"] is False
+        assert submitted["product_runtime_real_executor_execution_attempted"] is False
+        assert submitted["product_runtime_real_executor_executed"] is False
+        assert submitted["product_runtime_real_executor_execute_status"] == "BLOCKED"
 
         result_response = await client.get(f"/runs/{submitted['run_id']}")
 
@@ -76,6 +81,11 @@ async def test_minimal_product_task_http_api_submit_and_result() -> None:
     assert result["provider_guard_required"] is True
     assert result["provider_guard_ready"] is False
     assert result["real_executor_boundary_reachable"] is False
+    assert result["product_runtime_real_executor_execute_supported"] is True
+    assert result["product_runtime_real_executor_execute_requested"] is False
+    assert result["product_runtime_real_executor_execution_attempted"] is False
+    assert result["product_runtime_real_executor_executed"] is False
+    assert result["product_runtime_real_executor_execute_status"] == "BLOCKED"
     assert result["production_llm_call_attempted"] is False
     assert result["deployment_attempted"] is False
     assert result["release_tag_created"] is False
@@ -122,6 +132,11 @@ async def test_minimal_product_task_http_api_self_test_artifact_shape() -> None:
     assert artifact["provider_guard_required"] is True
     assert artifact["provider_guard_ready"] is False
     assert artifact["real_executor_boundary_reachable"] is False
+    assert artifact["product_runtime_real_executor_execute_supported"] is True
+    assert artifact["product_runtime_real_executor_execute_requested"] is False
+    assert artifact["product_runtime_real_executor_execution_attempted"] is False
+    assert artifact["product_runtime_real_executor_executed"] is False
+    assert artifact["product_runtime_real_executor_execute_status"] == "BLOCKED"
     assert artifact["production_llm_call_attempted"] is False
     assert artifact["deployment_attempted"] is False
     assert artifact["release_tag_created"] is False

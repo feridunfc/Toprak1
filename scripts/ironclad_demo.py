@@ -16,7 +16,10 @@ if str(ROOT) not in sys.path:
 from typing import Any
 
 from scripts.ironclad_executor_mode import apply_executor_mode_boundary
-from scripts.ironclad_product_runtime import build_product_runtime_guarded_real_executor_boundary
+from scripts.ironclad_product_runtime import (
+    build_product_runtime_guarded_real_executor_boundary,
+    build_product_runtime_guarded_real_executor_execute_artifact,
+)
 
 
 OUTPUT_PATH = Path("docs/dashboard/artifacts/latest_thin_product_task_cli_demo.json")
@@ -128,6 +131,27 @@ async def _demo(tenant_id: str, message: str, redis_url: str, write_artifact: bo
     )
     payload["real_executor_boundary_status"] = real_executor_boundary.get("status")
     payload["real_executor_boundary"] = real_executor_boundary
+
+    real_executor_execute = await build_product_runtime_guarded_real_executor_execute_artifact(
+        os.environ,
+        tenant_id=tenant_id,
+        message=message,
+    )
+
+    payload["product_runtime_real_executor_execute_supported"] = bool(
+        real_executor_execute.get("product_runtime_real_executor_execute_supported")
+    )
+    payload["product_runtime_real_executor_execute_requested"] = bool(
+        real_executor_execute.get("product_runtime_real_executor_execute_requested")
+    )
+    payload["product_runtime_real_executor_execution_attempted"] = bool(
+        real_executor_execute.get("execution_attempted")
+    )
+    payload["product_runtime_real_executor_executed"] = bool(
+        real_executor_execute.get("real_executor_executed")
+    )
+    payload["product_runtime_real_executor_execute_status"] = real_executor_execute.get("status")
+    payload["product_runtime_real_executor_execute"] = real_executor_execute
 
     if write_artifact:
         _write_artifact(payload)

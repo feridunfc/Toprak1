@@ -123,7 +123,16 @@ def test_ironclad_demo_cli_executes_sprint_42_runtime_and_writes_artifact():
     assert payload["provider_guard_status"] == "BLOCKED"
     assert payload["provider_guard_ready"] is False
     assert payload["real_executor_boundary_reachable"] is False
-    assert payload["real_executor_boundary_status"] == "BLOCKED"
+    assert payload["product_runtime_real_executor_execute_supported"] is True
+    assert payload["product_runtime_real_executor_execute_requested"] is False
+    assert payload["product_runtime_real_executor_execution_attempted"] is False
+    assert payload["product_runtime_real_executor_executed"] is False
+    assert payload["product_runtime_real_executor_execute_status"] == "BLOCKED"
+    assert payload["product_runtime_real_executor_execute"]["network_call_attempted"] is False
+    assert payload["product_runtime_real_executor_execute"]["production_llm_call_attempted"] is False
+    assert payload["product_runtime_real_executor_execute"]["api_key_value_exposed"] is False
+    assert payload["product_runtime_real_executor_execute"]["prompt_value_exposed"] is False
+    assert payload["product_runtime_real_executor_execute"]["output_text_value_exposed"] is False
     assert payload["real_executor_boundary"]["network_call_attempted"] is False
     assert payload["real_executor_boundary"]["production_llm_call_attempted"] is False
     assert payload["real_executor_boundary"]["api_key_value_exposed"] is False
@@ -146,6 +155,11 @@ def test_ironclad_demo_cli_executes_sprint_42_runtime_and_writes_artifact():
     assert written["provider_guard_required"] is True
     assert written["provider_guard_ready"] is False
     assert written["real_executor_boundary_reachable"] is False
+    assert written["product_runtime_real_executor_execute_supported"] is True
+    assert written["product_runtime_real_executor_execute_requested"] is False
+    assert written["product_runtime_real_executor_execution_attempted"] is False
+    assert written["product_runtime_real_executor_executed"] is False
+    assert written["product_runtime_real_executor_execute_status"] == "BLOCKED"
 
 
 def test_ironclad_result_cli_reads_latest_demo_result():

@@ -1670,3 +1670,35 @@ Explicit non-claims:
 - The Sprint does not execute a real production provider call from the product runtime.
 - The Sprint does not deploy.
 - The Sprint does not create a release tag.
+
+## Sprint 53 - Guarded Product Runtime Manual Real Executor Execute Path
+
+Status: IN PROGRESS
+
+Claim:
+`PRODUCT_RUNTIME_REAL_EXECUTOR_CAN_EXECUTE_ONLY_AFTER_PROVIDER_GUARD_READY`
+
+Implemented:
+- Added `build_product_runtime_guarded_real_executor_execute_artifact(...)`.
+- Product runtime now exposes a manual execute artifact in addition to the Sprint 52 guarded real executor boundary.
+- Default behavior remains blocked:
+  - `IRONCLAD_PRODUCT_RUNTIME_REAL_EXECUTOR_EXECUTE=1` is required.
+  - Provider guard must be READY.
+  - Execution is refused when the guarded real executor boundary is not READY.
+- Test execution uses injected executor only.
+- Secret/output redaction is preserved:
+  - API key value is not exposed.
+  - prompt value is not exposed.
+  - output text value is not exposed.
+- Thin CLI and minimal HTTP API now surface manual execute readiness fields.
+
+Local verification on Windows new machine:
+- `python -m py_compile ...` passed for patched runtime/API/test files.
+- Core safety suite passed: `17 passed`.
+- Local Redis/Docker-backed integration tests were not runnable on this machine because Docker Desktop reported missing virtualization support and Redis on `127.0.0.1:6389` was unavailable.
+
+Non-claims:
+- No CI/default production LLM execution.
+- No default network/provider call.
+- No deployment/release tag.
+- No claim that local Redis integration passed on the new Windows machine.

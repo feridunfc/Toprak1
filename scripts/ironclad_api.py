@@ -66,6 +66,21 @@ def _submitted_response(demo: dict[str, Any]) -> dict[str, Any]:
         "provider_guard_ready": bool(demo.get("provider_guard_ready")),
         "real_executor_boundary_reachable": bool(demo.get("real_executor_boundary_reachable")),
         "real_executor_boundary_status": demo.get("real_executor_boundary_status"),
+        "product_runtime_real_executor_execute_supported": bool(
+            demo.get("product_runtime_real_executor_execute_supported")
+        ),
+        "product_runtime_real_executor_execute_requested": bool(
+            demo.get("product_runtime_real_executor_execute_requested")
+        ),
+        "product_runtime_real_executor_execution_attempted": bool(
+            demo.get("product_runtime_real_executor_execution_attempted")
+        ),
+        "product_runtime_real_executor_executed": bool(
+            demo.get("product_runtime_real_executor_executed")
+        ),
+        "product_runtime_real_executor_execute_status": demo.get(
+            "product_runtime_real_executor_execute_status"
+        ),
     }
 
 
@@ -101,6 +116,21 @@ def _completed_response(demo: dict[str, Any]) -> dict[str, Any]:
         "provider_guard_ready": bool(demo.get("provider_guard_ready")),
         "real_executor_boundary_reachable": bool(demo.get("real_executor_boundary_reachable")),
         "real_executor_boundary_status": demo.get("real_executor_boundary_status"),
+        "product_runtime_real_executor_execute_supported": bool(
+            demo.get("product_runtime_real_executor_execute_supported")
+        ),
+        "product_runtime_real_executor_execute_requested": bool(
+            demo.get("product_runtime_real_executor_execute_requested")
+        ),
+        "product_runtime_real_executor_execution_attempted": bool(
+            demo.get("product_runtime_real_executor_execution_attempted")
+        ),
+        "product_runtime_real_executor_executed": bool(
+            demo.get("product_runtime_real_executor_executed")
+        ),
+        "product_runtime_real_executor_execute_status": demo.get(
+            "product_runtime_real_executor_execute_status"
+        ),
     }
 
 
@@ -303,6 +333,26 @@ async def self_test(redis_url: str, tenant_id: str, message: str) -> dict[str, A
         "real_executor_boundary_status": (
             submitted.get("real_executor_boundary_status")
             or result.get("real_executor_boundary_status")
+        ),
+        "product_runtime_real_executor_execute_supported": bool(
+            submitted.get("product_runtime_real_executor_execute_supported")
+            or result.get("product_runtime_real_executor_execute_supported")
+        ),
+        "product_runtime_real_executor_execute_requested": bool(
+            submitted.get("product_runtime_real_executor_execute_requested")
+            or result.get("product_runtime_real_executor_execute_requested")
+        ),
+        "product_runtime_real_executor_execution_attempted": bool(
+            submitted.get("product_runtime_real_executor_execution_attempted")
+            or result.get("product_runtime_real_executor_execution_attempted")
+        ),
+        "product_runtime_real_executor_executed": bool(
+            submitted.get("product_runtime_real_executor_executed")
+            or result.get("product_runtime_real_executor_executed")
+        ),
+        "product_runtime_real_executor_execute_status": (
+            submitted.get("product_runtime_real_executor_execute_status")
+            or result.get("product_runtime_real_executor_execute_status")
         ),
         "production_llm_call_attempted": bool(result.get("production_llm_call_attempted")),
         "deployment_attempted": bool(result.get("deployment_attempted")),
