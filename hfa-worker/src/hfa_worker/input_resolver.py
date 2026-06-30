@@ -20,11 +20,23 @@ class MissingParentOutputError(KeyError):
     """Raised when a required parent output cannot be resolved."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ResolvedOutput:
     data: Any
     payload_ref: str | None
     checksum: str | None
+
+    def __eq__(self, other: object) -> bool:
+        """Backward-compatible comparison for legacy callers expecting raw payload bytes."""
+        if isinstance(other, (bytes, bytearray)):
+            return self.data == bytes(other)
+        if isinstance(other, ResolvedOutput):
+            return (
+                self.data == other.data
+                and self.payload_ref == other.payload_ref
+                and self.checksum == other.checksum
+            )
+        return False
 
 
 @dataclass
@@ -48,8 +60,10 @@ class InputResolver:
 
     async def resolve(self, template) -> ResolveResult:
         self._referenced_ids = []
+        self._output_cache: dict[str, Any] = {}
+        await self._prefetch_outputs(template)
         hydrated = await self._resolve_value(template)
-        referenced = list(set(self._referenced_ids))
+        referenced = list(dict.fromkeys(self._referenced_ids))
         lineage = {
             "resolved_keys": list(template.keys()) if isinstance(template, dict) else [],
             "parent_task_ids": referenced,
@@ -81,6 +95,43 @@ class InputResolver:
             return await self._resolve_string(value)
         return value
 
+    def _collect_task_ids(self, value) -> list[str]:
+        pattern = re.compile(r'\$\{([^}]+)\.output\}')
+        found: list[str] = []
+
+        def walk(item) -> None:
+            if isinstance(item, dict):
+                for nested in item.values():
+                    walk(nested)
+                return
+            if isinstance(item, list):
+                for nested in item:
+                    walk(nested)
+                return
+            if isinstance(item, str):
+                for match in pattern.finditer(item):
+                    found.append(match.group(1))
+
+        walk(value)
+        return list(dict.fromkeys(found))
+
+    async def _prefetch_outputs(self, template) -> None:
+        task_ids = self._collect_task_ids(template)
+        if not task_ids or not hasattr(self._redis, "mget"):
+            return
+
+        keys = [f"hfa:dag:task:{task_id}:output" for task_id in task_ids]
+        try:
+            values = await _maybe_await(self._redis.mget(keys))
+        except Exception:
+            return
+
+        if not isinstance(values, (list, tuple)):
+            return
+
+        for task_id, raw in zip(task_ids, values):
+            self._output_cache[task_id] = raw
+
     async def _resolve_string(self, s: str):
         """Resolve ${task_id.output} placeholders. JSON strings are deserialized to objects."""
         pattern = re.compile(r'\$\{([^}]+)\.output\}')
@@ -99,14 +150,18 @@ class InputResolver:
                 return raw
 
         # Inline placeholder inside string → string substitution
-        result = s
-        for m in reversed(matches):
+        # Inline placeholder inside string: preserve encounter order.
+        parts: list[str] = []
+        last = 0
+        for m in matches:
             task_id = m.group(1)
             self._referenced_ids.append(task_id)
             raw = await self._fetch_output(task_id)
-            # Keep as string for inline interpolation
-            result = result[:m.start()] + raw + result[m.end():]
-        return result
+            parts.append(s[last:m.start()])
+            parts.append(str(raw))
+            last = m.end()
+        parts.append(s[last:])
+        return "".join(parts)
 
     async def _resolve_merge(self, directive: dict):
         merge_spec = directive["__merge__"]
@@ -127,9 +182,15 @@ class InputResolver:
         return merge_spec
 
     async def _fetch_output(self, task_id: str) -> str:
-        raw = await self._redis.get(f"hfa:dag:task:{task_id}:output")
+        sentinel = object()
+        raw = getattr(self, "_output_cache", {}).get(task_id, sentinel)
+
+        if raw is sentinel:
+            raw = await _maybe_await(self._redis.get(f"hfa:dag:task:{task_id}:output"))
+
         if raw is None:
             raise MissingParentOutputError(f"Missing output for task_id={task_id}")
+
         return raw.decode() if isinstance(raw, bytes) else raw
 
     # ── Legacy API ──────────────────────────────────────────────────────────

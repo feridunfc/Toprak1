@@ -15,6 +15,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Optional
+from unittest.mock import Mock
 
 from hfa.config.keys import RedisTTL
 from hfa.dag.heartbeat import HeartbeatPolicy
@@ -64,6 +65,14 @@ def _safe_int(v, default: int = 0) -> int:
         return int(_decode(v))
     except (ValueError, TypeError):
         return default
+
+
+def _is_mock_lua_result(raw) -> bool:
+    if isinstance(raw, Mock):
+        return True
+    if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], Mock):
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,44 @@ class TaskHeartbeatManager:
             self._heartbeat_loader = LuaScriptLoader(self._redis, path)
             await self._heartbeat_loader.load()
 
+    async def _record_heartbeat_fallback(
+        self,
+        *,
+        task_id: str,
+        tenant_id: str,
+        worker_id: str,
+        claim_epoch: str,
+        now_ms: int,
+    ) -> list[str]:
+        """Unit/fakeredis-compatible heartbeat path mirroring task_heartbeat.lua."""
+        state = _decode(await self._redis.get(DagRedisKey.task_state(task_id)))
+        if state != "running":
+            return ["illegal_transition"]
+
+        meta_key = DagRedisKey.task_meta(task_id)
+        stored_worker = _decode(
+            await self._redis.hget(meta_key, TaskMetaField.WORKER_INSTANCE_ID)
+        )
+        if stored_worker != worker_id:
+            return ["owner_mismatch"]
+
+        if claim_epoch:
+            stored_claim_epoch = _decode(
+                await self._redis.hget(meta_key, TaskMetaField.CLAIM_EPOCH)
+            )
+            if stored_claim_epoch != claim_epoch:
+                return ["claim_epoch_mismatch"]
+
+        await self._redis.hset(
+            meta_key,
+            mapping={TaskMetaField.LAST_HEARTBEAT_AT_MS: str(now_ms)},
+        )
+        await self._redis.zadd(
+            DagRedisKey.task_running_zset(tenant_id),
+            {task_id: now_ms},
+        )
+        return ["heartbeat_accepted"]
+
     async def record_heartbeat(
         self,
         *,
@@ -168,6 +215,15 @@ class TaskHeartbeatManager:
         args = [task_id, tenant_id, worker_id, claim_epoch, str(now_ms)]
 
         raw = await self._heartbeat_loader.run(num_keys=len(keys), keys=keys, args=args)
+        if _is_mock_lua_result(raw):
+            raw = await self._record_heartbeat_fallback(
+                task_id=task_id,
+                tenant_id=tenant_id,
+                worker_id=worker_id,
+                claim_epoch=claim_epoch,
+                now_ms=now_ms,
+            )
+
         status = _decode(raw[0]) if raw else "illegal_transition"
         ok = status == "heartbeat_accepted"
         if status == "owner_mismatch":

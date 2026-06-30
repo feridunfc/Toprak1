@@ -47,5 +47,15 @@ class BaseExecutor(abc.ABC):
 # Backward-compatible public import contract.
 # Some tests and older integrations import FakeExecutor from hfa_worker.executor,
 # even though the implementation lives in hfa_worker.fake_executor.
-# Keep this re-export stable until all callers are explicitly migrated.
-from hfa_worker.fake_executor import FakeExecutor  # noqa: E402
+#
+# Do NOT eagerly import FakeExecutor here:
+#   fake_executor.py imports BaseExecutor from this module.
+#   eager re-export creates an import-order-dependent cycle.
+#
+# Keep compatibility via module-level lazy export.
+def __getattr__(name: str):
+    if name == "FakeExecutor":
+        from hfa_worker.fake_executor import FakeExecutor
+
+        return FakeExecutor
+    raise AttributeError(name)
