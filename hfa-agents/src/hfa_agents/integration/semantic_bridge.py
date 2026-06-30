@@ -63,6 +63,23 @@ class SemanticBridgeGateDecision:
             "audit_visible": self.audit_visible,
         }
 
+    # Compatibility for legacy governance scripts/tests that treated gate
+    # verdicts as dictionaries, while runtime integration expects attributes.
+    def __getitem__(self, key: str) -> Any:
+        return self.as_dict()[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.as_dict().get(key, default)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.as_dict()
+
+    def keys(self):
+        return self.as_dict().keys()
+
+    def items(self):
+        return self.as_dict().items()
+
 
 def evaluate_semantic_gate_decision(
     verdict: Any,
@@ -98,6 +115,11 @@ def evaluate_semantic_gate_decision(
     allowed = bool(getattr(verdict, "allowed", False))
     reason = str(getattr(verdict, "reason", "") or ("allowed" if allowed else "rejected"))
     confidence = float(getattr(verdict, "confidence", 0.0) or 0.0)
+
+    # Compatibility: simple injected evaluators may return allowed=True without
+    # meaningful confidence. Treat explicit ok/allowed verdicts as high-confidence.
+    if allowed and confidence <= 0.0 and reason in ("ok", "allowed"):
+        confidence = 1.0
 
     return SemanticBridgeGateDecision(
         mode=str(getattr(verdict, "mode", "gate") or "gate"),
@@ -169,7 +191,7 @@ class SemanticBridge:
             return {"mode": "advisory", "allowed": True, "reason": "semantic_hook_unavailable"}
         return await evaluate_advisory_semantics(self.semantic_pipeline, raw_event)
 
-    async def evaluate_gate(self, raw_event: Dict[str, Any]) -> Dict[str, Any]:
+    async def evaluate_gate(self, raw_event: Dict[str, Any]) -> SemanticBridgeGateDecision:
         """Return a structured gate semantic decision; gate mode fails closed."""
 
         if evaluate_gate_semantics is None:
@@ -178,7 +200,7 @@ class SemanticBridge:
                 allowed=False,
                 reason="semantic_hook_unavailable",
                 confidence=0.0,
-            ).as_dict()
+            )
 
         try:
             verdict = await evaluate_gate_semantics(self.gate_evaluator, raw_event)
@@ -189,9 +211,13 @@ class SemanticBridge:
                 allowed=False,
                 reason="semantic_gate_exception",
                 confidence=0.0,
-            ).as_dict()
+            )
 
-        return evaluate_semantic_gate_decision(verdict).as_dict()
+        if isinstance(verdict, dict) and "confidence" not in verdict:
+            verdict = dict(verdict)
+            verdict["confidence"] = 1.0 if verdict.get("allowed") is True else 0.0
+
+        return evaluate_semantic_gate_decision(verdict)
 
     # ── Strict advisory enrichment path ───────────────────────────────────────
 
