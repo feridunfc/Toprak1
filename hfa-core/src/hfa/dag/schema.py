@@ -138,6 +138,10 @@ class DagRedisKey:
         return f"{_TENANT_PREFIX}{tenant_id}:running"
 
     @staticmethod
+    def tenant_vruntime(tenant_id: str) -> str:
+        return f"{_TENANT_PREFIX}{tenant_id}:vruntime"
+
+    @staticmethod
     def tenant_inflight(tenant_id: str) -> str:
         return f"{_TENANT_PREFIX}{tenant_id}:inflight"
 
