@@ -36,6 +36,7 @@ class ExecutionResult:
     error: Optional[str] = None
     cost_cents: int = 0
     tokens_used: int = 0
+    provider: Optional[str] = None
 
     def __post_init__(self) -> None:
         assert self.status in ("done", "failed"), (
@@ -52,6 +53,14 @@ class ExecutionResult:
     @property
     def is_terminal_failure(self) -> bool:
         return self.status == "failed"
+
+    @property
+    def output_text(self) -> str:
+        """Backward-compatible convenience accessor for legacy executor callers."""
+        value = self.payload.get("output_text", "")
+        if isinstance(value, str):
+            return value
+        return str(value)
 
 
 # ── Exception Hierarchy ───────────────────────────────────────────────────────

@@ -33,6 +33,7 @@ StateStore (unchanged public API)
 
 from __future__ import annotations
 
+from hfa.state import transition_state as authoritative_transition_state
 import hashlib
 import inspect
 import json
@@ -380,9 +381,7 @@ class StateStore:
         # TTL maintenance for compatibility run metadata projection.
         await _maybe_await(self._redis.expire(self._run_meta_key(run_id), self.RUN_META_TTL_SECONDS))
         if "state" in mapping:
-            # AUTHORITY_REVIEWED_PROJECTION_WRITE:
-            # Compatibility state projection seeded from run metadata.
-            await _maybe_await(self._redis.set(self._run_state_key(run_id), mapping["state"], ex=self.RUN_STATE_TTL_SECONDS))
+            await self.transition_state(run_id, mapping["state"])
 
     async def get_run_meta(self, run_id: str) -> dict[str, Any]:
         return self._decode_mapping(await _maybe_await(self._redis.hgetall(self._run_meta_key(run_id))))
@@ -391,7 +390,16 @@ class StateStore:
         return self._decode(await _maybe_await(self._redis.get(self._run_state_key(run_id))))
 
     async def transition_state(self, run_id: str, state: str) -> None:
-        await _maybe_await(self._redis.set(self._run_state_key(run_id), state, ex=self.RUN_STATE_TTL_SECONDS))
+        current_state = await self.get_run_state(run_id)
+        await authoritative_transition_state(
+            self._redis,
+            run_id=run_id,
+            target_state=state,
+            state_key=self._run_state_key(run_id),
+            state_ttl=self.RUN_STATE_TTL_SECONDS,
+            expected_state=current_state,
+            lua_loader=None,
+        )
         await _maybe_await(self._redis.hset(self._run_meta_key(run_id), mapping={"state": state}))
 
     async def is_terminal(self, run_id: str) -> bool:
@@ -428,9 +436,7 @@ class StateStore:
                 },
             )
         )
-        # AUTHORITY_REVIEWED_PROJECTION_WRITE:
-        # Compatibility running state projection mirrors claimed worker state.
-        await _maybe_await(self._redis.set(self._run_state_key(run_id), "running", ex=self.RUN_STATE_TTL_SECONDS))
+        await self.transition_state(run_id, "running")
         # AUTHORITY_REVIEWED_PROJECTION_WRITE:
         # Running ZSET is a compatibility/read-model projection for active runs.
         await _maybe_await(self._redis.zadd(self.RUNNING_ZSET, {run_id: time.time()}))

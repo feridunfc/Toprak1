@@ -236,6 +236,7 @@ class DagTaskDispatchInput:
     admitted_at: float = 0.0
     scheduled_at: float = 0.0
     scheduled_zset: str = ""
+    running_zset: str = ""
     control_stream: str = ""
     shard_stream: str = ""
     payload: dict[str, Any] = field(default_factory=dict)

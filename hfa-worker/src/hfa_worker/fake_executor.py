@@ -40,7 +40,7 @@ class FakeExecutor(BaseExecutor):
         should_succeed: bool = True,
         fail_with: Optional[Exception] = None,
         cost_cents: int = 0,
-        tokens_used: int = 0,
+        tokens_used: int = 10,
     ) -> None:
         self.should_succeed = should_succeed
         self.fail_with = fail_with
@@ -66,6 +66,7 @@ class FakeExecutor(BaseExecutor):
             )
             return ExecutionResult(
                 status="done",
+                provider="fake",
                 payload={
                     "run_id": run_id,
                     "result": "success",
@@ -78,6 +79,7 @@ class FakeExecutor(BaseExecutor):
 
         return ExecutionResult(
             status="failed",
+            provider="fake",
             payload={"run_id": run_id},
             error="Business logic failure",
             cost_cents=self.cost_cents,
