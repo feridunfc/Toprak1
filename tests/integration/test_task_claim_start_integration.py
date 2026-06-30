@@ -15,6 +15,7 @@ async def test_task_claim_start_scheduled_to_running(redis_client):
     await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
     mgr = TaskClaimManager(redis_client)
     result = await mgr.claim_start(
+        allow_legacy_direct_claim=True,
         task_id=task_id,
         tenant_id=tenant_id,
         worker_instance_id="worker-1",
@@ -40,6 +41,7 @@ async def test_task_claim_start_rejects_duplicate_running(redis_client):
     await redis_client.set(DagRedisKey.task_state(task_id), "running")
     mgr = TaskClaimManager(redis_client)
     result = await mgr.claim_start(
+        allow_legacy_direct_claim=True,
         task_id=task_id,
         tenant_id=tenant_id,
         worker_instance_id="worker-1",
@@ -58,6 +60,7 @@ async def test_task_claim_start_rejects_terminal_state(redis_client):
     await redis_client.set(DagRedisKey.task_state(task_id), "failed")
     mgr = TaskClaimManager(redis_client)
     result = await mgr.claim_start(
+        allow_legacy_direct_claim=True,
         task_id=task_id,
         tenant_id=tenant_id,
         worker_instance_id="worker-1",

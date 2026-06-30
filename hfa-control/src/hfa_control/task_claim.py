@@ -86,6 +86,7 @@ class TaskClaimService:
             worker_instance_id=worker_id,
             claimed_at_ms=now_ms,
             tenant_id=tenant_id,
+            allow_legacy_direct_claim=True,
         )
         if result.ok:
             emit_event_background(
@@ -121,6 +122,7 @@ class TaskClaimManager(TaskClaimService):
         worker_instance_id: str,
         claimed_at_ms: int,
         scheduler_epoch: str = "",
+        allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
         assert self._dag_lua is not None, "DagLua not configured"
         result = await self._dag_lua.task_claim_start(
@@ -129,6 +131,7 @@ class TaskClaimManager(TaskClaimService):
             worker_instance_id=worker_instance_id,
             claimed_at_ms=claimed_at_ms,
             scheduler_epoch=scheduler_epoch,
+            allow_legacy_direct_claim=allow_legacy_direct_claim,
         )
 
         # O(1) owner-index normalization:

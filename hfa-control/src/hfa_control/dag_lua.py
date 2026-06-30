@@ -14,6 +14,7 @@ Sprint 2 changes:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,19 @@ from hfa.dag.states import DagTaskState
 from hfa.lua.loader import LuaScriptLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _env_allows_legacy_direct_claim() -> bool:
+    value = os.getenv("HFA_ALLOW_LEGACY_DIRECT_TASK_CLAIM", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _legacy_direct_claim_arg(allow_legacy_direct_claim: bool | None) -> str:
+    if allow_legacy_direct_claim is None:
+        return "1" if _env_allows_legacy_direct_claim() else "0"
+    return "1" if allow_legacy_direct_claim else "0"
+
+
 
 
 # ── Lua path resolution ───────────────────────────────────────────────────────
@@ -268,6 +282,7 @@ class DagLua:
         worker_instance_id: str,
         claimed_at_ms: int,
         scheduler_epoch: str = "",
+        allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
         """
         Atomically claim a scheduled task.
@@ -294,6 +309,7 @@ class DagLua:
             str(int(getattr(RedisTTL, "RUN_META", 86400))),
             str(float(claimed_at_ms)),
             scheduler_epoch,
+            _legacy_direct_claim_arg(allow_legacy_direct_claim),
         ]
 
         raw = await self._claim_loader.run(num_keys=len(keys), keys=keys, args=args)
@@ -371,6 +387,7 @@ class DagLua:
         claimed_at_ms: int,
         tenant_id: str = "",
         scheduler_epoch: str = "",
+        allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
         return await self.task_claim_start(
             task_id=task_id,
@@ -378,4 +395,5 @@ class DagLua:
             worker_instance_id=worker_instance_id,
             claimed_at_ms=claimed_at_ms,
             scheduler_epoch=scheduler_epoch,
+            allow_legacy_direct_claim=allow_legacy_direct_claim,
         )

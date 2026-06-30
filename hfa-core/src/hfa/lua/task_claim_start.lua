@@ -28,7 +28,8 @@
 -- 4  state_ttl
 -- 5  meta_ttl
 -- 6  heartbeat_score
--- 7  expected_scheduler_epoch   "" to skip epoch check
+-- 7  expected_scheduler_epoch   "" means no scheduler epoch fence supplied
+-- 8  allow_legacy_direct_claim  "1" explicitly allows reservation-free scheduled claim
 --
 -- ─── RETURN ────────────────────────────────────────────────────────────────
 -- { status, claim_epoch, scheduler_epoch, worker_instance_id, task_id }
@@ -59,6 +60,7 @@ local state_ttl                 = tonumber(ARGV[4])
 local meta_ttl                  = tonumber(ARGV[5])
 local heartbeat_score           = tonumber(ARGV[6])
 local expected_scheduler_epoch  = ARGV[7]
+local allow_legacy_direct_claim = ARGV[8] or '0'
 
 -- ── State guard ───────────────────────────────────────────────────────────
 local current_state = redis.call('GET', task_state_key)
@@ -71,10 +73,13 @@ if current_state == 'running' then
 end
 
 -- Reservation guard
--- COMPATIBILITY ONLY:
+-- CANONICAL PATH:
 --   * scheduler_epoch supplied  => reservation is mandatory
---   * scheduler_epoch empty     => legacy/direct claim is allowed, but only
---                                  for tasks currently in scheduled state.
+--   * scheduler_epoch empty     => reservation-free direct claim is denied by default
+--
+-- COMPATIBILITY PATH:
+--   * reservation-free scheduled claim is allowed only when
+--     allow_legacy_direct_claim == "1".
 local legacy_direct_claim = false
 local has_reservation = redis.call('EXISTS', reservation_key)
 
@@ -98,7 +103,7 @@ if has_reservation == 0 then
         return {'reservation_worker_mismatch', '', '', owner_index_worker or '', task_id}
     end
 
-    if current_state == 'scheduled' and expected_scheduler_epoch == '' then
+    if current_state == 'scheduled' and expected_scheduler_epoch == '' and allow_legacy_direct_claim == '1' then
         legacy_direct_claim = true
     else
         return {'reservation_missing', '', '', '', task_id}

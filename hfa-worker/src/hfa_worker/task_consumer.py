@@ -67,6 +67,7 @@ class TaskConsumer:
             claimed_at_ms=claimed_at_ms,
             # Pass scheduler_epoch from context if present (set during dispatch)
             scheduler_epoch=ctx.scheduler_epoch,
+            allow_legacy_direct_claim=True,
         )
         if not claim.ok:
             return ConsumedTaskResult(claimed=claim)
