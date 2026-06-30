@@ -78,7 +78,9 @@ if ARGV[17] ~= "" then
         "priority", ARGV[11],
         "payload_json", ARGV[12],
         "trace_parent", ARGV[13],
-        "trace_state", ARGV[14]
+        "trace_state", ARGV[14],
+        "policy", ARGV[15],
+        "region", ARGV[16]
     )
 end
 
@@ -92,6 +94,7 @@ if ARGV[18] ~= "" then
         "worker_group", ARGV[4],
         "shard", ARGV[5],
         "priority", ARGV[11],
+        "payload", ARGV[12],
         "payload_json", ARGV[12],
         "trace_parent", ARGV[13],
         "trace_state", ARGV[14]
