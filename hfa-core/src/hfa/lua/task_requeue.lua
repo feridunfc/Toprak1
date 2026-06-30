@@ -71,6 +71,12 @@ if is_terminal(current_state) then
 end
 
 if current_state ~= expected_state then
+    if current_state == 'ready' then
+        local existing_count = tonumber(redis.call('HGET', task_meta_key, 'requeue_count') or '0') or 0
+        if existing_count > 0 then
+            return {'TASK_ALREADY_REQUEUED', tostring(existing_count)}
+        end
+    end
     return {'TASK_STATE_CONFLICT', current_state}
 end
 
@@ -84,11 +90,11 @@ redis.call('ZREM', task_running_zset, task_id)
 
 -- ── Retry exhausted → dead_lettered ──────────────────────────────────────
 if retries > max_requeue_count then
-    redis.call('SET', task_state_key, 'dead_lettered')
+    redis.call('SET', task_state_key, 'failed')
     redis.call('HSET', task_meta_key,
         'requeue_count',        tostring(retries),
         'last_requeue_reason',  reason_code,
-        'dead_lettered_at_ms',  now_ms,
+        'failed_at_ms',         now_ms,
         -- Clear identity fields so no write can succeed with old values.
         -- claim_epoch is NOT reset — it stays at its current value.
         -- The next claim will INCR it to a strictly higher generation.
@@ -97,7 +103,7 @@ if retries > max_requeue_count then
         'last_heartbeat_at_ms', '0'
     )
     redis.call('XADD', completion_stream, 'MAXLEN', '~', stream_maxlen, '*',
-        'event_type',    'TaskDeadLettered',
+        'event_type',    'TaskFailed',
         'task_id',       task_id,
         'tenant_id',     tenant_id,
         'reason_code',   'STALE_RETRY_EXHAUSTED',

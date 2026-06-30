@@ -69,34 +69,51 @@ if current_state == 'running' then
     return {'task_already_owned', '', '', '', task_id}
 end
 
+-- Reservation guard
+-- COMPATIBILITY ONLY:
+--   * scheduler_epoch supplied  => reservation is mandatory
+--   * scheduler_epoch empty     => legacy/direct claim is allowed, but only
+--                                  for tasks currently in scheduled state.
+local legacy_direct_claim = false
+local has_reservation = redis.call('EXISTS', reservation_key)
+
+if has_reservation == 0 then
+    if current_state == 'scheduled' and expected_scheduler_epoch == '' then
+        legacy_direct_claim = true
+    else
+        return {'reservation_missing', '', '', '', task_id}
+    end
+end
+
 if current_state ~= 'scheduled' then
     return {'task_state_conflict', '', '', '', task_id}
 end
 
--- ── Reservation guard ─────────────────────────────────────────────────────
-if redis.call('EXISTS', reservation_key) == 0 then
-    return {'reservation_missing', '', '', '', task_id}
-end
+local reserved_worker = worker_instance_id
+local reserved_task   = task_id
+local reserved_epoch  = ''
 
-local reserved_worker = redis.call('HGET', reservation_key, 'worker_id')
-local reserved_task   = redis.call('HGET', reservation_key, 'task_id')
-local reserved_epoch  = redis.call('HGET', reservation_key, 'scheduler_epoch')
+if not legacy_direct_claim then
+    reserved_worker = redis.call('HGET', reservation_key, 'worker_id')
+    reserved_task   = redis.call('HGET', reservation_key, 'task_id')
+    reserved_epoch  = redis.call('HGET', reservation_key, 'scheduler_epoch')
 
-if reserved_worker ~= worker_instance_id then
-    return {'reservation_worker_mismatch', '', '', reserved_worker or '', task_id}
-end
+    if reserved_worker ~= worker_instance_id then
+        return {'reservation_worker_mismatch', '', '', reserved_worker or '', task_id}
+    end
 
-if reserved_task ~= task_id then
-    return {'reservation_task_mismatch', '', '', '', task_id}
-end
+    if reserved_task ~= task_id then
+        return {'reservation_task_mismatch', '', '', '', task_id}
+    end
 
-if expected_scheduler_epoch ~= '' then
-    if (not reserved_epoch) or reserved_epoch ~= expected_scheduler_epoch then
-        return {'reservation_epoch_mismatch', '', reserved_epoch or '', '', task_id}
+    if expected_scheduler_epoch ~= '' then
+        if (not reserved_epoch) or reserved_epoch ~= expected_scheduler_epoch then
+            return {'reservation_epoch_mismatch', '', reserved_epoch or '', '', task_id}
+        end
     end
 end
 
--- ── Commit ────────────────────────────────────────────────────────────────
+-- Commit
 -- Atomically increment claim_epoch.  HINCRBY initializes to 0 if missing,
 -- then adds 1, so the first-ever claim produces claim_epoch = 1.
 local new_claim_epoch = redis.call('HINCRBY', task_meta_key, 'claim_epoch', 1)
@@ -115,7 +132,9 @@ redis.call('ZREM', task_scheduled_zset, task_id)
 redis.call('ZADD', task_running_zset, heartbeat_score, task_id)
 
 -- Consume the reservation.
-redis.call('DEL', reservation_key)
+if not legacy_direct_claim then
+    redis.call('DEL', reservation_key)
+end
 
 return {
     'task_claimed',

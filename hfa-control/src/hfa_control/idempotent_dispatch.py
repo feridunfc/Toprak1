@@ -54,7 +54,7 @@ class IdempotentDispatchGuard:
         if result.accepted:
             return IdempotentDispatchResult(
                 ok=True,
-                status="committed",
+                status="dispatch_token_acquired",
                 token_key=result.token_key,
             )
         if result.reason in ("already_exists", "duplicate"):

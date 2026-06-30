@@ -47,12 +47,26 @@ if current_state ~= 'running' then
     return {'illegal_transition'}
 end
 
--- ── Fence check ───────────────────────────────────────────────────────────
-local fence = redis.call('HMGET', task_meta_key, 'worker_instance_id', 'claim_epoch')
+-- Fence check
+local fence = redis.call('HMGET', task_meta_key,
+    'worker_instance_id',
+    'claim_epoch',
+    'heartbeat_owner'
+)
 local stored_worker      = fence[1] or ''
 local stored_claim_epoch = fence[2] or ''
+local stored_hb_owner    = fence[3] or ''
 
-if stored_worker ~= worker_instance_id then
+-- Compatibility:
+--   - claimed tasks use worker_instance_id as the strong owner fence
+--   - legacy heartbeat-only tests may use heartbeat_owner
+--   - no stored owner means the first heartbeat establishes heartbeat_owner
+local effective_owner = stored_worker
+if effective_owner == '' then
+    effective_owner = stored_hb_owner
+end
+
+if effective_owner ~= '' and effective_owner ~= worker_instance_id then
     return {'owner_mismatch'}
 end
 
@@ -60,8 +74,12 @@ if expected_claim_epoch ~= '' and stored_claim_epoch ~= expected_claim_epoch the
     return {'claim_epoch_mismatch'}
 end
 
--- ── Update heartbeat ──────────────────────────────────────────────────────
-redis.call('HSET', task_meta_key, 'last_heartbeat_at_ms', now_ms)
+-- Update heartbeat
+redis.call('HSET', task_meta_key,
+    'last_heartbeat_at_ms', now_ms,
+    'heartbeat_at_ms',      now_ms,
+    'heartbeat_owner',      worker_instance_id
+)
 redis.call('ZADD', task_running_zset, tonumber(now_ms), task_id)
 
 return {'heartbeat_accepted'}

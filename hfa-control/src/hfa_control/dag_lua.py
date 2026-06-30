@@ -218,6 +218,10 @@ class DagLua:
             getattr(dispatch, "scheduled_zset", "") or
             DagRedisKey.task_scheduled_zset(tenant_id)
         )
+        running_zset = (
+            getattr(dispatch, "running_zset", "") or
+            DagRedisKey.task_running_zset(tenant_id)
+        )
         control_stream = getattr(dispatch, "control_stream", "") or RedisKey.stream_control()
         shard_stream   = getattr(dispatch, "shard_stream", "") or RedisKey.stream_shard(shard)
 
@@ -228,6 +232,7 @@ class DagLua:
             control_stream,
             shard_stream,
             DagRedisKey.tenant_ready_queue(tenant_id),
+            running_zset,
         ]
         args = [
             task_id, run_id, tenant_id,

@@ -174,7 +174,9 @@ class TaskHeartbeatManager:
         stored_worker = _decode(
             await self._redis.hget(meta_key, TaskMetaField.WORKER_INSTANCE_ID)
         )
-        if stored_worker != worker_id:
+        stored_hb_owner = _decode(await self._redis.hget(meta_key, "heartbeat_owner"))
+        effective_owner = stored_worker or stored_hb_owner
+        if effective_owner and effective_owner != worker_id:
             return ["owner_mismatch"]
 
         if claim_epoch:
@@ -186,7 +188,11 @@ class TaskHeartbeatManager:
 
         await self._redis.hset(
             meta_key,
-            mapping={TaskMetaField.LAST_HEARTBEAT_AT_MS: str(now_ms)},
+            mapping={
+                TaskMetaField.LAST_HEARTBEAT_AT_MS: str(now_ms),
+                "heartbeat_at_ms": str(now_ms),
+                "heartbeat_owner": worker_id,
+            },
         )
         await self._redis.zadd(
             DagRedisKey.task_running_zset(tenant_id),
@@ -253,11 +259,15 @@ class TaskRecoveryManager:
             task_id = _decode(raw_id)
             if not task_id:
                 continue
+            meta_key = DagRedisKey.task_meta(task_id)
             raw_hb = await self._redis.hget(
-                DagRedisKey.task_meta(task_id),
+                meta_key,
                 TaskMetaField.LAST_HEARTBEAT_AT_MS,
             )
             last_ms = _safe_int(raw_hb, default=0)
+            if last_ms <= 0:
+                raw_hb = await self._redis.hget(meta_key, "heartbeat_at_ms")
+                last_ms = _safe_int(raw_hb, default=0)
             if last_ms <= 0 or (now_ms - last_ms) > self._policy.stale_after_ms:
                 stale.append(task_id)
         return stale

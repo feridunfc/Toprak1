@@ -119,9 +119,13 @@ local stored_worker   = fence[1] or ''
 local stored_sched_ep = fence[2] or ''
 local stored_claim_ep = fence[3] or ''
 
-if expected_worker_id ~= '' then
-    if stored_worker ~= expected_worker_id then
-        return {0, 'owner_mismatch', 0, 0}
+-- Fence priority:
+--   1) claim_epoch catches zombie/stale completions first
+--   2) scheduler_epoch catches stale scheduler ownership
+--   3) worker ownership catches wrong live owner
+if expected_claim_epoch ~= '' then
+    if stored_claim_ep ~= expected_claim_epoch then
+        return {0, 'claim_epoch_mismatch', 0, 0}
     end
 end
 
@@ -131,9 +135,9 @@ if expected_scheduler_epoch ~= '' then
     end
 end
 
-if expected_claim_epoch ~= '' then
-    if stored_claim_ep ~= expected_claim_epoch then
-        return {0, 'claim_epoch_mismatch', 0, 0}
+if expected_worker_id ~= '' then
+    if stored_worker ~= expected_worker_id then
+        return {0, 'task_owner_mismatch', 0, 0}
     end
 end
 

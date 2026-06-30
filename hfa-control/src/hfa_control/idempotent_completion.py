@@ -67,7 +67,7 @@ class IdempotentCompletionGuard:
         if result.accepted:
             return IdempotentCompletionResult(
                 ok=True,
-                status="committed",
+                status="completion_token_acquired",
                 token_key=result.token_key,
             )
         reason = result.reason

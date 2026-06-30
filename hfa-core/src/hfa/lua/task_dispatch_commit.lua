@@ -49,6 +49,7 @@ local task_scheduled_zset   = KEYS[3]
 local control_stream        = KEYS[4]
 local shard_stream          = KEYS[5]
 local tenant_ready_queue    = KEYS[6]
+local task_running_zset     = KEYS[7]
 
 local task_id               = ARGV[1]
 local run_id                = ARGV[2]
@@ -80,7 +81,7 @@ if current == 'running' then
 end
 
 if current == 'scheduled' then
-    return {'already_scheduled', current}
+    return {'already_running', current}
 end
 
 if current == 'done' or current == 'failed' or current == 'blocked_by_failure'
@@ -116,6 +117,10 @@ redis.call('HSET', task_meta_key,
 redis.call('EXPIRE', task_meta_key, task_meta_ttl)
 redis.call('ZADD', task_scheduled_zset, scheduled_at, task_id)
 redis.call('EXPIRE', task_scheduled_zset, task_meta_ttl)
+if task_running_zset and task_running_zset ~= '' then
+    redis.call('ZADD', task_running_zset, scheduled_at, task_id)
+    redis.call('EXPIRE', task_running_zset, task_meta_ttl)
+end
 
 -- ── Emit events ───────────────────────────────────────────────────────────
 redis.call('XADD', control_stream, 'MAXLEN', '~', control_maxlen, '*',

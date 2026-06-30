@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -57,17 +58,25 @@ class InputResolver:
         self._payload_store = payload_store
         self._lineage_store = lineage_store
         self._referenced_ids: list[str] = []
+        self._parent_records: dict[str, dict[str, Any]] = {}
 
     async def resolve(self, template) -> ResolveResult:
         self._referenced_ids = []
+        self._parent_records = {}
         self._output_cache: dict[str, Any] = {}
         await self._prefetch_outputs(template)
         hydrated = await self._resolve_value(template)
         referenced = list(dict.fromkeys(self._referenced_ids))
+        parent_sha_material = "|".join(
+            self._parent_records[tid]["sha256"]
+            for tid in sorted(self._parent_records)
+        )
         lineage = {
             "resolved_keys": list(template.keys()) if isinstance(template, dict) else [],
             "parent_task_ids": referenced,
             "parent_count": len(referenced),
+            "parents": dict(self._parent_records),
+            "combined_sha256": hashlib.sha256(parent_sha_material.encode("utf-8")).hexdigest(),
         }
         return ResolveResult(
             hydrated=hydrated,
@@ -191,7 +200,21 @@ class InputResolver:
         if raw is None:
             raise MissingParentOutputError(f"Missing output for task_id={task_id}")
 
-        return raw.decode() if isinstance(raw, bytes) else raw
+        raw_text = raw.decode() if isinstance(raw, bytes) else str(raw)
+
+        if task_id not in self._parent_records:
+            try:
+                decoded = json.loads(raw_text)
+            except Exception:
+                decoded = raw_text
+
+            self._parent_records[task_id] = {
+                "raw": raw_text,
+                "decoded": decoded,
+                "sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            }
+
+        return raw_text
 
     # ── Legacy API ──────────────────────────────────────────────────────────
 
