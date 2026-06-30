@@ -50,6 +50,7 @@ local task_meta_key         = KEYS[2]
 local task_scheduled_zset   = KEYS[3]
 local task_running_zset     = KEYS[4]
 local reservation_key       = KEYS[5]
+local task_owner_key         = KEYS[6] or ''
 
 local task_id                   = ARGV[1]
 local worker_instance_id        = ARGV[2]
@@ -77,7 +78,26 @@ end
 local legacy_direct_claim = false
 local has_reservation = redis.call('EXISTS', reservation_key)
 
+local owner_index_worker = ''
+local owner_index_task = ''
+local owner_index_epoch = ''
+local has_owner_index = 0
+
+if task_owner_key ~= '' then
+    has_owner_index = redis.call('EXISTS', task_owner_key)
+    if has_owner_index == 1 then
+        local owner_index = redis.call('HMGET', task_owner_key, 'worker_id', 'task_id', 'scheduler_epoch')
+        owner_index_worker = owner_index[1] or ''
+        owner_index_task = owner_index[2] or ''
+        owner_index_epoch = owner_index[3] or ''
+    end
+end
+
 if has_reservation == 0 then
+    if expected_scheduler_epoch ~= '' and has_owner_index == 1 and owner_index_worker ~= worker_instance_id then
+        return {'reservation_worker_mismatch', '', '', owner_index_worker or '', task_id}
+    end
+
     if current_state == 'scheduled' and expected_scheduler_epoch == '' then
         legacy_direct_claim = true
     else
@@ -104,6 +124,18 @@ if not legacy_direct_claim then
 
     if reserved_task ~= task_id then
         return {'reservation_task_mismatch', '', '', '', task_id}
+    end
+
+    if has_owner_index == 1 then
+        if owner_index_worker ~= reserved_worker then
+            return {'reservation_worker_mismatch', '', '', owner_index_worker or '', task_id}
+        end
+        if owner_index_task ~= reserved_task then
+            return {'reservation_task_mismatch', '', '', '', task_id}
+        end
+        if owner_index_epoch ~= reserved_epoch then
+            return {'reservation_epoch_mismatch', '', owner_index_epoch or '', '', task_id}
+        end
     end
 
     if expected_scheduler_epoch ~= '' then
@@ -134,6 +166,9 @@ redis.call('ZADD', task_running_zset, heartbeat_score, task_id)
 -- Consume the reservation.
 if not legacy_direct_claim then
     redis.call('DEL', reservation_key)
+    if task_owner_key ~= '' then
+        redis.call('DEL', task_owner_key)
+    end
 end
 
 return {

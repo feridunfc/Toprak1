@@ -284,6 +284,7 @@ class DagLua:
             DagRedisKey.task_scheduled_zset(tenant_id),
             DagRedisKey.task_running_zset(tenant_id),
             DagRedisKey.worker_reservation(worker_instance_id),
+            DagRedisKey.task_reservation_owner(task_id),
         ]
         args = [
             task_id,

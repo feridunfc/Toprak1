@@ -86,6 +86,14 @@ class DagRedisKey:
         return f"{_TASK_PREFIX}{task_id}:output"
 
     @staticmethod
+    def task_reservation_owner(task_id: str) -> str:
+        return f"{_TASK_PREFIX}{task_id}:reservation_owner"
+
+    @staticmethod
+    def task_reservation_owner_pattern() -> str:
+        return f"{_TASK_PREFIX}*:reservation_owner"
+
+    @staticmethod
     def task_lineage(task_id: str) -> str:
         return f"{_TASK_PREFIX}{task_id}:lineage"
 
