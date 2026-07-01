@@ -6,6 +6,7 @@ from hfa.dag.heartbeat import HeartbeatPolicy
 from hfa.dag.schema import DagRedisKey
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.task_recovery import TaskHeartbeatManager, TaskRecoveryManager
+from hfa_control.worker_reservation import WorkerReservationManager
 from hfa_worker.task_consumer import TaskConsumer
 from hfa_worker.task_context import TaskContext
 from hfa_worker.task_executor import TaskExecutionResult, TaskExecutor
@@ -19,12 +20,37 @@ class SlowExecutor(TaskExecutor):
         return TaskExecutionResult(ok=True, output={"done": True, "task_id": ctx.task_id})
 
 
+async def _reserve_for_consumer(
+    redis_client,
+    *,
+    worker_id: str,
+    task_id: str,
+    scheduler_epoch: str,
+    reserved_at_ms: int,
+) -> None:
+    reservation_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
+    result = await reservation_mgr.reserve(
+        worker_id=worker_id,
+        task_id=task_id,
+        scheduler_epoch=scheduler_epoch,
+        reserved_at_ms=reserved_at_ms,
+    )
+    assert result.ok is True
+
+
 @pytest.mark.integration
 async def test_running_task_gets_heartbeat_updates(redis_client):
     task_id = "hb-loop-001"
     tenant_id = "tenant-a"
 
     await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
+    await _reserve_for_consumer(
+        redis_client,
+        worker_id="worker-1",
+        task_id=task_id,
+        scheduler_epoch="epoch-hb-1",
+        reserved_at_ms=990,
+    )
 
     claim_mgr = TaskClaimManager(redis_client)
     hb_mgr = TaskHeartbeatManager(redis_client)
@@ -43,6 +69,7 @@ async def test_running_task_gets_heartbeat_updates(redis_client):
         worker_group="grp-a",
         worker_instance_id="worker-1",
         payload={},
+        scheduler_epoch="epoch-hb-1",
     )
 
     task = asyncio.create_task(consumer.consume_once(ctx, claimed_at_ms=1000))
@@ -64,6 +91,13 @@ async def test_long_running_task_not_marked_stale_while_heartbeating(redis_clien
     tenant_id = "tenant-a"
 
     await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
+    await _reserve_for_consumer(
+        redis_client,
+        worker_id="worker-1",
+        task_id=task_id,
+        scheduler_epoch="epoch-hb-2",
+        reserved_at_ms=990,
+    )
 
     claim_mgr = TaskClaimManager(redis_client)
     hb_mgr = TaskHeartbeatManager(redis_client)
@@ -83,6 +117,7 @@ async def test_long_running_task_not_marked_stale_while_heartbeating(redis_clien
         worker_group="grp-a",
         worker_instance_id="worker-1",
         payload={},
+        scheduler_epoch="epoch-hb-2",
     )
 
     running_task = asyncio.create_task(consumer.consume_once(ctx, claimed_at_ms=1000))
@@ -99,6 +134,13 @@ async def test_heartbeat_stops_after_execution_finishes(redis_client):
     tenant_id = "tenant-a"
 
     await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
+    await _reserve_for_consumer(
+        redis_client,
+        worker_id="worker-1",
+        task_id=task_id,
+        scheduler_epoch="epoch-hb-3",
+        reserved_at_ms=990,
+    )
 
     claim_mgr = TaskClaimManager(redis_client)
     hb_mgr = TaskHeartbeatManager(redis_client)
@@ -117,6 +159,7 @@ async def test_heartbeat_stops_after_execution_finishes(redis_client):
         worker_group="grp-a",
         worker_instance_id="worker-1",
         payload={},
+        scheduler_epoch="epoch-hb-3",
     )
 
     await consumer.consume_once(ctx, claimed_at_ms=1000)

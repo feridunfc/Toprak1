@@ -3,6 +3,7 @@ import pytest
 
 from hfa.dag.schema import DagRedisKey
 from hfa_control.task_claim import TaskClaimManager
+from hfa_control.worker_reservation import WorkerReservationManager
 from hfa_worker.task_consumer import TaskConsumer
 from hfa_worker.task_context import TaskContext
 from hfa_worker.task_executor import TaskExecutor
@@ -16,6 +17,14 @@ async def test_worker_with_required_capabilities_claims_and_executes(redis_clien
     tenant_id = "tenant-a"
 
     await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
+
+    reservation_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
+    await reservation_mgr.reserve(
+        worker_id="worker-1",
+        task_id=task_id,
+        scheduler_epoch="epoch-cap-1",
+        reserved_at_ms=123450,
+    )
 
     claim_mgr = TaskClaimManager(redis_client)
     consumer = TaskConsumer(
@@ -33,6 +42,7 @@ async def test_worker_with_required_capabilities_claims_and_executes(redis_clien
         worker_instance_id="worker-1",
         payload={},
         required_capabilities=["python"],
+        scheduler_epoch="epoch-cap-1",
     )
 
     result = await consumer.consume_once(ctx, claimed_at_ms=123456)
