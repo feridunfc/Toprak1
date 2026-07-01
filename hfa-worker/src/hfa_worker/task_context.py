@@ -22,6 +22,7 @@ class TaskContext:
     worker_group: str
     worker_instance_id: str
     payload: dict[str, Any]
+    shard: int = 0
     trace_parent: str = ""
     trace_state: str = ""
     required_capabilities: list[str] | None = None
