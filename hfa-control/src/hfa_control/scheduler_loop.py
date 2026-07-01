@@ -16,6 +16,13 @@ from hfa_control.event_store import EventStore
 
 logger = logging.getLogger(__name__)
 
+
+def _env_allows_legacy_injected_dispatch() -> bool:
+    value = os.getenv("HFA_ALLOW_LEGACY_INJECTED_DISPATCH", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+
 _FALSE_VALUES = {"", "0", "false", "False", "no", "NO", "off", "OFF"}
 
 
@@ -245,8 +252,9 @@ class SchedulerLoop:
     async def _legacy_injected_dispatch_once(self, snapshot: Any) -> bool:
         """Compatibility path for injected scheduler-loop tests.
 
-        This runs only when the dispatch controller does not expose a modern
-        dispatch_once/try_dispatch_once/run_once method.
+        This path is not a production dispatch authority. It is reachable only
+        when _dispatch_once() has explicitly allowed the legacy injected fallback
+        through HFA_ALLOW_LEGACY_INJECTED_DISPATCH.
         """
         if self._redis is None or self._tenant_queue is None:
             return False
@@ -405,6 +413,9 @@ class SchedulerLoop:
                     if not sealed:
                         return False
             return bool(result)
+        if not _env_allows_legacy_injected_dispatch():
+            logger.warning("SchedulerLoop legacy injected dispatch fallback disabled")
+            return False
         return await self._legacy_injected_dispatch_once(snapshot)
 
     async def run_cycle(self, max_dispatches: int | None = None) -> int:
