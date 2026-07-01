@@ -14,7 +14,7 @@ def test_worker_consumer_declares_legacy_stream_claim_boundary() -> None:
     assert "TaskClaimManager.claim_start" in source
 
 
-def test_worker_consumer_runtime_path_is_not_silently_canonical_claim_start() -> None:
+def test_worker_consumer_runtime_path_has_gated_canonical_bridge_and_legacy_default() -> None:
     source = Path("hfa-worker/src/hfa_worker/consumer.py").read_text(encoding="utf-8")
     marker = "    async def _process_message("
     if marker not in source:
@@ -23,9 +23,10 @@ def test_worker_consumer_runtime_path_is_not_silently_canonical_claim_start() ->
     runtime_body = source[source.index(marker):]
 
     assert "event = deserialize_run_requested(data)" in runtime_body
+    assert "if is_worker_task_consumer_bridge_enabled():" in runtime_body
+    assert "await self._process_message_via_task_consumer(event, msg_id, stream, shard)" in runtime_body
     assert "started = await self._guard.try_claim_and_mark_running(" in runtime_body
     assert "result = await self._executor.execute(event)" in runtime_body
-    assert "TaskConsumer(" not in runtime_body
     assert ".claim_start(" not in runtime_body
 
 

@@ -129,10 +129,11 @@ def test_task_context_carries_shard_as_additive_context_field() -> None:
     assert ctx.shard == 11
 
 
-def test_worker_consumer_does_not_use_task_context_builder_yet() -> None:
+def test_worker_consumer_uses_task_context_builder_only_behind_bridge_flag() -> None:
     source = Path("hfa-worker/src/hfa_worker/consumer.py").read_text(encoding="utf-8")
 
-    assert "task_context_builder" not in source
-    assert "build_task_context_from_run_requested" not in source
-    assert "TaskConsumer(" not in source
+    assert "build_task_context_from_run_requested" in source
+    assert "is_worker_task_consumer_bridge_enabled()" in source
+    assert "await self._process_message_via_task_consumer(event, msg_id, stream, shard)" in source
     assert "started = await self._guard.try_claim_and_mark_running(" in source
+    assert "result = await self._executor.execute(event)" in source

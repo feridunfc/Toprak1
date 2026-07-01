@@ -36,6 +36,10 @@ def is_worker_effect_hybrid_enabled() -> bool:
     return os.getenv("IRON_V3_WORKER_EFFECT_HYBRID", "0") not in _FALSE_VALUES
 
 
+
+
+def is_worker_task_consumer_bridge_enabled() -> bool:
+    return os.getenv("HFA_WORKER_TASK_CONSUMER_BRIDGE", "0") not in _FALSE_VALUES
 class EventStoreLike(Protocol):
     async def append_event(
         self,
