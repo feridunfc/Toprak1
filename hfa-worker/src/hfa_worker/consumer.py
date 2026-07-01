@@ -47,8 +47,30 @@ except Exception:
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = "worker_consumers"
 
+LEGACY_STREAM_CLAIM_COMPATIBILITY_BOUNDARY = (
+    "WorkerConsumer uses IdempotencyGuard.try_claim_and_mark_running / "
+    "StateStore.mark_running and is not the canonical TaskConsumer.claim_start path."
+)
+
+CANONICAL_RUNTIME_CLAIM_PATH_TARGET = (
+    "RunRequestedEvent -> TaskContext -> TaskConsumer.consume_once -> "
+    "TaskClaimManager.claim_start"
+)
+
 
 class WorkerConsumer:
+    """
+    Legacy stream consumer compatibility boundary.
+
+    This class still performs the older stream-consumer claim path through
+    IdempotencyGuard.try_claim_and_mark_running() / StateStore.mark_running().
+    It must not be mistaken for the canonical TaskConsumer.consume_once() ->
+    TaskClaimManager.claim_start() path.
+
+    Product target for a future bridge:
+    RunRequestedEvent -> TaskContext -> TaskConsumer.consume_once().
+    """
+
     def __init__(
         self,
         redis,

@@ -11,6 +11,12 @@ from hfa.runtime.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
+LEGACY_IDEMPOTENCY_GUARD_CLAIM_BOUNDARY = (
+    "IdempotencyGuard.try_claim_and_mark_running delegates to StateStore.mark_running "
+    "for WorkerConsumer compatibility; canonical task ownership uses "
+    "TaskClaimManager.claim_start."
+)
+
 
 class IdempotencyGuard:
     def __init__(self, redis):
