@@ -19,6 +19,7 @@ async def test_claim_with_matching_reservation_succeeds_and_consumes(redis_clien
     assert result.ok is True
     assert await redis_client.get(DagRedisKey.task_state("task-1")) == "running"
     assert await redis_client.exists(DagRedisKey.worker_reservation("worker-1")) == 0
+    assert await redis_client.exists(DagRedisKey.task_reservation_owner("task-1")) == 0
 
 @pytest.mark.integration
 async def test_claim_without_reservation_rejected(redis_client):
@@ -46,10 +47,13 @@ async def test_claim_with_wrong_worker_rejected(redis_client):
     res_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
     await res_mgr.reserve(worker_id="worker-real", task_id="task-5", scheduler_epoch="epoch-1", reserved_at_ms=123456)
     claim_mgr = TaskClaimManager(redis_client)
+    assert await redis_client.exists(DagRedisKey.task_reservation_owner("task-5")) == 1
+
     result = await claim_mgr.claim_start(task_id="task-5", tenant_id="tenant-a", worker_instance_id="worker-fake", claimed_at_ms=123500, scheduler_epoch="epoch-1")
     assert result.ok is False
     assert result.status == "reservation_worker_mismatch"
     assert await redis_client.get(DagRedisKey.task_state("task-5")) == "scheduled"
+    assert await redis_client.exists(DagRedisKey.task_reservation_owner("task-5")) == 1
 
 @pytest.mark.integration
 async def test_reaper_cleans_non_scheduled_orphan(redis_client):

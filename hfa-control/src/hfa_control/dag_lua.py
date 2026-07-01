@@ -14,6 +14,7 @@ Sprint 2 changes:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,19 @@ from hfa.dag.states import DagTaskState
 from hfa.lua.loader import LuaScriptLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _env_allows_legacy_direct_claim() -> bool:
+    value = os.getenv("HFA_ALLOW_LEGACY_DIRECT_TASK_CLAIM", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _legacy_direct_claim_arg(allow_legacy_direct_claim: bool | None) -> str:
+    if allow_legacy_direct_claim is None:
+        return "1" if _env_allows_legacy_direct_claim() else "0"
+    return "1" if allow_legacy_direct_claim else "0"
+
+
 
 
 # ── Lua path resolution ───────────────────────────────────────────────────────
@@ -64,6 +78,34 @@ class TaskDispatchCommitResult:
     reason: str = ""
 
 
+TASK_CLAIM_STATUS_TASK_CLAIMED = "task_claimed"
+TASK_CLAIM_STATUS_TASK_MISSING = "task_missing"
+TASK_CLAIM_STATUS_TASK_ALREADY_OWNED = "task_already_owned"
+TASK_CLAIM_STATUS_TASK_STATE_CONFLICT = "task_state_conflict"
+TASK_CLAIM_STATUS_RESERVATION_MISSING = "reservation_missing"
+TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH = "reservation_worker_mismatch"
+TASK_CLAIM_STATUS_RESERVATION_TASK_MISMATCH = "reservation_task_mismatch"
+TASK_CLAIM_STATUS_RESERVATION_EPOCH_MISMATCH = "reservation_epoch_mismatch"
+
+TASK_CLAIM_SUCCESS_STATUSES: frozenset[str] = frozenset({
+    TASK_CLAIM_STATUS_TASK_CLAIMED,
+})
+
+TASK_CLAIM_FAILURE_STATUSES: frozenset[str] = frozenset({
+    TASK_CLAIM_STATUS_TASK_MISSING,
+    TASK_CLAIM_STATUS_TASK_ALREADY_OWNED,
+    TASK_CLAIM_STATUS_TASK_STATE_CONFLICT,
+    TASK_CLAIM_STATUS_RESERVATION_MISSING,
+    TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH,
+    TASK_CLAIM_STATUS_RESERVATION_TASK_MISMATCH,
+    TASK_CLAIM_STATUS_RESERVATION_EPOCH_MISMATCH,
+})
+
+TASK_CLAIM_STATUSES: frozenset[str] = (
+    TASK_CLAIM_SUCCESS_STATUSES | TASK_CLAIM_FAILURE_STATUSES
+)
+
+
 @dataclass(frozen=True)
 class TaskClaimResult:
     ok: bool
@@ -86,7 +128,7 @@ class TaskClaimResult:
         status       = _d(raw[0]) if raw else "unknown"
         claim_epoch  = _d(raw[1]) if len(raw) > 1 else ""
         sched_epoch  = _d(raw[2]) if len(raw) > 2 else ""
-        ok           = status == "task_claimed"
+        ok           = status in TASK_CLAIM_SUCCESS_STATUSES
         return TaskClaimResult(
             ok=ok,
             status=status,
@@ -268,6 +310,7 @@ class DagLua:
         worker_instance_id: str,
         claimed_at_ms: int,
         scheduler_epoch: str = "",
+        allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
         """
         Atomically claim a scheduled task.
@@ -284,6 +327,7 @@ class DagLua:
             DagRedisKey.task_scheduled_zset(tenant_id),
             DagRedisKey.task_running_zset(tenant_id),
             DagRedisKey.worker_reservation(worker_instance_id),
+            DagRedisKey.task_reservation_owner(task_id),
         ]
         args = [
             task_id,
@@ -293,6 +337,7 @@ class DagLua:
             str(int(getattr(RedisTTL, "RUN_META", 86400))),
             str(float(claimed_at_ms)),
             scheduler_epoch,
+            _legacy_direct_claim_arg(allow_legacy_direct_claim),
         ]
 
         raw = await self._claim_loader.run(num_keys=len(keys), keys=keys, args=args)
@@ -370,6 +415,7 @@ class DagLua:
         claimed_at_ms: int,
         tenant_id: str = "",
         scheduler_epoch: str = "",
+        allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
         return await self.task_claim_start(
             task_id=task_id,
@@ -377,4 +423,5 @@ class DagLua:
             worker_instance_id=worker_instance_id,
             claimed_at_ms=claimed_at_ms,
             scheduler_epoch=scheduler_epoch,
+            allow_legacy_direct_claim=allow_legacy_direct_claim,
         )

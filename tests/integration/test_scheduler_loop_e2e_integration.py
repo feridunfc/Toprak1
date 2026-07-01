@@ -149,7 +149,7 @@ async def _lua(redis_client):
 
 
 @pytest.mark.integration
-async def test_scheduler_loop_run_cycle_end_to_end(redis_client):
+async def test_scheduler_loop_run_cycle_end_to_end(redis_client, monkeypatch):
     run_id = "loop-e2e-001"
     tenant_id = "tenant-e2e"
     admitted_at = time.time()
@@ -176,6 +176,7 @@ async def test_scheduler_loop_run_cycle_end_to_end(redis_client):
     queue = _TenantQueue(tenant_id, run_id)
     fairness = _TenantFairness(tenant_id)
     controller = _DispatchController()
+    monkeypatch.setenv("HFA_ALLOW_LEGACY_INJECTED_DISPATCH", "1")
     config = ControlPlaneConfig(strict_cas_mode=True)
     loop = SchedulerLoop(
         redis_client,

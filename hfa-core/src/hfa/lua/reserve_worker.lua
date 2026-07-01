@@ -1,9 +1,10 @@
-
 -- reserve_worker.lua
--- KEYS: 1=reservation_key
+-- KEYS: 1=worker_reservation_key 2=task_reservation_owner_key
 -- ARGV: 1=worker_id 2=task_id 3=scheduler_epoch 4=reserved_at_ms 5=ttl_seconds 6=scheduler_id
 
 local reservation_key = KEYS[1]
+local task_owner_key = KEYS[2] or ''
+
 local worker_id = ARGV[1]
 local task_id = ARGV[2]
 local scheduler_epoch = ARGV[3]
@@ -15,6 +16,10 @@ if redis.call('EXISTS', reservation_key) == 1 then
     return {"reservation_conflict", ""}
 end
 
+if task_owner_key ~= '' and redis.call('EXISTS', task_owner_key) == 1 then
+    return {"reservation_conflict", ""}
+end
+
 redis.call('HSET', reservation_key,
     'worker_id', worker_id,
     'task_id', task_id,
@@ -23,5 +28,16 @@ redis.call('HSET', reservation_key,
     'scheduler_id', scheduler_id
 )
 redis.call('EXPIRE', reservation_key, ttl_seconds)
+
+if task_owner_key ~= '' then
+    redis.call('HSET', task_owner_key,
+        'worker_id', worker_id,
+        'task_id', task_id,
+        'scheduler_epoch', scheduler_epoch,
+        'reserved_at_ms', reserved_at_ms,
+        'scheduler_id', scheduler_id
+    )
+    redis.call('EXPIRE', task_owner_key, ttl_seconds)
+end
 
 return {"reservation_created", scheduler_epoch}

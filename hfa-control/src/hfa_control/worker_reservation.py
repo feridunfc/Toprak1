@@ -42,6 +42,10 @@ def _execution_token_key(run_id: str) -> str:
 
 # ── Execution Ownership Token ─────────────────────────────────────────────────
 
+
+def _decode_redis(value) -> str:
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (str(value) if value is not None else "")
+
 @dataclass(frozen=True)
 class ExecutionToken:
     """
@@ -140,8 +144,11 @@ class WorkerReservationManager:
         assert self._loader is not None
 
         result = await self._loader.run(
-            num_keys=1,
-            keys=[DagRedisKey.worker_reservation(worker_id)],
+            num_keys=2,
+            keys=[
+                DagRedisKey.worker_reservation(worker_id),
+                DagRedisKey.task_reservation_owner(task_id),
+            ],
             args=[
                 worker_id,
                 task_id,
@@ -223,7 +230,19 @@ class WorkerReservationManager:
             return None
 
     async def release(self, worker_id: str) -> None:
-        await self._redis.delete(DagRedisKey.worker_reservation(worker_id))
+        key = DagRedisKey.worker_reservation(worker_id)
+        raw_task_id = await self._redis.hget(key, "task_id")
+        task_id = _decode_redis(raw_task_id)
+
+        keys_to_delete = [key]
+        if task_id:
+            owner_key = DagRedisKey.task_reservation_owner(task_id)
+            owner_worker = _decode_redis(await self._redis.hget(owner_key, "worker_id"))
+            owner_task = _decode_redis(await self._redis.hget(owner_key, "task_id"))
+            if owner_worker == worker_id and owner_task == task_id:
+                keys_to_delete.append(owner_key)
+
+        await self._redis.delete(*keys_to_delete)
 
     async def renew(self, worker_id: str, ttl_seconds: int | None = None) -> bool:
         ttl_seconds = ttl_seconds or self._reservation_ttl_seconds
@@ -231,4 +250,15 @@ class WorkerReservationManager:
         exists = await self._redis.exists(key)
         if not exists:
             return False
-        return bool(await self._redis.expire(key, ttl_seconds))
+
+        worker_ok = bool(await self._redis.expire(key, ttl_seconds))
+
+        raw_task_id = await self._redis.hget(key, "task_id")
+        task_id = _decode_redis(raw_task_id)
+        if task_id:
+            owner_key = DagRedisKey.task_reservation_owner(task_id)
+            owner_worker = _decode_redis(await self._redis.hget(owner_key, "worker_id"))
+            if owner_worker == worker_id:
+                await self._redis.expire(owner_key, ttl_seconds)
+
+        return worker_ok

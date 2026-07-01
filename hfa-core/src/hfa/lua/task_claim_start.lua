@@ -28,7 +28,8 @@
 -- 4  state_ttl
 -- 5  meta_ttl
 -- 6  heartbeat_score
--- 7  expected_scheduler_epoch   "" to skip epoch check
+-- 7  expected_scheduler_epoch   "" means no scheduler epoch fence supplied
+-- 8  allow_legacy_direct_claim  "1" explicitly allows reservation-free scheduled claim
 --
 -- ─── RETURN ────────────────────────────────────────────────────────────────
 -- { status, claim_epoch, scheduler_epoch, worker_instance_id, task_id }
@@ -50,6 +51,7 @@ local task_meta_key         = KEYS[2]
 local task_scheduled_zset   = KEYS[3]
 local task_running_zset     = KEYS[4]
 local reservation_key       = KEYS[5]
+local task_owner_key         = KEYS[6] or ''
 
 local task_id                   = ARGV[1]
 local worker_instance_id        = ARGV[2]
@@ -58,6 +60,7 @@ local state_ttl                 = tonumber(ARGV[4])
 local meta_ttl                  = tonumber(ARGV[5])
 local heartbeat_score           = tonumber(ARGV[6])
 local expected_scheduler_epoch  = ARGV[7]
+local allow_legacy_direct_claim = ARGV[8] or '0'
 
 -- ── State guard ───────────────────────────────────────────────────────────
 local current_state = redis.call('GET', task_state_key)
@@ -70,15 +73,37 @@ if current_state == 'running' then
 end
 
 -- Reservation guard
--- COMPATIBILITY ONLY:
+-- CANONICAL PATH:
 --   * scheduler_epoch supplied  => reservation is mandatory
---   * scheduler_epoch empty     => legacy/direct claim is allowed, but only
---                                  for tasks currently in scheduled state.
+--   * scheduler_epoch empty     => reservation-free direct claim is denied by default
+--
+-- COMPATIBILITY PATH:
+--   * reservation-free scheduled claim is allowed only when
+--     allow_legacy_direct_claim == "1".
 local legacy_direct_claim = false
 local has_reservation = redis.call('EXISTS', reservation_key)
 
+local owner_index_worker = ''
+local owner_index_task = ''
+local owner_index_epoch = ''
+local has_owner_index = 0
+
+if task_owner_key ~= '' then
+    has_owner_index = redis.call('EXISTS', task_owner_key)
+    if has_owner_index == 1 then
+        local owner_index = redis.call('HMGET', task_owner_key, 'worker_id', 'task_id', 'scheduler_epoch')
+        owner_index_worker = owner_index[1] or ''
+        owner_index_task = owner_index[2] or ''
+        owner_index_epoch = owner_index[3] or ''
+    end
+end
+
 if has_reservation == 0 then
-    if current_state == 'scheduled' and expected_scheduler_epoch == '' then
+    if expected_scheduler_epoch ~= '' and has_owner_index == 1 and owner_index_worker ~= worker_instance_id then
+        return {'reservation_worker_mismatch', '', '', owner_index_worker or '', task_id}
+    end
+
+    if current_state == 'scheduled' and expected_scheduler_epoch == '' and allow_legacy_direct_claim == '1' then
         legacy_direct_claim = true
     else
         return {'reservation_missing', '', '', '', task_id}
@@ -104,6 +129,18 @@ if not legacy_direct_claim then
 
     if reserved_task ~= task_id then
         return {'reservation_task_mismatch', '', '', '', task_id}
+    end
+
+    if has_owner_index == 1 then
+        if owner_index_worker ~= reserved_worker then
+            return {'reservation_worker_mismatch', '', '', owner_index_worker or '', task_id}
+        end
+        if owner_index_task ~= reserved_task then
+            return {'reservation_task_mismatch', '', '', '', task_id}
+        end
+        if owner_index_epoch ~= reserved_epoch then
+            return {'reservation_epoch_mismatch', '', owner_index_epoch or '', '', task_id}
+        end
     end
 
     if expected_scheduler_epoch ~= '' then
@@ -134,6 +171,9 @@ redis.call('ZADD', task_running_zset, heartbeat_score, task_id)
 -- Consume the reservation.
 if not legacy_direct_claim then
     redis.call('DEL', reservation_key)
+    if task_owner_key ~= '' then
+        redis.call('DEL', task_owner_key)
+    end
 end
 
 return {
