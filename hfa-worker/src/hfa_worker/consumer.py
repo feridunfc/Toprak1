@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 from hfa.config.keys import RedisKey
 from hfa.events.codec import deserialize_run_requested, serialize_event
@@ -37,7 +37,11 @@ from hfa_worker.models import (
     TerminalExecutionError,
 )
 from hfa_worker.redis_utils import ack_message, ensure_consumer_group
-from hfa_worker.runtime.worker_runtime import is_worker_effect_hybrid_enabled
+from hfa_worker.runtime.task_context_builder import build_task_context_from_run_requested
+from hfa_worker.runtime.worker_runtime import (
+    is_worker_effect_hybrid_enabled,
+    is_worker_task_consumer_bridge_enabled,
+)
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -79,6 +83,7 @@ class WorkerConsumer:
         shards: list[int],
         executor: BaseExecutor,
         reclaim_idle_ms: int = 60000,
+        task_consumer: Any | None = None,
     ):
         self._redis = redis
         self._worker_id = worker_id
@@ -86,6 +91,7 @@ class WorkerConsumer:
         self._shards = shards
         self._executor = executor
         self._reclaim_idle_ms = reclaim_idle_ms
+        self._task_consumer = task_consumer
 
         self._state = StateStore(redis)
         self._guard = IdempotencyGuard(redis)
@@ -271,12 +277,73 @@ class WorkerConsumer:
                 logger.error("Consume loop error: %s", exc)
                 await asyncio.sleep(0.1)
 
+    async def _process_message_via_task_consumer(
+        self,
+        event: Any,
+        msg_id: str,
+        stream: str,
+        shard: int,
+    ) -> None:
+        """
+        Gated Sprint 62 bridge.
+
+        This path proves WorkerConsumer can route stream envelopes into the
+        canonical TaskConsumer.consume_once() path. It deliberately does not
+        redesign completion, retry, reclaim, or dashboard behavior.
+
+        The bridge is fail-closed: when the flag is enabled but no injected
+        task_consumer is configured, the message is not acked and the legacy
+        claim path is not used.
+        """
+        if self._task_consumer is None:
+            logger.error(
+                "TaskConsumer bridge enabled but task_consumer is not configured: run=%s",
+                getattr(event, "run_id", ""),
+            )
+            return
+
+        ctx = build_task_context_from_run_requested(
+            event,
+            worker_id=self._worker_id,
+            worker_group=self._worker_group,
+            shard=shard,
+        )
+        consumed = await self._task_consumer.consume_once(
+            ctx,
+            claimed_at_ms=int(time.time() * 1000),
+        )
+
+        rejected_reason = str(getattr(consumed, "rejected_reason", "") or "")
+        if rejected_reason:
+            logger.info(
+                "TaskConsumer bridge rejected run=%s reason=%s",
+                ctx.run_id,
+                rejected_reason,
+            )
+            return
+
+        claimed = getattr(consumed, "claimed", None)
+        if claimed is None or not bool(getattr(claimed, "ok", False)):
+            logger.info("TaskConsumer bridge did not claim run=%s", ctx.run_id)
+            return
+
+        executed = getattr(consumed, "executed", None)
+        if executed is None or not bool(getattr(executed, "ok", False)):
+            logger.info("TaskConsumer bridge did not execute successfully run=%s", ctx.run_id)
+            return
+
+        await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+
     async def _process_message(self, msg_id: str, data: dict, stream: str, shard: int) -> None:
         try:
             event = deserialize_run_requested(data)
             if event is None:
                 logger.warning("Failed to deserialize message %s", msg_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+                return
+
+            if is_worker_task_consumer_bridge_enabled():
+                await self._process_message_via_task_consumer(event, msg_id, stream, shard)
                 return
 
             if not await self._guard.should_execute(event.run_id):
