@@ -65,7 +65,14 @@ async def _get_task_reservation_owner(redis, task_id: str) -> str:
 
 class TaskClaimService:
     """
-    Thin wrapper around DagLua.claim_task() with optional event emission.
+    Compatibility boundary for legacy direct task claim behavior.
+
+    Canonical runtime code must not use TaskClaimService.claim().
+    Canonical task ownership must flow through TaskClaimManager.claim_start()
+    with scheduler_epoch + reservation context.
+
+    Legacy direct claim remains available only through the explicitly named
+    claim_legacy_direct_for_compatibility() method.
     """
 
     def __init__(self, dag_lua_or_redis=None, event_store=None) -> None:
@@ -85,6 +92,28 @@ class TaskClaimService:
         tenant_id: str = "",
         now_ms: int = 0,
     ) -> TaskClaimResult:
+        raise RuntimeError(
+            "TaskClaimService.claim() is quarantined and must not be used by "
+            "canonical runtime paths. Use TaskClaimManager.claim_start() with "
+            "scheduler_epoch + reservation context, or use "
+            "claim_legacy_direct_for_compatibility() only from explicit "
+            "test/dev/manual compatibility surfaces."
+        )
+
+    async def claim_legacy_direct_for_compatibility(
+        self,
+        *,
+        task_id: str,
+        worker_id: str,
+        tenant_id: str = "",
+        now_ms: int = 0,
+    ) -> TaskClaimResult:
+        """
+        Explicit compatibility surface for legacy direct claim.
+
+        This is intentionally not named claim().
+        It must not be used by canonical runtime paths.
+        """
         assert self._dag_lua is not None, "DagLua not configured"
         result = await self._dag_lua.claim_task(
             task_id=task_id,
