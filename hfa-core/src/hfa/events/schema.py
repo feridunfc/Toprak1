@@ -53,6 +53,9 @@ class RunRequestedEvent(HFAEvent):
     priority: int = 5
     payload: Dict[str, Any] = field(default_factory=dict)
     idempotency_key: str = ""
+    # Scheduler dispatch fencing metadata.
+    # This is envelope metadata, not user/task payload.
+    scheduler_epoch: str = ""
 
 
 @dataclass
@@ -109,6 +112,9 @@ class RunScheduledEvent(HFAEvent):
     shard: int = 0
     region: str = ""
     policy: str = "LEAST_LOADED"
+    # Scheduler dispatch fencing metadata.
+    # This is envelope metadata, not user/task payload.
+    scheduler_epoch: str = ""
     scheduled_at: float = field(default_factory=time.time)
 
 
