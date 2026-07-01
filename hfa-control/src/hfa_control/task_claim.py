@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from hfa_control.dag_lua import DagLua, TaskClaimResult
+from hfa_control.dag_lua import (
+    DagLua,
+    TaskClaimResult,
+    TASK_CLAIM_STATUS_RESERVATION_MISSING,
+    TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH,
+)
 from hfa_control.event_hooks import emit_event_background
 from hfa_control.event_store import EventStore
 from hfa.dag.schema import DagRedisKey
@@ -140,7 +145,7 @@ class TaskClaimManager(TaskClaimService):
         # case without walking worker reservation keys.
         if (
             not result.ok
-            and result.status == "reservation_missing"
+            and result.status == TASK_CLAIM_STATUS_RESERVATION_MISSING
             and scheduler_epoch
         ):
             redis = (
@@ -153,7 +158,7 @@ class TaskClaimManager(TaskClaimService):
                 if reserved_worker and reserved_worker != worker_instance_id:
                     result = TaskClaimResult(
                         ok=False,
-                        status="reservation_worker_mismatch",
+                        status=TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH,
                         task_id=task_id,
                         worker_id=worker_instance_id,
                         claim_epoch="",

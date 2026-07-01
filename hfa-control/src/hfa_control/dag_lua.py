@@ -78,6 +78,34 @@ class TaskDispatchCommitResult:
     reason: str = ""
 
 
+TASK_CLAIM_STATUS_TASK_CLAIMED = "task_claimed"
+TASK_CLAIM_STATUS_TASK_MISSING = "task_missing"
+TASK_CLAIM_STATUS_TASK_ALREADY_OWNED = "task_already_owned"
+TASK_CLAIM_STATUS_TASK_STATE_CONFLICT = "task_state_conflict"
+TASK_CLAIM_STATUS_RESERVATION_MISSING = "reservation_missing"
+TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH = "reservation_worker_mismatch"
+TASK_CLAIM_STATUS_RESERVATION_TASK_MISMATCH = "reservation_task_mismatch"
+TASK_CLAIM_STATUS_RESERVATION_EPOCH_MISMATCH = "reservation_epoch_mismatch"
+
+TASK_CLAIM_SUCCESS_STATUSES: frozenset[str] = frozenset({
+    TASK_CLAIM_STATUS_TASK_CLAIMED,
+})
+
+TASK_CLAIM_FAILURE_STATUSES: frozenset[str] = frozenset({
+    TASK_CLAIM_STATUS_TASK_MISSING,
+    TASK_CLAIM_STATUS_TASK_ALREADY_OWNED,
+    TASK_CLAIM_STATUS_TASK_STATE_CONFLICT,
+    TASK_CLAIM_STATUS_RESERVATION_MISSING,
+    TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH,
+    TASK_CLAIM_STATUS_RESERVATION_TASK_MISMATCH,
+    TASK_CLAIM_STATUS_RESERVATION_EPOCH_MISMATCH,
+})
+
+TASK_CLAIM_STATUSES: frozenset[str] = (
+    TASK_CLAIM_SUCCESS_STATUSES | TASK_CLAIM_FAILURE_STATUSES
+)
+
+
 @dataclass(frozen=True)
 class TaskClaimResult:
     ok: bool
@@ -100,7 +128,7 @@ class TaskClaimResult:
         status       = _d(raw[0]) if raw else "unknown"
         claim_epoch  = _d(raw[1]) if len(raw) > 1 else ""
         sched_epoch  = _d(raw[2]) if len(raw) > 2 else ""
-        ok           = status == "task_claimed"
+        ok           = status in TASK_CLAIM_SUCCESS_STATUSES
         return TaskClaimResult(
             ok=ok,
             status=status,
