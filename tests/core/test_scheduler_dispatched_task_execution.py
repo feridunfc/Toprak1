@@ -35,6 +35,9 @@ async def test_scheduler_dispatched_task_execution_passes_through_dispatch_and_w
     assert artifact["dispatch_status"] == "committed"
     assert artifact["run_requested_event_from_dispatch"] is True
     assert artifact["manual_worker_message_injection_used"] is False
+    assert artifact["dispatch_scheduler_epoch"]
+    assert artifact["dispatch_message_scheduler_epoch"] == artifact["dispatch_scheduler_epoch"]
+    assert artifact["worker_event_scheduler_epoch"] == artifact["dispatch_scheduler_epoch"]
 
     assert artifact["worker_consumer_process_message_used"] is True
     assert artifact["idempotency_guard_claimed"] is True
@@ -73,6 +76,7 @@ async def test_scheduler_dispatched_task_execution_dispatch_message_is_from_sche
     assert message["agent_type"] == "fake"
     assert message["worker_group"] == "default"
     assert message["shard"] == "0"
+    assert message["scheduler_epoch"] == artifact["dispatch_scheduler_epoch"]
 
     payload = json.loads(message["payload_json"])
     assert payload == {"prompt": "hello scheduler dispatch"}

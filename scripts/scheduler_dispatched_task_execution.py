@@ -184,6 +184,7 @@ class RecordingFakeExecutor(FakeExecutor):
                 "run_id": getattr(run_event, "run_id", ""),
                 "tenant_id": getattr(run_event, "tenant_id", ""),
                 "payload": getattr(run_event, "payload", {}),
+                "scheduler_epoch": getattr(run_event, "scheduler_epoch", ""),
             }
         )
         return await super().execute(run_event)
@@ -225,6 +226,7 @@ async def build_artifact() -> dict[str, Any]:
 
     admitted_at = time.time()
     priority = 5
+    scheduler_epoch = "epoch-scheduler-dispatched-task-execution"
     score = priority * int(1e12) + int(admitted_at * 1_000_000) % int(1e12)
 
     tenant_task_submitted = await scheduler.enqueue_admitted(
@@ -249,6 +251,7 @@ async def build_artifact() -> dict[str, Any]:
         running_zset=RedisKey.cp_running(),
         priority=priority,
         payload=payload,
+        scheduler_epoch=scheduler_epoch,
         control_stream=RedisKey.stream_control(),
         shard_stream=RedisKey.stream_shard(shard),
     )
@@ -418,6 +421,13 @@ async def build_artifact() -> dict[str, Any]:
         "shard_stream": shard_stream,
         "dispatch_message_id": msg_id,
         "dispatch_message": message,
+        "dispatch_scheduler_epoch": scheduler_epoch,
+        "dispatch_message_scheduler_epoch": str(message.get("scheduler_epoch", "")),
+        "worker_event_scheduler_epoch": (
+            str(executor.invocations[0].get("scheduler_epoch", ""))
+            if executor.invocations
+            else ""
+        ),
         "result": result_payload,
         "calls": calls,
         "redis_xack_calls": redis.xack_calls,

@@ -178,6 +178,7 @@ def deserialize_run_requested(data: Dict[bytes, bytes]) -> Any:
         priority=safe_decode_int(data, "priority", 5),
         payload=safe_decode_json(data, "payload", safe_decode_json(data, "payload_json", {})),
         idempotency_key=safe_decode_str(data, "idempotency_key"),
+        scheduler_epoch=safe_decode_str(data, "scheduler_epoch"),
         trace_parent=safe_decode_str(data, "trace_parent") or None,
         trace_state=safe_decode_str(data, "trace_state") or None,
     )
