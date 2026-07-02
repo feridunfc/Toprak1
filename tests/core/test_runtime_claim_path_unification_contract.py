@@ -56,18 +56,27 @@ def test_worker_main_patch_is_placeholder_not_runtime_stream_bridge() -> None:
     assert "consumer.consume_once(ctx, claimed_at_ms=...)" in source
     assert "while True:" in source
 
+
 def test_worker_consumer_bridge_acks_only_after_fenced_completion_result() -> None:
     source = Path("hfa-worker/src/hfa_worker/consumer.py").read_text(encoding="utf-8")
     marker = "    async def _process_message_via_task_consumer("
-    if marker not in source:
-        raise AssertionError("WorkerConsumer._process_message_via_task_consumer not found")
+    start = source.index(marker)
+    bridge_body = source[start : source.index("    async def _process_message(", start)]
 
-    bridge_body = source[source.index(marker): source.index("    async def _process_message(", source.index(marker))]
+    ack_call = "await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)"
 
     assert 'completed = getattr(consumed, "completed", None)' in bridge_body
-    assert 'if completed is None:' in bridge_body
-    assert 'getattr(completed, "completed", False)' in bridge_body
-    assert 'await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)' in bridge_body
-    assert bridge_body.index('completed = getattr(consumed, "completed", None)') < bridge_body.index(
-        'await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)'
-    )
+    assert "if duplicate_delivery.ack_allowed:" in bridge_body
+    assert bridge_body.count(ack_call) == 2
+
+    duplicate_ack_index = bridge_body.index("if duplicate_delivery.ack_allowed:")
+    normal_completion_index = bridge_body.index('completed = getattr(consumed, "completed", None)')
+    normal_ack_index = bridge_body.rindex(ack_call)
+
+    # Sprint 69.2: terminal duplicate cleanup ACK is allowed before consume_once
+    # only under duplicate_delivery.ack_allowed.
+    assert duplicate_ack_index < bridge_body.index("consumed = await self._task_consumer.consume_once(")
+
+    # The normal execution path must still ACK only after fenced completion.
+    assert normal_completion_index < normal_ack_index
+    assert bridge_body.index('if not bool(getattr(completed, "completed", False))') < normal_ack_index

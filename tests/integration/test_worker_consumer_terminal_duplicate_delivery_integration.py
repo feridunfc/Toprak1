@@ -100,3 +100,63 @@ async def test_worker_consumer_terminal_duplicate_delivery_suppresses_consume_on
         assert state == "done"
     finally:
         await redis_client.delete(DagRedisKey.task_state(task_id), stream)
+
+
+@pytest.mark.asyncio
+async def test_worker_consumer_terminal_duplicate_delivery_acks_only_with_explicit_identity_and_evidence(
+    redis_client,
+) -> None:
+    task_id = f"sprint-69-2-terminal-ack-{uuid4().hex}"
+    stream = f"hfa:sprint69:ack-stream:{uuid4().hex}"
+    consumer_name = "worker-sprint-69-2-consumer"
+
+    await redis_client.delete(DagRedisKey.task_state(task_id), DagRedisKey.task_meta(task_id), stream)
+    await redis_client.set(DagRedisKey.task_state(task_id), "done")
+    await redis_client.hset(DagRedisKey.task_meta(task_id), mapping={"run_id": task_id})
+
+    try:
+        await redis_client.xgroup_create(stream, CONSUMER_GROUP, id="0", mkstream=True)
+        msg_id = await redis_client.xadd(
+            stream,
+            {
+                "run_id": task_id,
+                "task_id": task_id,
+                "tenant_id": "tenant-1",
+                "agent_type": "test",
+            },
+        )
+        delivered = await redis_client.xreadgroup(
+            CONSUMER_GROUP,
+            consumer_name,
+            {stream: ">"},
+            count=1,
+            block=1000,
+        )
+        assert delivered
+
+        before = _pending_count(await redis_client.xpending(stream, CONSUMER_GROUP))
+        assert before == 1
+
+        task_consumer = RecordingTaskConsumer()
+        consumer = _consumer(redis_client, task_consumer)
+        event = _event(task_id)
+        setattr(event, "task_id", task_id)
+
+        await consumer._process_message_via_task_consumer(
+            event,
+            msg_id,
+            stream,
+            shard=0,
+        )
+
+        after = _pending_count(await redis_client.xpending(stream, CONSUMER_GROUP))
+
+        assert task_consumer.calls == []
+        assert after == 0
+
+        state = await redis_client.get(DagRedisKey.task_state(task_id))
+        if isinstance(state, bytes):
+            state = state.decode("utf-8")
+        assert state == "done"
+    finally:
+        await redis_client.delete(DagRedisKey.task_state(task_id), DagRedisKey.task_meta(task_id), stream)

@@ -313,16 +313,24 @@ class WorkerConsumer:
             shard=shard,
         )
 
-        duplicate_delivery = await classify_terminal_duplicate_delivery(self._redis, ctx)
+        duplicate_delivery = await classify_terminal_duplicate_delivery(
+            self._redis,
+            ctx,
+            message_task_id=str(getattr(event, "task_id", "") or ""),
+            message_run_id=str(getattr(event, "run_id", "") or ""),
+        )
         if duplicate_delivery.status == TERMINAL_DUPLICATE_DELIVERY:
             logger.info(
                 "TaskConsumer bridge suppressed terminal duplicate delivery "
-                "run=%s task=%s state=%s ack_allowed=%s",
+                "run=%s task=%s state=%s ack_allowed=%s ack_policy=%s",
                 ctx.run_id,
                 ctx.task_id,
                 duplicate_delivery.state,
                 duplicate_delivery.ack_allowed,
+                duplicate_delivery.ack_policy,
             )
+            if duplicate_delivery.ack_allowed:
+                await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
             return
 
         consumed = await self._task_consumer.consume_once(
