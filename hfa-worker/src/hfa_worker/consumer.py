@@ -38,6 +38,10 @@ from hfa_worker.models import (
 )
 from hfa_worker.redis_utils import ack_message, ensure_consumer_group
 from hfa_worker.runtime.task_context_builder import build_task_context_from_run_requested
+from hfa_worker.runtime.terminal_duplicate_delivery import (
+    TERMINAL_DUPLICATE_DELIVERY,
+    classify_terminal_duplicate_delivery,
+)
 from hfa_worker.runtime.worker_runtime import (
     is_worker_effect_hybrid_enabled,
     is_worker_task_consumer_bridge_enabled,
@@ -308,6 +312,19 @@ class WorkerConsumer:
             worker_group=self._worker_group,
             shard=shard,
         )
+
+        duplicate_delivery = await classify_terminal_duplicate_delivery(self._redis, ctx)
+        if duplicate_delivery.status == TERMINAL_DUPLICATE_DELIVERY:
+            logger.info(
+                "TaskConsumer bridge suppressed terminal duplicate delivery "
+                "run=%s task=%s state=%s ack_allowed=%s",
+                ctx.run_id,
+                ctx.task_id,
+                duplicate_delivery.state,
+                duplicate_delivery.ack_allowed,
+            )
+            return
+
         consumed = await self._task_consumer.consume_once(
             ctx,
             claimed_at_ms=int(time.time() * 1000),
