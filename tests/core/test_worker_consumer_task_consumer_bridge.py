@@ -12,6 +12,9 @@ from hfa_worker.fake_executor import FakeExecutor
 
 
 class FakeRedis:
+    async def get(self, key):
+        return None
+
     def __init__(self) -> None:
         self.xack_calls: list[tuple[str, str, str]] = []
         self.xadd_calls: list[tuple[str, dict]] = []
