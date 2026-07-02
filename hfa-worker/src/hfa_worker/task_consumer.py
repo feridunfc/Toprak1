@@ -11,7 +11,10 @@ Sprint 2 change: after a successful claim_start(), the fence tuple
 """
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
+from typing import Any
 
 from hfa.dag.capabilities import TaskCapabilitySpec, WorkerCapabilitySpec
 from hfa_control.capability_router import CapabilityRouter
@@ -26,6 +29,7 @@ from hfa_worker.task_heartbeat import HeartbeatLoop
 class ConsumedTaskResult:
     claimed: TaskClaimResult | None = None
     executed: TaskExecutionResult | None = None
+    completed: Any | None = None
     rejected_reason: str = ""
 
 
@@ -38,12 +42,54 @@ class TaskConsumer:
         worker_capabilities: list[str] | None = None,
         heartbeat_manager: TaskHeartbeatManager | None = None,
         heartbeat_interval_ms: int = 5_000,
+        completion_manager: Any | None = None,
     ) -> None:
         self._claim_manager = claim_manager
         self._executor = executor
         self._worker_capabilities = worker_capabilities or []
         self._heartbeat_manager = heartbeat_manager
         self._heartbeat_interval_ms = heartbeat_interval_ms
+        self._completion_manager = completion_manager
+
+    async def _complete_with_fence(
+        self,
+        ctx: TaskContext,
+        claim: TaskClaimResult,
+        executed: TaskExecutionResult,
+    ) -> Any:
+        """
+        Complete the task through the authoritative Lua completion fence.
+
+        Sprint 63 scope:
+        - pass task_id, worker_instance_id, scheduler_epoch, and claim_epoch
+        - preserve default TaskConsumer behavior when completion_manager is None
+        - do not redesign WorkerConsumer legacy completion, ack, retry, or reclaim
+        """
+        if self._completion_manager is None:
+            return None
+
+        terminal_state = "done" if executed.ok else "failed"
+        reason_code = "completed" if executed.ok else (executed.error or "failed")
+        output_data = json.dumps(
+            executed.output or {},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        scheduler_epoch = claim.scheduler_epoch or ctx.scheduler_epoch
+
+        return await self._completion_manager.task_complete(
+            task_id=ctx.task_id,
+            run_id=ctx.run_id,
+            tenant_id=ctx.tenant_id,
+            terminal_state=terminal_state,
+            finished_at_ms=int(time.time() * 1000),
+            reason_code=reason_code,
+            worker_instance_id=ctx.worker_instance_id,
+            output_data=output_data,
+            expected_scheduler_epoch=scheduler_epoch,
+            expected_claim_epoch=claim.claim_epoch,
+        )
 
     async def consume_once(
         self, ctx: TaskContext, *, claimed_at_ms: int
@@ -86,7 +132,12 @@ class TaskConsumer:
 
         try:
             executed = await self._executor.execute(ctx)
-            return ConsumedTaskResult(claimed=claim, executed=executed)
+            completed = await self._complete_with_fence(ctx, claim, executed)
+            return ConsumedTaskResult(
+                claimed=claim,
+                executed=executed,
+                completed=completed,
+            )
         finally:
             if loop is not None:
                 await loop.stop()
