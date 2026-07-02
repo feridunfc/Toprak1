@@ -332,6 +332,22 @@ class WorkerConsumer:
             logger.info("TaskConsumer bridge did not execute successfully run=%s", ctx.run_id)
             return
 
+        completed = getattr(consumed, "completed", None)
+        if completed is None:
+            logger.info(
+                "TaskConsumer bridge did not produce fenced completion result run=%s",
+                ctx.run_id,
+            )
+            return
+
+        if not bool(getattr(completed, "completed", False)):
+            logger.info(
+                "TaskConsumer bridge completion not committed run=%s status=%s",
+                ctx.run_id,
+                getattr(completed, "status", ""),
+            )
+            return
+
         await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
 
     async def _process_message(self, msg_id: str, data: dict, stream: str, shard: int) -> None:

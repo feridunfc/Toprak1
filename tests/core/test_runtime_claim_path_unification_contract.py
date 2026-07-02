@@ -55,3 +55,19 @@ def test_worker_main_patch_is_placeholder_not_runtime_stream_bridge() -> None:
     assert "TaskContext is obtained from your existing task poll mechanism" in source
     assert "consumer.consume_once(ctx, claimed_at_ms=...)" in source
     assert "while True:" in source
+
+def test_worker_consumer_bridge_acks_only_after_fenced_completion_result() -> None:
+    source = Path("hfa-worker/src/hfa_worker/consumer.py").read_text(encoding="utf-8")
+    marker = "    async def _process_message_via_task_consumer("
+    if marker not in source:
+        raise AssertionError("WorkerConsumer._process_message_via_task_consumer not found")
+
+    bridge_body = source[source.index(marker): source.index("    async def _process_message(", source.index(marker))]
+
+    assert 'completed = getattr(consumed, "completed", None)' in bridge_body
+    assert 'if completed is None:' in bridge_body
+    assert 'getattr(completed, "completed", False)' in bridge_body
+    assert 'await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)' in bridge_body
+    assert bridge_body.index('completed = getattr(consumed, "completed", None)') < bridge_body.index(
+        'await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)'
+    )

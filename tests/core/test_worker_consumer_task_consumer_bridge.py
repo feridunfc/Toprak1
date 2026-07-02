@@ -51,6 +51,7 @@ class RecordingTaskConsumer:
         return SimpleNamespace(
             claimed=SimpleNamespace(ok=True),
             executed=SimpleNamespace(ok=True),
+            completed=SimpleNamespace(completed=True, status="committed"),
             rejected_reason="",
         )
 
@@ -230,3 +231,121 @@ async def test_worker_consumer_task_consumer_bridge_flag_off_preserves_legacy_pa
     assert calls["try_claim"] == [("run-legacy-still-default", "worker-legacy", "default", 0)]
     assert task_consumer.calls == []
     assert redis.xack_calls == [(stream, CONSUMER_GROUP, "1-legacy")]
+
+
+class ClaimFailedTaskConsumer:
+    async def consume_once(self, ctx, *, claimed_at_ms: int):
+        return SimpleNamespace(
+            claimed=SimpleNamespace(ok=False, status="reservation_missing"),
+            executed=None,
+            completed=None,
+            rejected_reason="",
+        )
+
+
+class ExecutionFailedTaskConsumer:
+    async def consume_once(self, ctx, *, claimed_at_ms: int):
+        return SimpleNamespace(
+            claimed=SimpleNamespace(ok=True),
+            executed=SimpleNamespace(ok=False),
+            completed=None,
+            rejected_reason="",
+        )
+
+
+class CompletionRejectedTaskConsumer:
+    async def consume_once(self, ctx, *, claimed_at_ms: int):
+        return SimpleNamespace(
+            claimed=SimpleNamespace(ok=True),
+            executed=SimpleNamespace(ok=True),
+            completed=SimpleNamespace(completed=False, status="claim_epoch_mismatch"),
+            rejected_reason="",
+        )
+
+
+class MissingCompletionResultTaskConsumer:
+    async def consume_once(self, ctx, *, claimed_at_ms: int):
+        return SimpleNamespace(
+            claimed=SimpleNamespace(ok=True),
+            executed=SimpleNamespace(ok=True),
+            rejected_reason="",
+        )
+
+
+class CrashingTaskConsumer:
+    async def consume_once(self, ctx, *, claimed_at_ms: int):
+        raise RuntimeError("synthetic task consumer crash")
+
+
+async def _run_bridge_case(task_consumer) -> FakeRedis:
+    redis = FakeRedis()
+    consumer = WorkerConsumer(
+        redis=redis,
+        worker_id="worker-ack-policy",
+        worker_group="group-ack-policy",
+        shards=[0],
+        executor=ForbiddenLegacyExecutor(),
+        task_consumer=task_consumer,
+    )
+
+    event = RunRequestedEvent(
+        run_id="run-ack-policy",
+        tenant_id="tenant-a",
+        agent_type="agent-a",
+        payload={"prompt": "ack policy"},
+        scheduler_epoch="epoch-ack-policy",
+    )
+
+    await consumer._process_message(
+        msg_id="1-ack-policy",
+        data=serialize_event(event),
+        stream=RedisKey.stream_shard(0),
+        shard=0,
+    )
+
+    return redis
+
+
+@pytest.mark.asyncio
+async def test_worker_consumer_bridge_does_not_ack_when_claim_fails(monkeypatch) -> None:
+    monkeypatch.setenv("HFA_WORKER_TASK_CONSUMER_BRIDGE", "1")
+
+    redis = await _run_bridge_case(ClaimFailedTaskConsumer())
+
+    assert redis.xack_calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_consumer_bridge_does_not_ack_when_execution_fails(monkeypatch) -> None:
+    monkeypatch.setenv("HFA_WORKER_TASK_CONSUMER_BRIDGE", "1")
+
+    redis = await _run_bridge_case(ExecutionFailedTaskConsumer())
+
+    assert redis.xack_calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_consumer_bridge_does_not_ack_when_completion_is_missing(monkeypatch) -> None:
+    monkeypatch.setenv("HFA_WORKER_TASK_CONSUMER_BRIDGE", "1")
+
+    redis = await _run_bridge_case(MissingCompletionResultTaskConsumer())
+
+    assert redis.xack_calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_consumer_bridge_does_not_ack_when_fenced_completion_rejects(monkeypatch) -> None:
+    monkeypatch.setenv("HFA_WORKER_TASK_CONSUMER_BRIDGE", "1")
+
+    redis = await _run_bridge_case(CompletionRejectedTaskConsumer())
+
+    assert redis.xack_calls == []
+
+
+@pytest.mark.asyncio
+async def test_worker_consumer_bridge_exception_leaves_message_unacked(monkeypatch) -> None:
+    monkeypatch.setenv("HFA_WORKER_TASK_CONSUMER_BRIDGE", "1")
+
+    redis = await _run_bridge_case(CrashingTaskConsumer())
+
+    assert redis.xack_calls == []
