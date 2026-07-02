@@ -57,6 +57,7 @@ from hfa_control.exceptions import (
     TenantMismatchError,
     LeadershipError,
 )
+from hfa_control.api.task_evidence import read_task_evidence
 from hfa_control.api.models import (
     WorkerResponse,
     ShardResponse,
@@ -706,3 +707,28 @@ def _worker_summary(profile) -> WorkerSummary:
         version=profile.version,
         last_seen=profile.last_seen,
     )
+
+
+# ===========================================================================
+# Sprint 66 - Read-only task evidence
+# ===========================================================================
+
+
+@router.get("/tasks/{task_id}/evidence")
+async def task_evidence(
+    task_id: str,
+    request: Request,
+    x_cp_auth: str = Header(default=""),
+) -> dict:
+    """
+    Operator-only, read-only evidence surface.
+
+    This endpoint reads Redis evidence written by the runtime/Lua path.
+    It must not mutate Redis, retry, reclaim, repair, or assert production
+    readiness.
+    """
+    _require_operator(x_cp_auth)
+    evidence = await read_task_evidence(request.app.state.redis, task_id)
+    if not evidence["found"]:
+        raise HTTPException(status_code=404, detail=f"Task {task_id!r} evidence not found")
+    return evidence
