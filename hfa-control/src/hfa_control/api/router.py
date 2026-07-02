@@ -57,6 +57,7 @@ from hfa_control.exceptions import (
     TenantMismatchError,
     LeadershipError,
 )
+from hfa_control.api.crash_boundary_evidence import read_crash_boundary_evidence
 from hfa_control.api.task_evidence import read_task_evidence
 from hfa_control.api.models import (
     WorkerResponse,
@@ -732,3 +733,34 @@ async def task_evidence(
     if not evidence["found"]:
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} evidence not found")
     return evidence
+
+
+# ===========================================================================
+# Sprint 68 - Read-only crash-boundary evidence
+# ===========================================================================
+
+
+@router.get("/tasks/{task_id}/crash-boundary-evidence")
+async def task_crash_boundary_evidence(
+    task_id: str,
+    request: Request,
+    shard: int = 0,
+    group: str = "",
+    x_cp_auth: str = Header(default=""),
+) -> dict:
+    """
+    Operator-only, read-only crash-boundary evidence.
+
+    Detects terminal task evidence with a still-pending worker stream message.
+    It must not acknowledge, reclaim, requeue, retry, repair, or assert
+    production readiness.
+    """
+    _require_operator(x_cp_auth)
+    kwargs = {"shard": shard}
+    if group:
+        kwargs["group"] = group
+    return await read_crash_boundary_evidence(
+        request.app.state.redis,
+        task_id,
+        **kwargs,
+    )
