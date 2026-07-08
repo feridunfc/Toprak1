@@ -42,6 +42,7 @@ IRONCLAD rules
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -59,6 +60,7 @@ from hfa_control.exceptions import (
 )
 from hfa_control.api.crash_boundary_evidence import read_crash_boundary_evidence
 from hfa_control.api.task_evidence import read_task_evidence
+from hfa_control.terminal_duplicate_operator_evidence import read_terminal_duplicate_operator_evidence
 from hfa_control.api.models import (
     WorkerResponse,
     ShardResponse,
@@ -764,3 +766,37 @@ async def task_crash_boundary_evidence(
         task_id,
         **kwargs,
     )
+
+
+# ===========================================================================
+# Sprint 70 - Read-only terminal duplicate operator evidence
+# ===========================================================================
+
+
+@router.get("/tasks/{task_id}/terminal-duplicate-operator-evidence")
+async def task_terminal_duplicate_operator_evidence(
+    task_id: str,
+    request: Request,
+    shard: int = 0,
+    group: str = "worker_consumers",
+    pending_limit: int = 100,
+    x_cp_auth: str = Header(default=""),
+) -> dict:
+    """
+    Operator-only, read-only terminal duplicate cleanup-candidate evidence.
+
+    Shows whether a pending terminal duplicate stream message is an explicit,
+    safe cleanup candidate according to the runtime ACK policy evidence.
+
+    This endpoint must not acknowledge, reclaim, requeue, retry, repair, or
+    assert production readiness.
+    """
+    _require_operator(x_cp_auth)
+    evidence = await read_terminal_duplicate_operator_evidence(
+        request.app.state.redis,
+        task_id=task_id,
+        stream_key=RedisKey.stream_shard(shard),
+        consumer_group=group,
+        pending_limit=pending_limit,
+    )
+    return asdict(evidence)
