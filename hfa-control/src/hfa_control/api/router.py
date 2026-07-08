@@ -47,6 +47,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 
 from hfa.config.keys import RedisKey
@@ -61,6 +62,9 @@ from hfa_control.exceptions import (
 from hfa_control.api.crash_boundary_evidence import read_crash_boundary_evidence
 from hfa_control.api.task_evidence import read_task_evidence
 from hfa_control.terminal_duplicate_operator_evidence import read_terminal_duplicate_operator_evidence
+from hfa_control.terminal_duplicate_cleanup_command import (
+    execute_terminal_duplicate_cleanup_command,
+)
 from hfa_control.api.models import (
     WorkerResponse,
     ShardResponse,
@@ -85,6 +89,16 @@ from hfa_control.api.models import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/control/v1", tags=["control-plane"])
+
+
+class TerminalDuplicateCleanupRequest(BaseModel):
+    shard: int = 0
+    group: str = "worker_consumers"
+    pending_message_id: str = ""
+    dry_run: bool = True
+    execute: bool = False
+    reason: str = ""
+    pending_limit: int = 100
 
 from hfa_control.auth import require_operator, require_tenant  # noqa: E402
 
@@ -800,3 +814,41 @@ async def task_terminal_duplicate_operator_evidence(
         pending_limit=pending_limit,
     )
     return asdict(evidence)
+
+
+# ===========================================================================
+# Sprint 71 - Safe terminal duplicate cleanup command boundary
+# ===========================================================================
+
+
+@router.post("/tasks/{task_id}/terminal-duplicate-cleanup")
+async def task_terminal_duplicate_cleanup(
+    task_id: str,
+    body: TerminalDuplicateCleanupRequest,
+    request: Request,
+    x_cp_auth: str = Header(default=""),
+) -> dict:
+    """
+    Operator-only terminal duplicate cleanup command boundary.
+
+    Default behavior is dry-run. Execution requires dry_run=false, execute=true,
+    a non-empty operator reason, and an explicit pending_message_id.
+
+    The endpoint is intentionally a thin adapter. It must not read PEL/XRANGE
+    directly, acknowledge directly, reclaim, requeue, retry, repair, mutate task
+    state, write persistent audit records, or assert production readiness.
+    """
+    _require_operator(x_cp_auth)
+    result = await execute_terminal_duplicate_cleanup_command(
+        request.app.state.redis,
+        task_id=task_id,
+        stream_key=RedisKey.stream_shard(body.shard),
+        consumer_group=body.group,
+        pending_message_id=body.pending_message_id,
+        dry_run=body.dry_run,
+        execute=body.execute,
+        reason=body.reason,
+        pending_limit=body.pending_limit,
+    )
+    return asdict(result)
+
