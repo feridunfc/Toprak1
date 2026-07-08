@@ -44,6 +44,44 @@ def _result() -> TerminalDuplicateCleanupCommandResult:
         operator_reason="operator_cleanup_terminal_duplicate_pending_message",
         operator_action_required_before=False,
         operator_action_required_after=False,
+        operator_summary="Cleanup executed: one pending terminal duplicate message was XACKed; ack_count=1.",
+        evidence_snapshot={
+            "reason": "EXPLICIT_TERMINAL_DUPLICATE_CLEANUP_CANDIDATE",
+            "status": "cleanup_candidate",
+            "ack_policy": "ack_explicit_task_run_terminal_evidence",
+            "ack_allowed": True,
+            "cleanup_candidate": True,
+            "message_identity_verified": True,
+            "terminal_evidence_verified": True,
+            "operator_action_required": False,
+            "production_ready_claim": False,
+        },
+        command_decision={
+            "dry_run": False,
+            "execute_requested": True,
+            "pending_message_id_required": True,
+            "pending_message_id_present": True,
+            "reason_required": True,
+            "reason_present": True,
+            "pel_reread_required": True,
+            "xrange_reread_required": True,
+            "single_xack_allowed": True,
+            "production_ready_claim": False,
+        },
+        command_safety={
+            "mutation_boundary": "xack_only",
+            "mutation_executed": True,
+            "xack_attempted": True,
+            "xclaim_attempted": False,
+            "xadd_attempted": False,
+            "state_write_attempted": False,
+            "meta_write_attempted": False,
+            "output_write_attempted": False,
+            "repair_attempted": False,
+            "requeue_attempted": False,
+            "persistent_audit_attempted": False,
+            "production_ready_claim": False,
+        },
         production_ready_claim=False,
     )
 
@@ -102,6 +140,12 @@ async def test_terminal_duplicate_cleanup_endpoint_is_thin_body_based_adapter(mo
     assert response["cleanup_executed"] is True
     assert response["ack_executed"] is True
     assert response["ack_count"] == 1
+    assert response["operator_summary"]
+    assert response["evidence_snapshot"]["cleanup_candidate"] is True
+    assert response["command_decision"]["single_xack_allowed"] is True
+    assert response["command_safety"]["mutation_boundary"] == "xack_only"
+    assert response["command_safety"]["persistent_audit_attempted"] is False
+    assert response["command_safety"]["production_ready_claim"] is False
     assert response["production_ready_claim"] is False
 
 

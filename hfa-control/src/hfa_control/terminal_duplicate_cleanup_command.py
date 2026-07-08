@@ -129,6 +129,11 @@ class TerminalDuplicateCleanupCommandResult:
     operator_action_required_before: bool
     operator_action_required_after: bool
 
+    operator_summary: str = ""
+    evidence_snapshot: Mapping[str, Any] = field(default_factory=dict)
+    command_decision: Mapping[str, Any] = field(default_factory=dict)
+    command_safety: Mapping[str, Any] = field(default_factory=dict)
+
     production_ready_claim: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -244,6 +249,115 @@ def _denied_status_for_evidence(evidence: TerminalDuplicateOperatorEvidence) -> 
     return DENIED_NOT_CLEANUP_CANDIDATE
 
 
+
+def _evidence_snapshot(evidence: TerminalDuplicateOperatorEvidence) -> dict[str, Any]:
+    return {
+        "reason": evidence.reason,
+        "status": evidence.evidence_status,
+        "ack_policy": evidence.ack_policy,
+        "ack_allowed": evidence.ack_allowed,
+        "cleanup_candidate": evidence.cleanup_candidate,
+        "message_identity_verified": evidence.message_identity_verified,
+        "terminal_evidence_verified": evidence.terminal_evidence_verified,
+        "operator_action_required": evidence.operator_action_required,
+        "production_ready_claim": False,
+    }
+
+
+def _command_decision_snapshot(
+    *,
+    command: TerminalDuplicateCleanupCommand,
+    evidence: TerminalDuplicateOperatorEvidence,
+    mutation_allowed: bool,
+    ack_executed: bool,
+) -> dict[str, Any]:
+    execute_path = bool(command.execute and not command.dry_run)
+    return {
+        "dry_run": command.dry_run,
+        "execute_requested": command.execute,
+        "pending_message_id_required": execute_path,
+        "pending_message_id_present": bool(command.pending_message_id),
+        "reason_required": execute_path,
+        "reason_present": bool(str(command.reason or "").strip()),
+        "pel_reread_required": execute_path and evidence.cleanup_candidate and evidence.ack_allowed,
+        "xrange_reread_required": execute_path and evidence.cleanup_candidate and evidence.ack_allowed,
+        "single_xack_allowed": bool(mutation_allowed or ack_executed),
+        "production_ready_claim": False,
+    }
+
+
+def _command_safety_snapshot(
+    *,
+    mutation_allowed: bool,
+    ack_executed: bool,
+) -> dict[str, Any]:
+    return {
+        "mutation_boundary": "xack_only",
+        "mutation_executed": bool(ack_executed),
+        "xack_attempted": bool(mutation_allowed),
+        "xclaim_attempted": False,
+        "xadd_attempted": False,
+        "state_write_attempted": False,
+        "meta_write_attempted": False,
+        "output_write_attempted": False,
+        "repair_attempted": False,
+        "requeue_attempted": False,
+        "persistent_audit_attempted": False,
+        "production_ready_claim": False,
+    }
+
+
+def _operator_summary_for_status(
+    *,
+    status: str,
+    evidence: TerminalDuplicateOperatorEvidence,
+    denial_reason: str,
+    ack_count: int,
+) -> str:
+    if status == DRY_RUN_CLEANUP_CANDIDATE:
+        return "Dry run only: terminal duplicate cleanup candidate found; no ACK executed."
+    if status == DRY_RUN_NOT_CANDIDATE:
+        return "Dry run only: terminal duplicate cleanup is not currently allowed."
+    if status == CLEANED:
+        return f"Cleanup executed: one pending terminal duplicate message was XACKed; ack_count={ack_count}."
+    if status == DENIED_EXECUTE_REASON_REQUIRED:
+        return "Denied: execute requires a non-empty operator reason."
+    if status == DENIED_PENDING_MESSAGE_ID_REQUIRED:
+        return "Denied: execute requires an explicit pending_message_id."
+    if status == DENIED_CONFLICTING_EXECUTION_FLAGS:
+        return "Denied: dry_run and execute cannot both be true."
+    if status == DENIED_EXECUTE_NOT_EXPLICIT:
+        return "Denied: cleanup execution was not explicitly requested."
+    if status == DENIED_FALLBACK_IDENTITY:
+        return "Denied: fallback identity is not safe to cleanup."
+    if status == DENIED_TASK_ID_MISMATCH:
+        return "Denied: message task_id does not match cleanup evidence."
+    if status == DENIED_RUN_ID_MISMATCH:
+        return "Denied: message run_id does not match cleanup evidence."
+    if status == DENIED_TASK_META_RUN_ID_MISSING:
+        return "Denied: task_meta.run_id evidence is missing."
+    if status == DENIED_TASK_META_RUN_ID_MISMATCH:
+        return "Denied: task_meta.run_id does not match cleanup evidence."
+    if status == DENIED_TASK_NOT_TERMINAL:
+        return "Denied: task is not terminal."
+    if status == DENIED_NO_PENDING_STREAM_MESSAGE:
+        return "Denied: pending message is no longer in the PEL."
+    if status == DENIED_AMBIGUOUS_PENDING_MESSAGES:
+        return "Denied: more than one matching pending message was found."
+    if status == DENIED_EVIDENCE_DEGRADED:
+        return "Denied: cleanup evidence is degraded and cannot authorize cleanup."
+    if status == ACK_NOT_APPLIED_PENDING_MISSING:
+        return "ACK not applied: pending message was not acknowledged, likely because it is no longer pending."
+    if status == ACK_FAILED:
+        return "ACK failed: Redis XACK raised an exception."
+    if denial_reason:
+        return f"Denied: {denial_reason}."
+    if evidence.reason:
+        return f"Denied: {evidence.reason}."
+    return f"Command completed with status {status}."
+
+
+
 def _base_result(
     *,
     command: TerminalDuplicateCleanupCommand,
@@ -293,6 +407,23 @@ def _base_result(
             evidence.operator_action_required
             if operator_action_required_after is None
             else operator_action_required_after
+        ),
+        operator_summary=_operator_summary_for_status(
+            status=status,
+            evidence=evidence,
+            denial_reason=denial_reason,
+            ack_count=ack_count,
+        ),
+        evidence_snapshot=_evidence_snapshot(evidence),
+        command_decision=_command_decision_snapshot(
+            command=command,
+            evidence=evidence,
+            mutation_allowed=mutation_allowed,
+            ack_executed=ack_executed,
+        ),
+        command_safety=_command_safety_snapshot(
+            mutation_allowed=mutation_allowed,
+            ack_executed=ack_executed,
         ),
         production_ready_claim=False,
         metadata=dict(metadata or {}),
