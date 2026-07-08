@@ -57,6 +57,9 @@ class Redis:
             return []
         return [(start, fields)]
 
+    async def xadd(self, stream, fields, maxlen=None, approximate=True):
+        return "audit-0"
+
     async def xack(self, stream, group, message_id):
         if self.ack_count:
             self.pending = [
@@ -108,7 +111,10 @@ def _assert_result_surface(result, *, expected_status: str) -> None:
     assert command_safety["output_write_attempted"] is False
     assert command_safety["repair_attempted"] is False
     assert command_safety["requeue_attempted"] is False
-    assert command_safety["persistent_audit_attempted"] is False
+    assert "persistent_audit_attempted" not in command_safety
+    assert command_safety["append_only_audit_attempted"] is True
+    assert command_safety["runtime_stream_audit_attempted"] is False
+    assert command_safety["mutable_audit_store_attempted"] is False
     assert command_safety["production_ready_claim"] is False
 
 

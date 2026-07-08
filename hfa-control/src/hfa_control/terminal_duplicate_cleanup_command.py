@@ -7,10 +7,13 @@ cleanup. It is deliberately narrow:
 
 Allowed mutation:
 - one XACK for one explicitly requested pending stream message
+- one or more dedicated append-only audit XADD calls through the audit module
 
 Forbidden:
 - XCLAIM
-- XADD
+- direct XADD from this command service
+- runtime stream audit
+- mutable audit store
 - SET/HSET/DEL
 - EXPIRE
 - requeue
@@ -19,7 +22,6 @@ Forbidden:
 - state transition
 - claim_start
 - task completion
-- persistent audit
 - production-ready claim
 
 This module does not own terminal duplicate ACK policy. It consumes Sprint 70
@@ -28,7 +30,7 @@ operator evidence and only adds command preconditions around a single XACK.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from hfa_control.terminal_duplicate_operator_evidence import (
@@ -42,6 +44,18 @@ from hfa_control.terminal_duplicate_operator_evidence import (
     NO_PENDING_STREAM_MESSAGE,
     TerminalDuplicateOperatorEvidence,
     read_terminal_duplicate_operator_evidence,
+)
+from hfa_control.terminal_duplicate_cleanup_audit import (
+    AUDIT_BEST_EFFORT_WRITE_FAILED,
+    AUDIT_INTENT_WRITE_FAILED,
+    AUDIT_NOT_ATTEMPTED,
+    AUDIT_OUTCOME_WRITE_FAILED,
+    AUDIT_PHASE_INTENT,
+    AUDIT_PHASE_OUTCOME,
+    TerminalDuplicateCleanupAuditAppendResult,
+    TerminalDuplicateCleanupAuditEvent,
+    append_terminal_duplicate_cleanup_audit_event,
+    new_cleanup_command_attempt_id,
 )
 
 
@@ -66,6 +80,9 @@ DENIED_NO_PENDING_STREAM_MESSAGE = "DENIED_NO_PENDING_STREAM_MESSAGE"
 DENIED_AMBIGUOUS_PENDING_MESSAGES = "DENIED_AMBIGUOUS_PENDING_MESSAGES"
 DENIED_EVIDENCE_DEGRADED = "DENIED_EVIDENCE_DEGRADED"
 
+DENIED_AUDIT_INTENT_WRITE_FAILED = "DENIED_AUDIT_INTENT_WRITE_FAILED"
+CLEANED_AUDIT_OUTCOME_WRITE_FAILED = "CLEANED_AUDIT_OUTCOME_WRITE_FAILED"
+
 ACK_NOT_APPLIED_PENDING_MISSING = "ACK_NOT_APPLIED_PENDING_MISSING"
 ACK_FAILED = "ACK_FAILED"
 
@@ -89,6 +106,7 @@ class TerminalDuplicateCleanupCommand:
     execute: bool = False
     reason: str = ""
     pending_limit: int = 100
+    command_attempt_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,6 +146,16 @@ class TerminalDuplicateCleanupCommandResult:
     operator_reason: str
     operator_action_required_before: bool
     operator_action_required_after: bool
+
+    command_attempt_id: str = ""
+    audit_enabled: bool = True
+    audit_required_for_execute: bool = False
+    audit_intent_written: bool = False
+    audit_intent_id: str = ""
+    audit_outcome_written: bool = False
+    audit_outcome_id: str = ""
+    audit_status: str = AUDIT_NOT_ATTEMPTED
+    audit_error: str = ""
 
     operator_summary: str = ""
     evidence_snapshot: Mapping[str, Any] = field(default_factory=dict)
@@ -282,6 +310,9 @@ def _command_decision_snapshot(
         "pel_reread_required": execute_path and evidence.cleanup_candidate and evidence.ack_allowed,
         "xrange_reread_required": execute_path and evidence.cleanup_candidate and evidence.ack_allowed,
         "single_xack_allowed": bool(mutation_allowed or ack_executed),
+        "audit_enabled": True,
+        "audit_intent_required_before_xack": execute_path,
+        "command_attempt_id": command.command_attempt_id,
         "production_ready_claim": False,
     }
 
@@ -290,11 +321,17 @@ def _command_safety_snapshot(
     *,
     mutation_allowed: bool,
     ack_executed: bool,
+    append_only_audit_attempted: bool = False,
 ) -> dict[str, Any]:
     return {
         "mutation_boundary": "xack_only",
+        "audit_boundary": "dedicated_append_only_stream",
         "mutation_executed": bool(ack_executed),
         "xack_attempted": bool(mutation_allowed),
+        "direct_xadd_attempted": False,
+        "append_only_audit_attempted": bool(append_only_audit_attempted),
+        "runtime_stream_audit_attempted": False,
+        "mutable_audit_store_attempted": False,
         "xclaim_attempted": False,
         "xadd_attempted": False,
         "state_write_attempted": False,
@@ -302,7 +339,6 @@ def _command_safety_snapshot(
         "output_write_attempted": False,
         "repair_attempted": False,
         "requeue_attempted": False,
-        "persistent_audit_attempted": False,
         "production_ready_claim": False,
     }
 
@@ -320,6 +356,10 @@ def _operator_summary_for_status(
         return "Dry run only: terminal duplicate cleanup is not currently allowed."
     if status == CLEANED:
         return f"Cleanup executed: one pending terminal duplicate message was XACKed; ack_count={ack_count}."
+    if status == CLEANED_AUDIT_OUTCOME_WRITE_FAILED:
+        return "Cleanup executed: one pending terminal duplicate message was XACKed, but audit outcome write failed."
+    if status == DENIED_AUDIT_INTENT_WRITE_FAILED:
+        return "Denied: audit intent could not be written, so unaudited cleanup was blocked."
     if status == DENIED_EXECUTE_REASON_REQUIRED:
         return "Denied: execute requires a non-empty operator reason."
     if status == DENIED_PENDING_MESSAGE_ID_REQUIRED:
@@ -370,7 +410,9 @@ def _base_result(
     mutation_allowed: bool = False,
     operator_action_required_after: bool | None = None,
     metadata: Mapping[str, Any] | None = None,
+    audit_required_for_execute: bool | None = None,
 ) -> TerminalDuplicateCleanupCommandResult:
+    execute_path = bool(command.execute and not command.dry_run)
     return TerminalDuplicateCleanupCommandResult(
         task_id=command.task_id,
         run_id=evidence.run_id,
@@ -408,6 +450,17 @@ def _base_result(
             if operator_action_required_after is None
             else operator_action_required_after
         ),
+        command_attempt_id=command.command_attempt_id,
+        audit_enabled=True,
+        audit_required_for_execute=(
+            execute_path if audit_required_for_execute is None else audit_required_for_execute
+        ),
+        audit_intent_written=False,
+        audit_intent_id="",
+        audit_outcome_written=False,
+        audit_outcome_id="",
+        audit_status=AUDIT_NOT_ATTEMPTED,
+        audit_error="",
         operator_summary=_operator_summary_for_status(
             status=status,
             evidence=evidence,
@@ -424,9 +477,110 @@ def _base_result(
         command_safety=_command_safety_snapshot(
             mutation_allowed=mutation_allowed,
             ack_executed=ack_executed,
+            append_only_audit_attempted=False,
         ),
         production_ready_claim=False,
         metadata=dict(metadata or {}),
+    )
+
+
+def _audit_event_from_result(
+    result: TerminalDuplicateCleanupCommandResult,
+    *,
+    event_phase: str,
+    audit_event_status: str | None = None,
+) -> TerminalDuplicateCleanupAuditEvent:
+    operator_reason = str(result.operator_reason or "").strip()
+    return TerminalDuplicateCleanupAuditEvent(
+        command_attempt_id=result.command_attempt_id,
+        event_phase=event_phase,
+        task_id=result.task_id,
+        run_id=result.run_id,
+        stream=result.stream,
+        group=result.group,
+        pending_message_id=result.pending_message_id,
+        dry_run=result.dry_run,
+        execute_requested=result.execute_requested,
+        status=audit_event_status or result.status,
+        operator_reason_present=bool(operator_reason),
+        operator_reason_length=len(operator_reason),
+        evidence_reason=result.evidence_reason,
+        evidence_status=result.evidence_status,
+        ack_policy=result.ack_policy,
+        ack_allowed=result.ack_allowed,
+        cleanup_candidate=result.cleanup_candidate,
+        cleanup_executed=result.cleanup_executed,
+        ack_executed=result.ack_executed,
+        ack_count=result.ack_count,
+        audit_status=result.audit_status,
+        metadata={
+            "mutation_type": result.mutation_type,
+            "denial_reason_present": bool(result.denial_reason),
+        },
+        production_ready_claim=False,
+    )
+
+
+def _with_audit_append_result(
+    result: TerminalDuplicateCleanupCommandResult,
+    append_result: TerminalDuplicateCleanupAuditAppendResult,
+    *,
+    event_phase: str,
+) -> TerminalDuplicateCleanupCommandResult:
+    safety = dict(result.command_safety)
+    safety["append_only_audit_attempted"] = True
+    safety["runtime_stream_audit_attempted"] = False
+    safety["mutable_audit_store_attempted"] = False
+    safety["audit_stream"] = append_result.audit_stream
+
+    updates: dict[str, Any] = {
+        "audit_status": append_result.audit_status,
+        "audit_error": append_result.audit_error,
+        "command_safety": safety,
+    }
+
+    if event_phase == AUDIT_PHASE_INTENT:
+        updates["audit_intent_written"] = append_result.written
+        updates["audit_intent_id"] = append_result.audit_id
+    elif event_phase == AUDIT_PHASE_OUTCOME:
+        updates["audit_outcome_written"] = append_result.written
+        updates["audit_outcome_id"] = append_result.audit_id
+
+    updated = replace(result, **updates)
+
+    if (
+        event_phase == AUDIT_PHASE_OUTCOME
+        and not append_result.written
+        and result.cleanup_executed
+        and result.ack_executed
+    ):
+        updated = replace(
+            updated,
+            status=CLEANED_AUDIT_OUTCOME_WRITE_FAILED,
+            operator_summary=(
+                "Cleanup executed: one pending terminal duplicate message was XACKed, "
+                "but audit outcome write failed."
+            ),
+        )
+
+    return updated
+
+
+async def _append_outcome_audit(
+    redis: Any,
+    result: TerminalDuplicateCleanupCommandResult,
+    *,
+    required_for_execute: bool = False,
+) -> TerminalDuplicateCleanupCommandResult:
+    append_result = await append_terminal_duplicate_cleanup_audit_event(
+        redis,
+        _audit_event_from_result(result, event_phase=AUDIT_PHASE_OUTCOME),
+        required_for_execute=required_for_execute,
+    )
+    return _with_audit_append_result(
+        result,
+        append_result,
+        event_phase=AUDIT_PHASE_OUTCOME,
     )
 
 
@@ -503,6 +657,7 @@ async def execute_terminal_duplicate_cleanup_command(
         execute=execute,
         reason=reason,
         pending_limit=pending_limit,
+        command_attempt_id=new_cleanup_command_attempt_id(),
     )
 
     evidence = await evidence_reader(
@@ -513,12 +668,25 @@ async def execute_terminal_duplicate_cleanup_command(
         pending_limit=pending_limit,
     )
 
+    async def finish(
+        result: TerminalDuplicateCleanupCommandResult,
+        *,
+        outcome_required_for_execute: bool = False,
+    ) -> TerminalDuplicateCleanupCommandResult:
+        return await _append_outcome_audit(
+            redis,
+            result,
+            required_for_execute=outcome_required_for_execute,
+        )
+
     if dry_run and execute:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=DENIED_CONFLICTING_EXECUTION_FLAGS,
-            denial_reason="dry_run_and_execute_cannot_both_be_true",
+        return await finish(
+            _base_result(
+                command=command,
+                evidence=evidence,
+                status=DENIED_CONFLICTING_EXECUTION_FLAGS,
+                denial_reason="dry_run_and_execute_cannot_both_be_true",
+            )
         )
 
     if dry_run:
@@ -527,30 +695,36 @@ async def execute_terminal_duplicate_cleanup_command(
             if evidence.cleanup_candidate and evidence.ack_allowed
             else DRY_RUN_NOT_CANDIDATE
         )
-        return _base_result(command=command, evidence=evidence, status=status)
+        return await finish(_base_result(command=command, evidence=evidence, status=status))
 
     if not execute:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=DENIED_EXECUTE_NOT_EXPLICIT,
-            denial_reason="execute_must_be_true_when_dry_run_is_false",
+        return await finish(
+            _base_result(
+                command=command,
+                evidence=evidence,
+                status=DENIED_EXECUTE_NOT_EXPLICIT,
+                denial_reason="execute_must_be_true_when_dry_run_is_false",
+            )
         )
 
     if not str(reason or "").strip():
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=DENIED_EXECUTE_REASON_REQUIRED,
-            denial_reason="operator_reason_required_for_execute",
+        return await finish(
+            _base_result(
+                command=command,
+                evidence=evidence,
+                status=DENIED_EXECUTE_REASON_REQUIRED,
+                denial_reason="operator_reason_required_for_execute",
+            )
         )
 
     if not pending_message_id:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=DENIED_PENDING_MESSAGE_ID_REQUIRED,
-            denial_reason="pending_message_id_required_for_execute",
+        return await finish(
+            _base_result(
+                command=command,
+                evidence=evidence,
+                status=DENIED_PENDING_MESSAGE_ID_REQUIRED,
+                denial_reason="pending_message_id_required_for_execute",
+            )
         )
 
     if not (
@@ -560,19 +734,62 @@ async def execute_terminal_duplicate_cleanup_command(
         and evidence.terminal_evidence_verified
     ):
         status = _denied_status_for_evidence(evidence)
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=status,
-            denial_reason=evidence.reason,
+        return await finish(
+            _base_result(
+                command=command,
+                evidence=evidence,
+                status=status,
+                denial_reason=evidence.reason,
+            )
         )
 
     if pending_message_id != evidence.pending_message_id:
-        return _base_result(
+        return await finish(
+            _base_result(
+                command=command,
+                evidence=evidence,
+                status=DENIED_NOT_CLEANUP_CANDIDATE,
+                denial_reason="pending_message_id_does_not_match_evidence",
+            )
+        )
+
+    pending_execution_result = _base_result(
+        command=command,
+        evidence=evidence,
+        status="PENDING_EXECUTION",
+        audit_required_for_execute=True,
+    )
+    intent_append = await append_terminal_duplicate_cleanup_audit_event(
+        redis,
+        _audit_event_from_result(
+            pending_execution_result,
+            event_phase=AUDIT_PHASE_INTENT,
+            audit_event_status="PENDING_EXECUTION",
+        ),
+        required_for_execute=True,
+    )
+
+    if not intent_append.written:
+        denied = _base_result(
             command=command,
             evidence=evidence,
-            status=DENIED_NOT_CLEANUP_CANDIDATE,
-            denial_reason="pending_message_id_does_not_match_evidence",
+            status=DENIED_AUDIT_INTENT_WRITE_FAILED,
+            denial_reason=intent_append.audit_error,
+            audit_required_for_execute=True,
+        )
+        return _with_audit_append_result(
+            denied,
+            intent_append,
+            event_phase=AUDIT_PHASE_INTENT,
+        )
+
+    def with_intent(
+        result: TerminalDuplicateCleanupCommandResult,
+    ) -> TerminalDuplicateCleanupCommandResult:
+        return _with_audit_append_result(
+            result,
+            intent_append,
+            event_phase=AUDIT_PHASE_INTENT,
         )
 
     pending_ids = await _read_pending_ids(
@@ -582,11 +799,16 @@ async def execute_terminal_duplicate_cleanup_command(
         pending_limit=pending_limit,
     )
     if pending_message_id not in pending_ids:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=DENIED_NO_PENDING_STREAM_MESSAGE,
-            denial_reason="pending_message_id_not_in_pel",
+        return await finish(
+            with_intent(
+                _base_result(
+                    command=command,
+                    evidence=evidence,
+                    status=DENIED_NO_PENDING_STREAM_MESSAGE,
+                    denial_reason="pending_message_id_not_in_pel",
+                    audit_required_for_execute=True,
+                )
+            )
         )
 
     fields = await _read_message_fields(
@@ -600,12 +822,17 @@ async def execute_terminal_duplicate_cleanup_command(
         evidence=evidence,
     )
     if not matches:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=mismatch_status,
-            denial_reason="message_body_no_longer_matches_evidence",
-            metadata={"message_fields": dict(fields)},
+        return await finish(
+            with_intent(
+                _base_result(
+                    command=command,
+                    evidence=evidence,
+                    status=mismatch_status,
+                    denial_reason="message_body_no_longer_matches_evidence",
+                    metadata={"message_fields": dict(fields)},
+                    audit_required_for_execute=True,
+                )
+            )
         )
 
     matching_count = await _matching_pending_count(
@@ -614,44 +841,65 @@ async def execute_terminal_duplicate_cleanup_command(
         evidence=evidence,
     )
     if matching_count != 1:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=DENIED_AMBIGUOUS_PENDING_MESSAGES,
-            denial_reason="expected_exactly_one_matching_pending_message",
-            metadata={"matching_pending_messages": matching_count},
+        return await finish(
+            with_intent(
+                _base_result(
+                    command=command,
+                    evidence=evidence,
+                    status=DENIED_AMBIGUOUS_PENDING_MESSAGES,
+                    denial_reason="expected_exactly_one_matching_pending_message",
+                    metadata={"matching_pending_messages": matching_count},
+                    audit_required_for_execute=True,
+                )
+            )
         )
 
     try:
         ack_count_raw = await redis.xack(stream_key, consumer_group, pending_message_id)
         ack_count = int(ack_count_raw or 0)
     except Exception as exc:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=ACK_FAILED,
-            denial_reason=f"{type(exc).__name__}: {exc}",
-            mutation_allowed=True,
-            metadata={"ack_error": str(exc)},
+        return await finish(
+            with_intent(
+                _base_result(
+                    command=command,
+                    evidence=evidence,
+                    status=ACK_FAILED,
+                    denial_reason=f"{type(exc).__name__}: {exc}",
+                    mutation_allowed=True,
+                    metadata={"ack_error": str(exc)},
+                    audit_required_for_execute=True,
+                )
+            )
         )
 
     if ack_count <= 0:
-        return _base_result(
-            command=command,
-            evidence=evidence,
-            status=ACK_NOT_APPLIED_PENDING_MISSING,
-            denial_reason="xack_returned_zero",
-            ack_count=0,
-            mutation_allowed=True,
+        return await finish(
+            with_intent(
+                _base_result(
+                    command=command,
+                    evidence=evidence,
+                    status=ACK_NOT_APPLIED_PENDING_MISSING,
+                    denial_reason="xack_returned_zero",
+                    ack_count=0,
+                    mutation_allowed=True,
+                    audit_required_for_execute=True,
+                )
+            )
         )
 
-    return _base_result(
-        command=command,
-        evidence=evidence,
-        status=CLEANED,
-        cleanup_executed=True,
-        ack_executed=True,
-        ack_count=ack_count,
-        mutation_allowed=True,
-        operator_action_required_after=False,
+    return await finish(
+        with_intent(
+            _base_result(
+                command=command,
+                evidence=evidence,
+                status=CLEANED,
+                cleanup_executed=True,
+                ack_executed=True,
+                ack_count=ack_count,
+                mutation_allowed=True,
+                operator_action_required_after=False,
+                audit_required_for_execute=True,
+            )
+        ),
+        outcome_required_for_execute=True,
     )

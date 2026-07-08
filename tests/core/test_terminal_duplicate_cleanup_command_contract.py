@@ -94,6 +94,9 @@ class Redis:
             return []
         return [(start, fields)]
 
+    async def xadd(self, stream, fields, maxlen=None, approximate=True):
+        return "audit-0"
+
     async def xack(self, stream, group, message_id):
         self.calls.append(("xack", stream, group, message_id))
         if self.ack_count:
