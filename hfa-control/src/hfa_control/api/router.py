@@ -65,6 +65,9 @@ from hfa_control.terminal_duplicate_operator_evidence import read_terminal_dupli
 from hfa_control.terminal_duplicate_cleanup_command import (
     execute_terminal_duplicate_cleanup_command,
 )
+from hfa_control.terminal_duplicate_cleanup_audit_read_model import (
+    read_terminal_duplicate_cleanup_audit,
+)
 from hfa_control.api.models import (
     WorkerResponse,
     ShardResponse,
@@ -849,6 +852,42 @@ async def task_terminal_duplicate_cleanup(
         execute=body.execute,
         reason=body.reason,
         pending_limit=body.pending_limit,
+    )
+    return asdict(result)
+
+
+# ===========================================================================
+# Sprint 74 - Read-only terminal duplicate cleanup audit timeline
+# ===========================================================================
+
+
+@router.get("/tasks/{task_id}/terminal-duplicate-cleanup-audit")
+async def task_terminal_duplicate_cleanup_audit(
+    task_id: str,
+    request: Request,
+    limit: int = 100,
+    scan_limit: int = 500,
+    include_entries: bool = True,
+    x_cp_auth: str = Header(default=""),
+) -> dict:
+    """
+    Operator-only, read-only terminal duplicate cleanup audit surface.
+
+    Returns a task-centered audit timeline from the dedicated cleanup audit
+    stream. The endpoint is intentionally a thin adapter: it delegates reading,
+    normalization, bounds, safety flags, and sanitization to the read model.
+
+    It must not execute cleanup, acknowledge messages, reclaim, requeue, retry,
+    repair, mutate task state, emit dashboard actions, or assert production
+    readiness.
+    """
+    _require_operator(x_cp_auth)
+    result = await read_terminal_duplicate_cleanup_audit(
+        request.app.state.redis,
+        task_id=task_id,
+        limit=limit,
+        scan_limit=scan_limit,
+        include_entries=include_entries,
     )
     return asdict(result)
 
