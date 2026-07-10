@@ -172,6 +172,7 @@ def deserialize_run_requested(data: Dict[bytes, bytes]) -> Any:
     from hfa.events.schema import RunRequestedEvent
 
     return RunRequestedEvent(
+        task_id=safe_decode_str(data, "task_id"),
         run_id=safe_decode_str(data, "run_id"),
         tenant_id=safe_decode_str(data, "tenant_id"),
         agent_type=safe_decode_str(data, "agent_type"),

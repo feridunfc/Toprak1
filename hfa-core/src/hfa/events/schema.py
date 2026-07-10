@@ -47,6 +47,7 @@ class HFAEvent:
 @dataclass
 class RunRequestedEvent(HFAEvent):
     event_type: str = "RunRequested"
+    task_id: str = ""
     run_id: str = ""
     tenant_id: str = ""
     agent_type: str = ""

@@ -25,6 +25,10 @@ async def test_staging_runtime_scenario_writes_pass_artifact(redis_client, tmp_p
     assert artifact["status"] == "PASS"
     assert artifact["reason"] == "scenario_completed"
 
+    assert artifact["task"]["task_id"] == "staging-runtime-scenario-task"
+    assert artifact["task"]["run_id"] == "staging-runtime-scenario-run"
+    assert artifact["task"]["task_id"] != artifact["task"]["run_id"]
+
     assert artifact["environment"]["redis_available"] is True
     assert artifact["environment"]["lua_available"] is True
     assert artifact["environment"]["bridge_flag_enabled"] is True
@@ -43,12 +47,17 @@ async def test_staging_runtime_scenario_writes_pass_artifact(redis_client, tmp_p
 
     evidence = artifact["evidence"]
     assert evidence["found"] is True
+    assert evidence["task_id"] == artifact["task"]["task_id"]
+    assert evidence["run_id"] == artifact["task"]["run_id"]
+    assert evidence["task_id"] != evidence["run_id"]
     assert evidence["state"] == "done"
     assert evidence["terminal_state"] == "done"
     assert evidence["worker_instance_id"] == artifact["task"]["worker_id"]
     assert evidence["scheduler_epoch"] == artifact["task"]["scheduler_epoch"]
     assert evidence["claim_epoch"] == "1"
     assert evidence["output_found"] is True
+    assert evidence["output"]["task_id"] == artifact["task"]["task_id"]
+    assert evidence["output"]["run_id"] == artifact["task"]["run_id"]
 
     assert artifact["safety"]["read_only_evidence_fetch"] is True
     assert artifact["safety"]["redis_mutation_attempted_by_evidence_reader"] is False
