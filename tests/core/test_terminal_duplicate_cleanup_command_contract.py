@@ -17,6 +17,8 @@ from hfa_control.terminal_duplicate_cleanup_command import (
 )
 from hfa_control.terminal_duplicate_operator_evidence import (
     EXPLICIT_TERMINAL_DUPLICATE_CLEANUP_CANDIDATE,
+    IDENTITY_EXPLICIT_TASK_RUN,
+    IDENTITY_MISSING_TASK_ID,
     NO_ACK_WITHOUT_EXPLICIT_TASK_IDENTITY,
     TerminalDuplicateOperatorEvidence,
 )
@@ -43,13 +45,17 @@ def _evidence_candidate() -> TerminalDuplicateOperatorEvidence:
         operator_action_required=False,
         reason=EXPLICIT_TERMINAL_DUPLICATE_CLEANUP_CANDIDATE,
         evidence_status="cleanup_candidate",
+        identity_status=IDENTITY_EXPLICIT_TASK_RUN,
+        identity_reason="explicit_task_id_and_run_id_match",
+        canonical_identity_confirmed=True,
+        fallback_identity_detected=False,
         read_only=True,
         mutation_allowed=False,
         production_ready_claim=False,
     )
 
 
-def _evidence_fallback() -> TerminalDuplicateOperatorEvidence:
+def _evidence_missing_task_id() -> TerminalDuplicateOperatorEvidence:
     return TerminalDuplicateOperatorEvidence(
         task_id="task-1",
         run_id="run-1",
@@ -70,6 +76,10 @@ def _evidence_fallback() -> TerminalDuplicateOperatorEvidence:
         operator_action_required=True,
         reason=NO_ACK_WITHOUT_EXPLICIT_TASK_IDENTITY,
         evidence_status="operator_attention_required",
+        identity_status=IDENTITY_MISSING_TASK_ID,
+        identity_reason="message_task_id_missing",
+        canonical_identity_confirmed=False,
+        fallback_identity_detected=False,
         read_only=True,
         mutation_allowed=False,
         production_ready_claim=False,
@@ -110,8 +120,8 @@ async def _candidate_reader(redis, **kwargs):
     return _evidence_candidate()
 
 
-async def _fallback_reader(redis, **kwargs):
-    return _evidence_fallback()
+async def _missing_task_id_reader(redis, **kwargs):
+    return _evidence_missing_task_id()
 
 
 @pytest.mark.asyncio
@@ -131,6 +141,10 @@ async def test_dry_run_candidate_does_not_ack():
     assert result.status == DRY_RUN_CLEANUP_CANDIDATE
     assert result.cleanup_candidate is True
     assert result.ack_allowed is True
+    assert result.identity_status == IDENTITY_EXPLICIT_TASK_RUN
+    assert result.canonical_identity_confirmed is True
+    assert result.fallback_identity_detected is False
+    assert result.evidence_snapshot["identity_status"] == IDENTITY_EXPLICIT_TASK_RUN
     assert result.cleanup_executed is False
     assert result.ack_executed is False
     assert result.ack_count == 0
@@ -149,12 +163,16 @@ async def test_dry_run_not_candidate_does_not_ack():
         consumer_group="group",
         dry_run=True,
         execute=False,
-        evidence_reader=_fallback_reader,
+        evidence_reader=_missing_task_id_reader,
     )
 
     assert result.status == DRY_RUN_NOT_CANDIDATE
     assert result.cleanup_candidate is False
     assert result.ack_allowed is False
+    assert result.identity_status == IDENTITY_MISSING_TASK_ID
+    assert result.canonical_identity_confirmed is False
+    assert result.fallback_identity_detected is False
+    assert result.evidence_snapshot["identity_status"] == IDENTITY_MISSING_TASK_ID
     assert result.cleanup_executed is False
     assert result.ack_executed is False
     assert [call[0] for call in redis.calls] == []
@@ -246,7 +264,7 @@ async def test_execute_requires_pending_message_id():
 
 
 @pytest.mark.asyncio
-async def test_fallback_identity_is_denied_before_xack():
+async def test_missing_task_id_is_denied_before_xack():
     redis = Redis()
 
     result = await execute_terminal_duplicate_cleanup_command(
@@ -258,10 +276,14 @@ async def test_fallback_identity_is_denied_before_xack():
         execute=True,
         pending_message_id="1-0",
         reason="operator_cleanup",
-        evidence_reader=_fallback_reader,
+        evidence_reader=_missing_task_id_reader,
     )
 
     assert result.status == DENIED_FALLBACK_IDENTITY
+    assert result.identity_status == IDENTITY_MISSING_TASK_ID
+    assert result.canonical_identity_confirmed is False
+    assert result.fallback_identity_detected is False
+    assert result.evidence_snapshot["identity_status"] == IDENTITY_MISSING_TASK_ID
     assert result.cleanup_executed is False
     assert result.ack_executed is False
     assert [call[0] for call in redis.calls] == []
@@ -289,6 +311,10 @@ async def test_explicit_candidate_executes_single_xack_only():
     assert result.ack_count == 1
     assert result.mutation_allowed is True
     assert result.mutation_type == MUTATION_TYPE_XACK_TERMINAL_DUPLICATE_CLEANUP
+    assert result.identity_status == IDENTITY_EXPLICIT_TASK_RUN
+    assert result.canonical_identity_confirmed is True
+    assert result.fallback_identity_detected is False
+    assert result.evidence_snapshot["identity_status"] == IDENTITY_EXPLICIT_TASK_RUN
     assert result.production_ready_claim is False
 
     assert [call[0] for call in redis.calls] == [

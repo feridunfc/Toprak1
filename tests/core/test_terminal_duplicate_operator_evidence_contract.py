@@ -10,6 +10,11 @@ from hfa_control.terminal_duplicate_operator_evidence import (
     ACK_POLICY_NOT_TERMINAL,
     EVIDENCE_READ_DEGRADED,
     EXPLICIT_TERMINAL_DUPLICATE_CLEANUP_CANDIDATE,
+    IDENTITY_EXPLICIT_TASK_RUN,
+    IDENTITY_MISSING_RUN_ID,
+    IDENTITY_MISSING_TASK_ID,
+    IDENTITY_TASK_RUN_MISMATCH,
+    IDENTITY_UNKNOWN,
     NO_ACK_RUN_ID_MISMATCH,
     NO_ACK_TASK_ID_MISMATCH,
     NO_ACK_TASK_META_RUN_ID_MISSING,
@@ -23,7 +28,7 @@ from hfa_control.terminal_duplicate_operator_evidence import (
 )
 
 
-def test_fallback_identity_requires_operator_attention_and_no_cleanup_candidate():
+def test_missing_task_id_requires_operator_attention_and_no_cleanup_candidate():
     evidence = evaluate_terminal_duplicate_operator_evidence(
         task_id="task-1",
         task_state="done",
@@ -41,6 +46,10 @@ def test_fallback_identity_requires_operator_attention_and_no_cleanup_candidate(
     assert evidence.cleanup_candidate is False
     assert evidence.operator_action_required is True
     assert evidence.reason == NO_ACK_WITHOUT_EXPLICIT_TASK_IDENTITY
+    assert evidence.identity_status == IDENTITY_MISSING_TASK_ID
+    assert evidence.identity_reason == "message_task_id_missing"
+    assert evidence.canonical_identity_confirmed is False
+    assert evidence.fallback_identity_detected is False
     assert evidence.read_only is True
     assert evidence.mutation_allowed is False
     assert evidence.production_ready_claim is False
@@ -69,6 +78,10 @@ def test_explicit_identity_and_terminal_evidence_is_cleanup_candidate():
     assert evidence.message_identity_verified is True
     assert evidence.terminal_evidence_verified is True
     assert evidence.evidence_status == "cleanup_candidate"
+    assert evidence.identity_status == IDENTITY_EXPLICIT_TASK_RUN
+    assert evidence.identity_reason == "explicit_task_id_and_run_id_match"
+    assert evidence.canonical_identity_confirmed is True
+    assert evidence.fallback_identity_detected is False
     assert evidence.mutation_allowed is False
 
 
@@ -88,6 +101,10 @@ def test_task_id_mismatch_is_visible_and_blocks_ack():
     assert evidence.cleanup_candidate is False
     assert evidence.operator_action_required is True
     assert evidence.reason == NO_ACK_TASK_ID_MISMATCH
+    assert evidence.identity_status == IDENTITY_TASK_RUN_MISMATCH
+    assert evidence.identity_reason == "message_task_id_mismatch"
+    assert evidence.canonical_identity_confirmed is False
+    assert evidence.fallback_identity_detected is False
     assert evidence.message_task_id == "other-task"
 
 
@@ -108,6 +125,10 @@ def test_run_id_mismatch_is_visible_and_blocks_ack():
     assert evidence.cleanup_candidate is False
     assert evidence.operator_action_required is True
     assert evidence.reason == NO_ACK_TASK_META_RUN_ID_MISMATCH
+    assert evidence.identity_status == IDENTITY_TASK_RUN_MISMATCH
+    assert evidence.identity_reason == "message_run_id_mismatch"
+    assert evidence.canonical_identity_confirmed is False
+    assert evidence.fallback_identity_detected is False
     assert evidence.message_run_id == "other-run"
 
 
@@ -128,6 +149,10 @@ def test_missing_message_run_id_blocks_ack():
     assert evidence.cleanup_candidate is False
     assert evidence.operator_action_required is True
     assert evidence.reason == NO_ACK_RUN_ID_MISMATCH
+    assert evidence.identity_status == IDENTITY_MISSING_RUN_ID
+    assert evidence.identity_reason == "message_run_id_missing"
+    assert evidence.canonical_identity_confirmed is False
+    assert evidence.fallback_identity_detected is False
 
 
 def test_task_meta_run_id_missing_blocks_ack():
@@ -147,6 +172,10 @@ def test_task_meta_run_id_missing_blocks_ack():
     assert evidence.cleanup_candidate is False
     assert evidence.operator_action_required is True
     assert evidence.reason == NO_ACK_TASK_META_RUN_ID_MISSING
+    assert evidence.identity_status == IDENTITY_MISSING_RUN_ID
+    assert evidence.identity_reason == "task_meta_run_id_missing"
+    assert evidence.canonical_identity_confirmed is False
+    assert evidence.fallback_identity_detected is False
 
 
 def test_non_terminal_task_blocks_ack():
@@ -184,6 +213,10 @@ def test_no_pending_stream_message_is_not_cleanup_candidate():
     assert evidence.operator_action_required is False
     assert evidence.reason == NO_PENDING_STREAM_MESSAGE
     assert evidence.evidence_status == "no_pending_message"
+    assert evidence.identity_status == IDENTITY_UNKNOWN
+    assert evidence.identity_reason == "no_pending_stream_message"
+    assert evidence.canonical_identity_confirmed is False
+    assert evidence.fallback_identity_detected is False
 
 
 @pytest.mark.asyncio
@@ -218,6 +251,9 @@ async def test_read_model_collects_matching_pending_message_without_mutation():
     )
 
     assert evidence.reason == EXPLICIT_TERMINAL_DUPLICATE_CLEANUP_CANDIDATE
+    assert evidence.identity_status == IDENTITY_EXPLICIT_TASK_RUN
+    assert evidence.canonical_identity_confirmed is True
+    assert evidence.fallback_identity_detected is False
     assert evidence.ack_allowed is True
     assert evidence.cleanup_candidate is True
     assert evidence.metadata["pending_message_consumer"] == "worker-1"
@@ -246,6 +282,10 @@ async def test_read_model_fails_closed_as_degraded():
     assert evidence.operator_action_required is True
     assert evidence.reason == EVIDENCE_READ_DEGRADED
     assert evidence.evidence_status == "degraded"
+    assert evidence.identity_status == IDENTITY_UNKNOWN
+    assert evidence.identity_reason == "evidence_read_degraded"
+    assert evidence.canonical_identity_confirmed is False
+    assert evidence.fallback_identity_detected is False
     assert evidence.read_only is True
     assert evidence.mutation_allowed is False
     assert evidence.production_ready_claim is False
