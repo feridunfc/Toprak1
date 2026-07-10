@@ -157,6 +157,11 @@ class TerminalDuplicateCleanupCommandResult:
     audit_status: str = AUDIT_NOT_ATTEMPTED
     audit_error: str = ""
 
+    identity_status: str = "IDENTITY_UNKNOWN"
+    identity_reason: str = "identity_status_not_reported_by_evidence"
+    canonical_identity_confirmed: bool = False
+    fallback_identity_detected: bool = False
+
     operator_summary: str = ""
     evidence_snapshot: Mapping[str, Any] = field(default_factory=dict)
     command_decision: Mapping[str, Any] = field(default_factory=dict)
@@ -278,6 +283,22 @@ def _denied_status_for_evidence(evidence: TerminalDuplicateOperatorEvidence) -> 
 
 
 
+def _identity_status(evidence: TerminalDuplicateOperatorEvidence) -> str:
+    return str(getattr(evidence, "identity_status", "") or "IDENTITY_UNKNOWN")
+
+
+def _identity_reason(evidence: TerminalDuplicateOperatorEvidence) -> str:
+    return str(getattr(evidence, "identity_reason", "") or "identity_status_not_reported_by_evidence")
+
+
+def _canonical_identity_confirmed(evidence: TerminalDuplicateOperatorEvidence) -> bool:
+    return bool(getattr(evidence, "canonical_identity_confirmed", False))
+
+
+def _fallback_identity_detected(evidence: TerminalDuplicateOperatorEvidence) -> bool:
+    return bool(getattr(evidence, "fallback_identity_detected", False))
+
+
 def _evidence_snapshot(evidence: TerminalDuplicateOperatorEvidence) -> dict[str, Any]:
     return {
         "reason": evidence.reason,
@@ -287,6 +308,10 @@ def _evidence_snapshot(evidence: TerminalDuplicateOperatorEvidence) -> dict[str,
         "cleanup_candidate": evidence.cleanup_candidate,
         "message_identity_verified": evidence.message_identity_verified,
         "terminal_evidence_verified": evidence.terminal_evidence_verified,
+        "identity_status": _identity_status(evidence),
+        "identity_reason": _identity_reason(evidence),
+        "canonical_identity_confirmed": _canonical_identity_confirmed(evidence),
+        "fallback_identity_detected": _fallback_identity_detected(evidence),
         "operator_action_required": evidence.operator_action_required,
         "production_ready_claim": False,
     }
@@ -429,6 +454,10 @@ def _base_result(
         ack_policy=evidence.ack_policy,
         ack_allowed=evidence.ack_allowed,
         cleanup_candidate=evidence.cleanup_candidate,
+        identity_status=_identity_status(evidence),
+        identity_reason=_identity_reason(evidence),
+        canonical_identity_confirmed=_canonical_identity_confirmed(evidence),
+        fallback_identity_detected=_fallback_identity_detected(evidence),
         dry_run=command.dry_run,
         execute_requested=command.execute,
         cleanup_executed=cleanup_executed,

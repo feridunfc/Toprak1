@@ -68,6 +68,13 @@ ACK_POLICY_ACK_EXPLICIT_TASK_RUN_TERMINAL_EVIDENCE = (
     "ack_explicit_task_run_terminal_evidence"
 )
 
+IDENTITY_EXPLICIT_TASK_RUN = "IDENTITY_EXPLICIT_TASK_RUN"
+IDENTITY_FALLBACK_RUN_ONLY = "IDENTITY_FALLBACK_RUN_ONLY"
+IDENTITY_MISSING_TASK_ID = "IDENTITY_MISSING_TASK_ID"
+IDENTITY_MISSING_RUN_ID = "IDENTITY_MISSING_RUN_ID"
+IDENTITY_TASK_RUN_MISMATCH = "IDENTITY_TASK_RUN_MISMATCH"
+IDENTITY_UNKNOWN = "IDENTITY_UNKNOWN"
+
 
 @dataclass(frozen=True)
 class PendingTerminalDuplicateMessageEvidence:
@@ -106,6 +113,11 @@ class TerminalDuplicateOperatorEvidence:
     operator_action_required: bool
     reason: str
     evidence_status: str
+
+    identity_status: str = IDENTITY_UNKNOWN
+    identity_reason: str = ""
+    canonical_identity_confirmed: bool = False
+    fallback_identity_detected: bool = False
 
     read_only: bool = True
     mutation_allowed: bool = False
@@ -236,6 +248,48 @@ async def _read_message_fields(
     return {}
 
 
+def _identity_status_for_evidence(
+    *,
+    task_id: str,
+    task_meta_run_id: str,
+    message_task_id: str,
+    message_run_id: str,
+    stream_pending: bool,
+) -> tuple[str, str, bool, bool]:
+    if not stream_pending:
+        return IDENTITY_UNKNOWN, "no_pending_stream_message", False, False
+
+    if (
+        not message_task_id
+        and bool(message_run_id)
+        and message_run_id == task_id
+        and not task_meta_run_id
+    ):
+        return (
+            IDENTITY_FALLBACK_RUN_ONLY,
+            "message_run_id_matches_task_id_without_explicit_task_id",
+            False,
+            True,
+        )
+
+    if not message_task_id:
+        return IDENTITY_MISSING_TASK_ID, "message_task_id_missing", False, False
+
+    if message_task_id != task_id:
+        return IDENTITY_TASK_RUN_MISMATCH, "message_task_id_mismatch", False, False
+
+    if not message_run_id:
+        return IDENTITY_MISSING_RUN_ID, "message_run_id_missing", False, False
+
+    if not task_meta_run_id:
+        return IDENTITY_MISSING_RUN_ID, "task_meta_run_id_missing", False, False
+
+    if message_run_id != task_meta_run_id:
+        return IDENTITY_TASK_RUN_MISMATCH, "message_run_id_mismatch", False, False
+
+    return IDENTITY_EXPLICIT_TASK_RUN, "explicit_task_id_and_run_id_match", True, False
+
+
 def _matches_task_or_run(
     *,
     fields: Mapping[str, str],
@@ -316,6 +370,19 @@ def evaluate_terminal_duplicate_operator_evidence(
     )
     terminal_evidence_verified = terminal and bool(task_meta_run_id)
 
+    (
+        identity_status,
+        identity_reason,
+        canonical_identity_confirmed,
+        fallback_identity_detected,
+    ) = _identity_status_for_evidence(
+        task_id=task_id,
+        task_meta_run_id=task_meta_run_id,
+        message_task_id=message_task_id,
+        message_run_id=message_run_id,
+        stream_pending=stream_pending,
+    )
+
     if not stream_pending:
         reason = NO_PENDING_STREAM_MESSAGE
         ack_allowed = False
@@ -393,6 +460,10 @@ def evaluate_terminal_duplicate_operator_evidence(
         operator_action_required=operator_action_required,
         reason=reason,
         evidence_status=evidence_status,
+        identity_status=identity_status,
+        identity_reason=identity_reason,
+        canonical_identity_confirmed=canonical_identity_confirmed,
+        fallback_identity_detected=fallback_identity_detected,
         read_only=True,
         mutation_allowed=False,
         production_ready_claim=False,
@@ -460,6 +531,10 @@ async def read_terminal_duplicate_operator_evidence(
             operator_action_required=True,
             reason=EVIDENCE_READ_DEGRADED,
             evidence_status="degraded",
+            identity_status=IDENTITY_UNKNOWN,
+            identity_reason="evidence_read_degraded",
+            canonical_identity_confirmed=False,
+            fallback_identity_detected=False,
             read_only=True,
             mutation_allowed=False,
             production_ready_claim=False,
