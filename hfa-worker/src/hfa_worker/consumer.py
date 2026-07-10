@@ -22,6 +22,7 @@ import time
 from typing import Any, Optional, Set
 
 from hfa.config.keys import RedisKey
+from hfa.dag.schema import DagRedisKey
 from hfa.events.codec import deserialize_run_requested, serialize_event
 from hfa.events.schema import RunCompletedEvent, RunFailedEvent
 from hfa.runtime.state_store import StateStore
@@ -54,6 +55,62 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = "worker_consumers"
+
+
+def _identity_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _identity_mapping_value(mapping: object, key: str) -> str:
+    if not isinstance(mapping, dict):
+        return ""
+    return _identity_text(
+        mapping.get(key)
+        or mapping.get(key.encode("utf-8"))
+        or ""
+    )
+
+
+async def _verify_run_requested_task_identity(
+    redis: object,
+    event: object,
+) -> tuple[bool, str, str]:
+    """Verify explicit message identity against authoritative task metadata."""
+
+    message_task_id = _identity_text(getattr(event, "task_id", ""))
+    message_run_id = _identity_text(getattr(event, "run_id", ""))
+
+    if not message_task_id:
+        return False, "message_task_id_missing", ""
+
+    if not message_run_id:
+        return False, "message_run_id_missing", ""
+
+    hgetall = getattr(redis, "hgetall", None)
+    if not callable(hgetall):
+        return False, "authoritative_identity_unavailable", ""
+
+    raw_meta = await hgetall(DagRedisKey.task_meta(message_task_id))
+    authoritative_run_id = _identity_mapping_value(
+        raw_meta,
+        "run_id",
+    )
+
+    if not authoritative_run_id:
+        return False, "authoritative_run_id_missing", ""
+
+    if message_run_id != authoritative_run_id:
+        return (
+            False,
+            "message_run_id_authoritative_mismatch",
+            authoritative_run_id,
+        )
+
+    return True, "explicit_task_and_run_identity_verified", authoritative_run_id
 
 LEGACY_STREAM_CLAIM_COMPATIBILITY_BOUNDARY = (
     "WorkerConsumer uses IdempotencyGuard.try_claim_and_mark_running / "
@@ -331,6 +388,26 @@ class WorkerConsumer:
             )
             if duplicate_delivery.ack_allowed:
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+            return
+
+        (
+            canonical_identity_confirmed,
+            identity_reason,
+            authoritative_run_id,
+        ) = await _verify_run_requested_task_identity(
+            self._redis,
+            event,
+        )
+
+        if not canonical_identity_confirmed:
+            logger.warning(
+                "TaskConsumer bridge blocked non-canonical identity "
+                "task=%s run=%s authoritative_run=%s reason=%s",
+                getattr(event, "task_id", ""),
+                getattr(event, "run_id", ""),
+                authoritative_run_id,
+                identity_reason,
+            )
             return
 
         consumed = await self._task_consumer.consume_once(

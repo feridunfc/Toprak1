@@ -13,6 +13,7 @@ from hfa_worker.runtime.task_context_builder import (
 
 def test_builder_maps_run_requested_event_to_task_context() -> None:
     event = RunRequestedEvent(
+        task_id="task-61",
         run_id="run-61",
         tenant_id="tenant-a",
         agent_type="agent-x",
@@ -29,7 +30,7 @@ def test_builder_maps_run_requested_event_to_task_context() -> None:
         shard=7,
     )
 
-    assert ctx.task_id == "run-61"
+    assert ctx.task_id == "task-61"
     assert ctx.run_id == "run-61"
     assert ctx.tenant_id == "tenant-a"
     assert ctx.agent_type == "agent-x"
@@ -94,8 +95,10 @@ def test_builder_preserves_trace_context_with_safe_empty_defaults() -> None:
 
 
 def test_task_identity_uses_explicit_event_task_id_when_present() -> None:
-    event = RunRequestedEvent(run_id="run-identity")
-    setattr(event, "task_id", "task-explicit-1")
+    event = RunRequestedEvent(
+        task_id="task-explicit-1",
+        run_id="run-identity",
+    )
 
     identity = resolve_task_identity_from_run_requested(event)
 
@@ -105,15 +108,32 @@ def test_task_identity_uses_explicit_event_task_id_when_present() -> None:
     assert identity.same_identity is False
 
 
-def test_task_identity_falls_back_to_run_id_with_explicit_mapping_source() -> None:
+def test_legacy_run_only_identity_does_not_synthesize_task_id() -> None:
     event = RunRequestedEvent(run_id="run-fallback")
 
     identity = resolve_task_identity_from_run_requested(event)
 
-    assert identity.task_id == "run-fallback"
+    assert identity.task_id == ""
     assert identity.run_id == "run-fallback"
     assert identity.mapping_source == TASK_ID_MAPPING_SOURCE_RUN_ID_FALLBACK
-    assert identity.same_identity is True
+    assert identity.same_identity is False
+
+
+def test_legacy_run_only_context_keeps_task_id_empty() -> None:
+    event = RunRequestedEvent(
+        run_id="run-context-fallback",
+        tenant_id="tenant-fallback",
+    )
+
+    ctx = build_task_context_from_run_requested(
+        event,
+        worker_id="worker-fallback",
+        worker_group="group-fallback",
+        shard=4,
+    )
+
+    assert ctx.task_id == ""
+    assert ctx.run_id == "run-context-fallback"
 
 
 def test_task_context_carries_shard_as_additive_context_field() -> None:

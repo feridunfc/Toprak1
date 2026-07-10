@@ -76,8 +76,8 @@ async def test_worker_consumer_bridge_real_redis_lua_claim_complete_and_ack(
 
     shard = 0
     stream = RedisKey.stream_shard(shard)
-    task_id = "runtime-drill-65-task"
-    run_id = task_id  # explicit Sprint 61 fallback contract: task_id maps from run_id
+    task_id = "runtime-drill-76-task"
+    run_id = "runtime-drill-76-run"
     tenant_id = "tenant-runtime-drill-65"
     worker_id = "worker-runtime-drill-65"
     scheduler_epoch = "epoch-runtime-drill-65"
@@ -91,6 +91,10 @@ async def test_worker_consumer_bridge_real_redis_lua_claim_complete_and_ack(
     )
 
     await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={"run_id": run_id},
+    )
 
     reservation_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
     reserved = await reservation_mgr.reserve(
@@ -145,6 +149,7 @@ async def test_worker_consumer_bridge_real_redis_lua_claim_complete_and_ack(
     worker_consumer._state.store_result = legacy_store_result
 
     event = RunRequestedEvent(
+        task_id=task_id,
         run_id=run_id,
         tenant_id=tenant_id,
         agent_type="runtime-drill-agent",
@@ -171,6 +176,9 @@ async def test_worker_consumer_bridge_real_redis_lua_claim_complete_and_ack(
 
     read_msg_id, data = entries[0]
     assert _decode(read_msg_id) == _decode(added_msg_id)
+    assert _decode(data.get(b"task_id") or data.get("task_id")) == task_id
+    assert _decode(data.get(b"run_id") or data.get("run_id")) == run_id
+    assert task_id != run_id
 
     assert await _pending_count(redis_client, stream) == 1
 
@@ -211,6 +219,7 @@ async def test_worker_consumer_bridge_real_redis_lua_claim_complete_and_ack(
     meta = await redis_client.hgetall(DagRedisKey.task_meta(task_id))
     normalized_meta = {_decode(k): _decode(v) for k, v in meta.items()}
 
+    assert normalized_meta["run_id"] == run_id
     assert normalized_meta["worker_instance_id"] == worker_id
     assert normalized_meta["scheduler_epoch"] == scheduler_epoch
     assert normalized_meta["claim_epoch"] == "1"

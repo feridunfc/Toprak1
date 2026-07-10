@@ -10,9 +10,9 @@ This module intentionally does not claim, execute, complete, ack, retry, or
 reclaim anything. It only performs deterministic context construction.
 
 Important identity decision:
-RunRequestedEvent currently does not define a canonical task_id field.
-Until the stream envelope carries task_id explicitly, the builder uses
-task_id = run_id with an explicit mapping source.
+RunRequestedEvent carries task_id and run_id as independent fields.
+A missing task_id remains missing. The builder must never synthesize
+task identity from run_id.
 """
 from __future__ import annotations
 
@@ -62,10 +62,10 @@ def resolve_task_identity_from_run_requested(
         )
 
     return TaskIdentityResolution(
-        task_id=run_id,
+        task_id="",
         run_id=run_id,
         mapping_source=TASK_ID_MAPPING_SOURCE_RUN_ID_FALLBACK,
-        same_identity=True,
+        same_identity=False,
     )
 
 

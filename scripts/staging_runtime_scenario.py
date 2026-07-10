@@ -27,7 +27,7 @@ from hfa_worker.task_executor import TaskExecutionResult, TaskExecutor
 
 DEFAULT_ARTIFACT = "local_out/staging_runtime_scenario.json"
 SCENARIO_TASK_ID = "staging-runtime-scenario-task"
-SCENARIO_RUN_ID = SCENARIO_TASK_ID
+SCENARIO_RUN_ID = "staging-runtime-scenario-run"
 SCENARIO_TENANT_ID = "tenant-staging-runtime-scenario"
 SCENARIO_WORKER_ID = "worker-staging-runtime-scenario"
 SCENARIO_WORKER_GROUP = "staging-runtime-scenario-group"
@@ -172,6 +172,13 @@ async def run_staging_runtime_scenario(
 
         # Scenario setup: this is the runtime drill itself, not dashboard mutation.
         await redis_client.set(DagRedisKey.task_state(SCENARIO_TASK_ID), "scheduled")
+        await redis_client.hset(
+            DagRedisKey.task_meta(SCENARIO_TASK_ID),
+            mapping={
+                "run_id": SCENARIO_RUN_ID,
+                "tenant_id": SCENARIO_TENANT_ID,
+            },
+        )
 
         reservation_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
         reserved = await reservation_mgr.reserve(
@@ -231,6 +238,7 @@ async def run_staging_runtime_scenario(
         worker_consumer._state.store_result = legacy_store_result
 
         event = RunRequestedEvent(
+            task_id=SCENARIO_TASK_ID,
             run_id=SCENARIO_RUN_ID,
             tenant_id=SCENARIO_TENANT_ID,
             agent_type="staging-runtime-scenario-agent",
@@ -301,6 +309,9 @@ async def run_staging_runtime_scenario(
             artifact["runtime"]["task_consumer_called"],
             artifact["runtime"]["task_completed"],
             artifact["runtime"]["message_acknowledged_after_completion"],
+            SCENARIO_TASK_ID != SCENARIO_RUN_ID,
+            artifact["evidence"].get("task_id") == SCENARIO_TASK_ID,
+            artifact["evidence"].get("run_id") == SCENARIO_RUN_ID,
             artifact["evidence"].get("worker_instance_id") == SCENARIO_WORKER_ID,
             artifact["evidence"].get("scheduler_epoch") == SCENARIO_SCHEDULER_EPOCH,
             artifact["evidence"].get("claim_epoch") == "1",
