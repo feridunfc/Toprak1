@@ -32,8 +32,8 @@ async def test_lower_vruntime_tenant_gets_dispatched_first(redis_client):
     dispatcher = SchedulerFairnessDispatcher(fairness_manager, reservation_dispatcher)
 
     candidates = [
-        FairDispatchCandidate("tenant-a", "task-a", "worker-a", {"tenant_id": "tenant-a"}),
-        FairDispatchCandidate("tenant-b", "task-b", "worker-b", {"tenant_id": "tenant-b"}),
+        FairDispatchCandidate("tenant-a", "task-a", "worker-a", {"run_id": "task-a", "tenant_id": "tenant-a"}),
+        FairDispatchCandidate("tenant-b", "task-b", "worker-b", {"run_id": "task-b", "tenant_id": "tenant-b"}),
     ]
 
     result = await dispatcher.choose_and_dispatch(
@@ -66,8 +66,8 @@ async def test_inflight_breaks_tie_when_vruntime_equal(redis_client):
     dispatcher = SchedulerFairnessDispatcher(fairness_manager, reservation_dispatcher)
 
     candidates = [
-        FairDispatchCandidate("tenant-a", "task-a", "worker-a", {"tenant_id": "tenant-a"}),
-        FairDispatchCandidate("tenant-b", "task-b", "worker-b", {"tenant_id": "tenant-b"}),
+        FairDispatchCandidate("tenant-a", "task-a", "worker-a", {"run_id": "task-a", "tenant_id": "tenant-a"}),
+        FairDispatchCandidate("tenant-b", "task-b", "worker-b", {"run_id": "task-b", "tenant_id": "tenant-b"}),
     ]
 
     result = await dispatcher.choose_and_dispatch(
@@ -97,7 +97,7 @@ async def test_successful_fair_dispatch_can_be_claimed(redis_client):
 
     result = await dispatcher.choose_and_dispatch(
         candidates=[
-            FairDispatchCandidate("tenant-b", "task-b", "worker-b", {"tenant_id": "tenant-b"}),
+            FairDispatchCandidate("tenant-b", "task-b", "worker-b", {"run_id": "task-b", "tenant_id": "tenant-b"}),
         ],
         scheduler_epoch="epoch-1",
         reserved_at_ms=123456,

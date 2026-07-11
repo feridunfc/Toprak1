@@ -251,10 +251,15 @@ class DagLua:
 
         task_id   = dispatch.task_id
         tenant_id = dispatch.tenant_id
-        run_id    = getattr(dispatch, "run_id", task_id)
+        run_id = str(
+            getattr(dispatch, "run_id", "") or ""
+        ).strip()
         shard     = getattr(dispatch, "shard", 0)
         # milliseconds — from blocker-fix patch
         scheduled_at = getattr(dispatch, "scheduled_at", None) or int(time.time() * 1000)
+        scheduler_epoch = str(
+            getattr(dispatch, "scheduler_epoch", "") or ""
+        ).strip()
 
         scheduled_zset = (
             getattr(dispatch, "scheduled_zset", "") or
@@ -292,6 +297,7 @@ class DagLua:
             getattr(dispatch, "policy", "") or "LEAST_LOADED",
             getattr(dispatch, "region", "") or "",
             getattr(dispatch, "payload_json", "") or "{}",
+            scheduler_epoch,
         ]
 
         raw = await self._dispatch_loader.run(num_keys=len(keys), keys=keys, args=args)

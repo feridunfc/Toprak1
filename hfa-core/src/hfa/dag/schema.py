@@ -258,3 +258,4 @@ class DagTaskDispatchInput:
     payload_json: str = ""
     trace_parent: str = ""
     trace_state: str = ""
+    scheduler_epoch: str = ""

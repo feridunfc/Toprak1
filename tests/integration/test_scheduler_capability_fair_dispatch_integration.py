@@ -29,7 +29,7 @@ async def test_incompatible_workers_never_reserved(redis_client):
         tenant_id="tenant-a",
         task_id="task-1",
         required_capabilities=["python"],
-        dispatch_payload={"tenant_id": "tenant-a"},
+        dispatch_payload={"run_id": "task-1", "tenant_id": "tenant-a"},
         vruntime=10.0,
         inflight=0,
     )
@@ -66,7 +66,7 @@ async def test_best_compatible_worker_can_be_claimed(redis_client):
         tenant_id="tenant-b",
         task_id="task-2",
         required_capabilities=["python"],
-        dispatch_payload={"tenant_id": "tenant-b"},
+        dispatch_payload={"run_id": "task-2", "tenant_id": "tenant-b"},
         vruntime=5.0,
         inflight=0,
     )
@@ -113,7 +113,7 @@ async def test_no_compatible_worker_is_stable(redis_client):
         tenant_id="tenant-c",
         task_id="task-3",
         required_capabilities=["sql"],
-        dispatch_payload={"tenant_id": "tenant-c"},
+        dispatch_payload={"run_id": "task-3", "tenant_id": "tenant-c"},
         vruntime=1.0,
         inflight=0,
     )

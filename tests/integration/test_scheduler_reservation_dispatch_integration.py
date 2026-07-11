@@ -23,7 +23,10 @@ async def test_reserve_then_dispatch_then_claim_consumes_reservation(redis_clien
         task_id="task-1",
         worker_id="worker-1",
         scheduler_epoch="epoch-1",
-        dispatch_payload={"tenant_id": "tenant-a"},
+        dispatch_payload={
+            "run_id": "task-1",
+            "tenant_id": "tenant-a",
+        },
         reserved_at_ms=123456,
     )
 
@@ -58,7 +61,10 @@ async def test_dispatch_failure_releases_reservation(redis_client):
         task_id="task-2",
         worker_id="worker-2",
         scheduler_epoch="epoch-2",
-        dispatch_payload={"tenant_id": "tenant-a"},
+        dispatch_payload={
+            "run_id": "task-2",
+            "tenant_id": "tenant-a",
+        },
         reserved_at_ms=123456,
     )
 
@@ -83,14 +89,20 @@ async def test_second_scheduler_cannot_dispatch_same_reserved_worker(redis_clien
         task_id="task-a",
         worker_id="worker-race",
         scheduler_epoch="epoch-a",
-        dispatch_payload={"tenant_id": "tenant-a"},
+        dispatch_payload={
+            "run_id": "task-a",
+            "tenant_id": "tenant-a",
+        },
         reserved_at_ms=111,
     )
     second = await dispatcher.reserve_and_dispatch(
         task_id="task-b",
         worker_id="worker-race",
         scheduler_epoch="epoch-b",
-        dispatch_payload={"tenant_id": "tenant-b"},
+        dispatch_payload={
+            "run_id": "task-b",
+            "tenant_id": "tenant-b",
+        },
         reserved_at_ms=112,
     )
 

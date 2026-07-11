@@ -22,7 +22,7 @@ async def test_dispatch_not_called_if_reservation_conflicts():
         task_id="task-1",
         worker_id="worker-1",
         scheduler_epoch="epoch-1",
-        dispatch_payload={"x": 1},
+        dispatch_payload={"run_id": "task-1", "x": 1},
         reserved_at_ms=123,
     )
 
@@ -45,7 +45,7 @@ async def test_release_on_dispatch_failure():
         task_id="task-1",
         worker_id="worker-1",
         scheduler_epoch="epoch-1",
-        dispatch_payload={"x": 1},
+        dispatch_payload={"run_id": "task-1", "x": 1},
         reserved_at_ms=123,
     )
 
@@ -68,7 +68,7 @@ async def test_keep_reservation_on_success_for_claim_consumption():
         task_id="task-1",
         worker_id="worker-1",
         scheduler_epoch="epoch-1",
-        dispatch_payload={"x": 1},
+        dispatch_payload={"run_id": "task-1", "x": 1},
         reserved_at_ms=123,
     )
 
