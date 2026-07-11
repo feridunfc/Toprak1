@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import uuid
 from typing import Optional
 
 from hfa_control.models import ControlPlaneConfig
@@ -26,7 +25,7 @@ from hfa_control.leader import LeaderElection
 from hfa_control.registry import WorkerRegistry
 from hfa_control.shard import ShardOwnershipManager
 from hfa_control.admission import AdmissionController
-from hfa_control.scheduler import Scheduler
+from hfa_control.scheduler import Scheduler, build_production_scheduler
 from hfa_control.recovery import RecoveryService
 from hfa_control.audit import build_audit_logger
 from hfa_control.redis_resilience import RedisHealthMonitor
@@ -41,18 +40,18 @@ class ControlPlaneService:
     def __init__(self, redis, config: Optional[ControlPlaneConfig] = None) -> None:
         self._redis = redis
         self._config = config or _config_from_env()
-        # Assign a unique instance_id if not set
-        if not self._config.instance_id:
-            self._config.instance_id = os.environ.get(
-                "CP_INSTANCE_ID", uuid.uuid4().hex[:8]
-            )
-
         self._leader = LeaderElection(redis, self._config.instance_id, self._config)
         self._registry = WorkerRegistry(redis, self._config)
         self._shards = ShardOwnershipManager(redis, self._config)
         self._audit = build_audit_logger(redis)
         self._admitter = AdmissionController(redis, self._config, audit=self._audit)
-        self._scheduler = Scheduler(redis, self._registry, self._shards, self._config)
+        self._scheduler = build_production_scheduler(
+            redis=redis,
+            config=self._config,
+            registry=self._registry,
+            shards=self._shards,
+            event_store=None,
+        )
         self._recovery = RecoveryService(redis, self._config)
         self._redis_monitor = RedisHealthMonitor(redis)
 
@@ -119,11 +118,12 @@ class ControlPlaneService:
             except asyncio.CancelledError:
                 pass
 
-        # Close leader-gated components
-        if self._sched_started:
-            await self._scheduler.close()
+        # Scheduler.close() is terminal and safe even after leadership loss.
+        await self._scheduler.close()
+        self._sched_started = False
         if self._recovery_started:
             await self._recovery.close()
+            self._recovery_started = False
 
         # Close always-running components
         await self._shards.close()
@@ -136,38 +136,51 @@ class ControlPlaneService:
     # Leader watchdog — starts Scheduler+Recovery when leadership acquired
     # ------------------------------------------------------------------
 
+    async def _reconcile_leadership_once(self) -> None:
+        """Apply one deterministic leader/standby transition."""
+        if self._leader.is_leader:
+            token = int(getattr(self._leader, "fencing_token", 0) or 0)
+            if token <= 0:
+                raise ValueError("leader fencing_token must be greater than zero")
+
+            scheduler_started_now = False
+            if not self._sched_started:
+                await self._scheduler.start(scheduler_epoch=str(token))
+                self._sched_started = True
+                scheduler_started_now = True
+
+            if not self._recovery_started:
+                try:
+                    await self._recovery.start()
+                    self._recovery_started = True
+                except Exception:
+                    if scheduler_started_now:
+                        await self._scheduler.stop()
+                        self._sched_started = False
+                    raise
+            return
+
+        errors: list[BaseException] = []
+        if self._sched_started:
+            try:
+                await self._scheduler.stop()
+                self._sched_started = False
+            except BaseException as exc:
+                errors.append(exc)
+        if self._recovery_started:
+            try:
+                await self._recovery.close()
+                self._recovery_started = False
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("leadership loss reconciliation failed") from errors[0]
+
     async def _leader_watchdog(self) -> None:
-        """
-        Monitor leadership state.
-        Start leader-only components when leadership is acquired.
-        Stop them gracefully when leadership is lost.
-        (Leadership loss is rare but possible during rolling redeploys.)
-        """
+        """Monitor leadership and apply the single-step transition contract."""
         while True:
             try:
-                if self._leader.is_leader:
-                    if not self._sched_started:
-                        await self._scheduler.start()
-                        self._sched_started = True
-                        logger.info(
-                            "Leader components started: instance=%s",
-                            self._config.instance_id,
-                        )
-                    if not self._recovery_started:
-                        await self._recovery.start()
-                        self._recovery_started = True
-                else:
-                    if self._sched_started:
-                        await self._scheduler.close()
-                        self._sched_started = False
-                        logger.info(
-                            "Scheduler stopped (leadership lost): instance=%s",
-                            self._config.instance_id,
-                        )
-                    if self._recovery_started:
-                        await self._recovery.close()
-                        self._recovery_started = False
-
+                await self._reconcile_leadership_once()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -368,4 +381,7 @@ def _config_from_env() -> ControlPlaneConfig:
         stale_run_timeout=float(os.environ.get("STALE_RUN_TIMEOUT", "600")),
         recovery_sweep_interval=float(os.environ.get("RECOVERY_SWEEP_INTERVAL", "30")),
         max_reschedule_attempts=int(os.environ.get("MAX_RESCHEDULE_ATTEMPTS", "3")),
+        scheduler_reservation_ttl_seconds=int(
+            os.environ.get("SCHEDULER_RESERVATION_TTL_SECONDS", "30")
+        ),
     )

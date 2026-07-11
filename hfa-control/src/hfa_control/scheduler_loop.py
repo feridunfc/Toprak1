@@ -64,6 +64,7 @@ class SchedulerLoop:
             self._event_store = None
         self._bp_guard = BackpressureGuard(self._config)
         self._epoch: str = "0"
+        self._explicit_epoch_required = bool(kwargs.get("explicit_epoch_required", False))
         self._local_quarantine: dict[str, str] = {}
 
     async def _increment_epoch(self) -> str:
@@ -93,8 +94,16 @@ class SchedulerLoop:
     def current_epoch(self) -> str:
         return self._epoch
 
-    async def on_leadership_gained(self) -> None:
-        await self._increment_epoch()
+    async def on_leadership_gained(self, scheduler_epoch: str | None = None) -> None:
+        if scheduler_epoch is None:
+            if self._explicit_epoch_required:
+                raise ValueError("explicit scheduler_epoch is required in production")
+            await self._increment_epoch()
+        else:
+            epoch = str(scheduler_epoch).strip()
+            if not epoch or epoch == "0":
+                raise ValueError("scheduler_epoch must represent acquired leadership authority")
+            self._epoch = epoch
         reset = getattr(self._tenant_fairness, "reset", None)
         if callable(reset):
             reset()
@@ -106,6 +115,7 @@ class SchedulerLoop:
         self._bp_guard.reset()
 
     async def on_leadership_lost(self) -> None:
+        self._epoch = ""
         reset = getattr(self._tenant_fairness, "reset", None)
         if callable(reset):
             reset()
