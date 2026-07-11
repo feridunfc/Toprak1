@@ -134,6 +134,7 @@ class ControlPlaneConfig:
     scheduler_loop_max_failures: int = 8
     scheduler_loop_idle_sleep_ms: int = 250
     scheduler_loop_error_sleep_ms: int = 1000
+    scheduler_reservation_ttl_seconds: int = 30
 
     # Sprint 23: CAS-only enforcement (production should set True)
     strict_cas_mode: bool = False
@@ -161,3 +162,6 @@ class ControlPlaneConfig:
     backpressure_hysteresis_ratio: float = 0.8 # soft_low = soft_high * ratio
     backpressure_max_queue_ratio: float = 10.0 # queue_depth > ratio * capacity → soft
     backpressure_worker_saturation: float = 0.95  # weighted load threshold for hard stop
+    def __post_init__(self) -> None:
+        if int(self.scheduler_reservation_ttl_seconds) <= 0:
+            raise ValueError("scheduler_reservation_ttl_seconds must be greater than zero")

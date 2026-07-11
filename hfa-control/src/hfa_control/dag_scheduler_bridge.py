@@ -72,6 +72,22 @@ class DagReadyQueue:
     def __init__(self, redis) -> None:
         self._redis = redis
 
+    async def list_active_tenants(self) -> list[str]:
+        """Return sorted tenant IDs from the canonical DAG active set."""
+        rows = await self._redis.smembers(DagRedisKey.tenant_active_set())
+        tenants: set[str] = set()
+        for row in rows or ():
+            if isinstance(row, bytes):
+                try:
+                    value = row.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue
+            else:
+                value = str(row or "").strip()
+            if value:
+                tenants.add(value)
+        return sorted(tenants)
+
     async def peek(self, tenant_id: str) -> Optional[str]:
         """Return the highest-priority (lowest-score) task_id without removing it."""
         rows = await self._redis.zrange(
