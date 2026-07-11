@@ -121,9 +121,94 @@ class SchedulerReservationDispatcher:
         dispatch_payload: dict,
         reserved_at_ms: int | None = None,
     ) -> ReservationDispatchResult:
-        run_id = str(dispatch_payload.get("run_id", task_id))
+        task_id = str(task_id or "").strip()
+        scheduler_epoch = str(scheduler_epoch or "").strip()
+
+        payload_task_id_present = "task_id" in dispatch_payload
+        payload_task_id = str(
+            dispatch_payload.get("task_id") or ""
+        ).strip()
+
+        run_id = str(
+            dispatch_payload.get("run_id") or ""
+        ).strip()
+
+        payload_epoch_present = (
+            "scheduler_epoch" in dispatch_payload
+        )
+        payload_scheduler_epoch = str(
+            dispatch_payload.get("scheduler_epoch") or ""
+        ).strip()
         tenant_id = str(dispatch_payload.get("tenant_id", ""))
         attempt = int(dispatch_payload.get("attempt", 1) or 1)
+
+        # Sprint 77 canonical dispatch identity boundary.
+        # task_id and scheduler_epoch are authoritative arguments.
+        # run_id must be supplied explicitly; inference is forbidden.
+        if not task_id:
+            return ReservationDispatchResult(
+                ok=False,
+                status="dispatch_task_id_missing",
+                worker_id=worker_id,
+                task_id="",
+                run_id=run_id,
+                tenant_id=tenant_id,
+                scheduler_epoch=scheduler_epoch,
+                reason="explicit_task_id_required",
+            )
+
+        if not run_id:
+            return ReservationDispatchResult(
+                ok=False,
+                status="dispatch_run_id_missing",
+                worker_id=worker_id,
+                task_id=task_id,
+                run_id="",
+                tenant_id=tenant_id,
+                scheduler_epoch=scheduler_epoch,
+                reason="explicit_run_id_required",
+            )
+
+        if payload_task_id_present and payload_task_id != task_id:
+            return ReservationDispatchResult(
+                ok=False,
+                status="dispatch_task_id_mismatch",
+                worker_id=worker_id,
+                task_id=task_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                scheduler_epoch=scheduler_epoch,
+                reason="payload_task_id_differs_from_dispatch_task_id",
+            )
+
+        if not scheduler_epoch:
+            return ReservationDispatchResult(
+                ok=False,
+                status="dispatch_scheduler_epoch_missing",
+                worker_id=worker_id,
+                task_id=task_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                scheduler_epoch="",
+                reason="explicit_scheduler_epoch_required",
+            )
+
+        if (
+            payload_epoch_present
+            and payload_scheduler_epoch != scheduler_epoch
+        ):
+            return ReservationDispatchResult(
+                ok=False,
+                status="dispatch_scheduler_epoch_mismatch",
+                worker_id=worker_id,
+                task_id=task_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                scheduler_epoch=scheduler_epoch,
+                reason=(
+                    "payload_scheduler_epoch_differs_from_dispatch_epoch"
+                ),
+            )
 
         # ── Step 1: OCC pre-check ─────────────────────────────────────────
         # Verify run is still queued before spending a reservation slot.
@@ -212,18 +297,36 @@ class SchedulerReservationDispatcher:
             dispatch_payload=dispatch_payload,
         )
 
-        if not dispatched:
+        # Legacy callbacks return bool; canonical writers return a
+        # structured result carrying committed/status/reason.
+        if hasattr(dispatched, "committed"):
+            dispatch_ok = bool(
+                getattr(dispatched, "committed", False)
+            )
+            dispatch_status = str(
+                getattr(dispatched, "status", "") or ""
+            )
+            dispatch_reason = str(
+                getattr(dispatched, "reason", "") or ""
+            )
+        else:
+            dispatch_ok = bool(dispatched)
+            dispatch_status = ""
+            dispatch_reason = ""
+
+        if not dispatch_ok:
             release = getattr(self._reservation_manager, "release", None)
             if release is not None:
                 await release(worker_id)
             return ReservationDispatchResult(
                 ok=False,
-                status="dispatch_failed",
+                status=dispatch_status or "dispatch_failed",
                 worker_id=worker_id,
                 task_id=task_id,
                 run_id=run_id,
                 tenant_id=tenant_id,
                 scheduler_epoch=scheduler_epoch,
+                reason=dispatch_reason or None,
             )
 
         result = ReservationDispatchResult(

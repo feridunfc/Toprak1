@@ -59,14 +59,22 @@ async def test_task_dispatch_commit_ready_to_scheduled(redis_client):
 
     state = await redis_client.get(DagRedisKey.task_state(seed.task_id))
     meta = await redis_client.hgetall(DagRedisKey.task_meta(seed.task_id))
-    running = await redis_client.zscore(DagRedisKey.task_running_zset(seed.tenant_id), seed.task_id)
+    scheduled = await redis_client.zscore(
+        DagRedisKey.task_scheduled_zset(seed.tenant_id),
+        seed.task_id,
+    )
+    running = await redis_client.zscore(
+        DagRedisKey.task_running_zset(seed.tenant_id),
+        seed.task_id,
+    )
     control_events = await redis_client.xrange(RedisKey.stream_control(), '-', '+', 10)
     shard_events = await redis_client.xrange(RedisKey.stream_shard(0), '-', '+', 10)
 
     assert state == 'scheduled'
     assert meta['worker_group'] == 'grp-a'
     assert meta['shard'] == '0'
-    assert running is not None
+    assert scheduled is not None
+    assert running is None
     assert any(e[1].get('task_id') == seed.task_id and e[1].get('event_type') == 'TaskScheduled' for e in control_events)
     assert any(e[1].get('task_id') == seed.task_id and e[1].get('event_type') == 'TaskRequested' for e in shard_events)
 
@@ -93,7 +101,7 @@ async def test_task_dispatch_commit_duplicate_is_non_committing(redis_client):
     second = await lua.task_dispatch_commit(dispatch)
     assert first.committed is True
     assert second.committed is False
-    assert second.status == 'already_running'
+    assert second.status == 'already_scheduled'
 
 
 @pytest.mark.integration

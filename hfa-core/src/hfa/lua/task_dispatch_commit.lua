@@ -32,6 +32,7 @@
 -- 16  policy
 -- 17  region
 -- 18  payload_json
+-- 19  scheduler_epoch
 --
 -- ─── RETURN ────────────────────────────────────────────────────────────────
 -- { status, current_or_prev_state }
@@ -42,6 +43,11 @@
 --   already_running
 --   already_scheduled
 --   illegal_transition
+--   missing_task_meta
+--   identity_task_id_missing
+--   identity_task_id_mismatch
+--   identity_run_id_missing
+--   identity_run_id_mismatch
 
 local task_state_key        = KEYS[1]
 local task_meta_key         = KEYS[2]
@@ -69,6 +75,7 @@ local trace_state           = ARGV[15] or ''
 local policy                = ARGV[16] or 'LEAST_LOADED'
 local region                = ARGV[17] or ''
 local payload_json          = ARGV[18] or '{}'
+local scheduler_epoch       = ARGV[19] or ''
 
 -- ── Guard ─────────────────────────────────────────────────────────────────
 local current = redis.call('GET', task_state_key)
@@ -81,7 +88,7 @@ if current == 'running' then
 end
 
 if current == 'scheduled' then
-    return {'already_running', current}
+    return {'already_scheduled', current}
 end
 
 if current == 'done' or current == 'failed' or current == 'blocked_by_failure'
@@ -91,6 +98,38 @@ end
 
 if current ~= 'ready' then
     return {'state_conflict', current}
+end
+
+-- Canonical identity was created by task_admit.lua.
+-- All checks below precede every mutation in this script.
+if redis.call('EXISTS', task_meta_key) == 0 then
+    return {'missing_task_meta', ''}
+end
+
+local authoritative_identity = redis.call(
+    'HMGET',
+    task_meta_key,
+    'task_id',
+    'run_id'
+)
+
+local authoritative_task_id = authoritative_identity[1]
+local authoritative_run_id  = authoritative_identity[2]
+
+if not authoritative_task_id or authoritative_task_id == '' then
+    return {'identity_task_id_missing', ''}
+end
+
+if authoritative_task_id ~= task_id then
+    return {'identity_task_id_mismatch', authoritative_task_id}
+end
+
+if not authoritative_run_id or authoritative_run_id == '' then
+    return {'identity_run_id_missing', ''}
+end
+
+if authoritative_run_id ~= run_id then
+    return {'identity_run_id_mismatch', authoritative_run_id}
 end
 
 -- ── Commit ────────────────────────────────────────────────────────────────
@@ -112,16 +151,12 @@ redis.call('HSET', task_meta_key,
     'dispatch_region', region,
     'payload_json',   payload_json,
     'trace_parent',   trace_parent,
-    'trace_state',    trace_state
+    'trace_state',    trace_state,
+    'scheduler_epoch', scheduler_epoch
 )
 redis.call('EXPIRE', task_meta_key, task_meta_ttl)
 redis.call('ZADD', task_scheduled_zset, scheduled_at, task_id)
 redis.call('EXPIRE', task_scheduled_zset, task_meta_ttl)
-if task_running_zset and task_running_zset ~= '' then
-    redis.call('ZADD', task_running_zset, scheduled_at, task_id)
-    redis.call('EXPIRE', task_running_zset, task_meta_ttl)
-end
-
 -- ── Emit events ───────────────────────────────────────────────────────────
 redis.call('XADD', control_stream, 'MAXLEN', '~', control_maxlen, '*',
     'event_type',   'TaskScheduled',
@@ -135,7 +170,8 @@ redis.call('XADD', control_stream, 'MAXLEN', '~', control_maxlen, '*',
     'policy',       policy,
     'scheduled_at', scheduled_at,
     'trace_parent', trace_parent,
-    'trace_state',  trace_state
+    'trace_state',     trace_state,
+    'scheduler_epoch', scheduler_epoch
 )
 
 redis.call('XADD', shard_stream, 'MAXLEN', '~', shard_maxlen, '*',
@@ -150,7 +186,8 @@ redis.call('XADD', shard_stream, 'MAXLEN', '~', shard_maxlen, '*',
     'payload_json', payload_json,
     'requested_at', scheduled_at,
     'trace_parent', trace_parent,
-    'trace_state',  trace_state
+    'trace_state',     trace_state,
+    'scheduler_epoch', scheduler_epoch
 )
 
 return {'committed', current}

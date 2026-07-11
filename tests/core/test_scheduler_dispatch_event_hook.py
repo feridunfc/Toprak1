@@ -38,7 +38,7 @@ async def test_dispatch_emits_scheduled_event():
         task_id="run-1",
         worker_id="worker-1",
         scheduler_epoch="e1",
-        dispatch_payload={"tenant_id": "tenant-a"},
+        dispatch_payload={"run_id": "run-1", "tenant_id": "tenant-a"},
         reserved_at_ms=123,
     )
     await asyncio.sleep(0.01)
