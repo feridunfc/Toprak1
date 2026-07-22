@@ -217,15 +217,48 @@ class WorkerRegistry:
             logger.debug("WorkerRegistry._autoclaim skipped: %s", exc)
 
     async def _handle(self, data: dict) -> None:
-        et = (data.get(b"event_type") or b"").decode()
+        et_raw = data.get(b"event_type") or data.get("event_type") or b""
+        et = (
+            et_raw.decode("utf-8", errors="replace")
+            if isinstance(et_raw, bytes)
+            else str(et_raw)
+        )
         if et == "WorkerHeartbeat":
+            draining_raw = (
+                data.get(b"is_draining")
+                if b"is_draining" in data
+                else data.get("is_draining")
+            )
+            if draining_raw is None:
+                is_draining = None
+            else:
+                draining_text = (
+                    draining_raw.decode("utf-8", errors="replace")
+                    if isinstance(draining_raw, bytes)
+                    else str(draining_raw)
+                )
+                is_draining = draining_text.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+
             evt = WorkerHeartbeatEvent.from_redis(data)
-            await self._on_heartbeat(evt)
+            await self._on_heartbeat(
+                evt,
+                is_draining=is_draining,
+            )
         elif et == "WorkerDraining":
             evt = WorkerDrainingEvent.from_redis(data)
             await self._on_draining(evt)
 
-    async def _on_heartbeat(self, event: WorkerHeartbeatEvent) -> None:
+    async def _on_heartbeat(
+        self,
+        event: WorkerHeartbeatEvent,
+        *,
+        is_draining: bool | None = None,
+    ) -> None:
         key = RedisKey.cp_worker(event.worker_id)
         mapping = {
             "worker_id": event.worker_id,
@@ -243,7 +276,11 @@ class WorkerRegistry:
         existing_status = (
             existing_raw.decode() if isinstance(existing_raw, bytes) else existing_raw
         ) or ""
-        if existing_status == WorkerStatus.DRAINING.value:
+        if is_draining is True:
+            mapping["status"] = WorkerStatus.DRAINING.value
+        elif is_draining is False:
+            mapping["status"] = WorkerStatus.HEALTHY.value
+        elif existing_status == WorkerStatus.DRAINING.value:
             mapping["status"] = WorkerStatus.DRAINING.value
         else:
             mapping["status"] = WorkerStatus.HEALTHY.value
@@ -376,12 +413,47 @@ class WorkerRegistry:
         return False
 
     async def list_all_workers(self, region=None):
-        workers = await self._load_all_worker_profiles_somehow()
+        """
+        Return the broad worker projection used by SchedulerSnapshotBuilder.
 
-        if region:
-            workers = [
-                w for w in workers
-                if str(getattr(w, "region", "")).strip() == region
-            ]
+        Unlike list_schedulable_workers(), this method does not filter by
+        health or capacity. It loads every live registry projection,
+        classifies stale heartbeats as DEAD, applies the optional region
+        filter, and returns deterministic worker-id ordering.
+        """
+        keys = await self._redis.keys(RedisKey.cp_workers_scan_pattern())
+        now = time.time()
+        workers = []
 
+        normalized_keys = sorted(
+            keys or (),
+            key=lambda value: (
+                value.decode("utf-8", errors="replace")
+                if isinstance(value, bytes)
+                else str(value)
+            ),
+        )
+
+        for key in normalized_keys:
+            raw = await self._redis.hgetall(key)
+            if not raw:
+                continue
+
+            profile = WorkerProfile.from_redis_hash(raw)
+            if not profile.worker_id:
+                logger.warning(
+                    "Skipping worker registry projection with empty worker_id: key=%r",
+                    key,
+                )
+                continue
+
+            if now - profile.last_seen > self._config.worker_heartbeat_ttl:
+                profile.status = WorkerStatus.DEAD
+
+            if region and profile.region != region:
+                continue
+
+            workers.append(profile)
+
+        workers.sort(key=lambda worker: worker.worker_id)
         return workers

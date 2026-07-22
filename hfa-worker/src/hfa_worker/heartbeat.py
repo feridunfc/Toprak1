@@ -54,34 +54,62 @@ class WorkerHeartbeatPublisher:
             logger.warning("HeartbeatPublisher already started")
             return
         self._stopped = False
+
+        # Startup visibility is part of readiness: do not return until the
+        # first heartbeat is durably accepted by Redis.
+        await self._publish()
+
         loop = asyncio.get_running_loop()
-        self._task = loop.create_task(self._loop(), name=f"heartbeat.{self._worker_id}")
+        self._task = loop.create_task(
+            self._loop(),
+            name=f"heartbeat.{self._worker_id}",
+        )
+
+    async def publish_now(self) -> None:
+        """Publish the current worker projection synchronously."""
+        await self._publish()
+
+    async def publish_unschedulable_now(self) -> None:
+        """Publish an explicit unschedulable projection synchronously."""
+        await self._publish(is_draining_override=True)
 
     async def close(self) -> None:
-        if self._task is None:
+        task = self._task
+        if task is None:
             return
-        self._stopped = True
-        self._task.cancel()
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
+
         self._task = None
+        self._stopped = True
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _loop(self) -> None:
         while not self._stopped:
-            try:
-                await self._publish()
-            except Exception as exc:
-                logger.error("Heartbeat publish error: %s", exc)
             try:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
             except asyncio.CancelledError:
                 break
 
-    async def _publish(self) -> None:
+            if self._stopped:
+                break
+
+            try:
+                await self._publish()
+            except Exception as exc:
+                logger.error("Heartbeat publish error: %s", exc)
+                raise
+
+    async def _publish(
+        self,
+        *,
+        is_draining_override: bool | None = None,
+    ) -> None:
         inflight = self._inflight_fn()
-        is_draining = self._is_draining_fn()
+        is_draining = (
+            self._is_draining_fn()
+            if is_draining_override is None
+            else is_draining_override
+        )
 
         event = WorkerHeartbeatEvent(
             worker_id=self._worker_id,

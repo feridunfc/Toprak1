@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+import os
+import signal
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
+
+import redis.asyncio as redis_async
+
+from hfa_worker.main import WorkerService
+
+
+RedisFactory = Callable[[str], Any]
+ShutdownWaiter = Callable[[], Awaitable[None]]
+
+
+def _parse_shards(raw: str) -> list[int]:
+    values = [part.strip() for part in raw.split(",") if part.strip()]
+    return [int(value) for value in values] if values else [0]
+
+
+def config_from_env(
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    source = os.environ if env is None else env
+    executor_mode = str(
+        source.get("WORKER_EXECUTOR_MODE") or ""
+    ).strip()
+    if not executor_mode:
+        raise RuntimeError(
+            "WORKER_EXECUTOR_MODE is required for the production worker "
+            "process root"
+        )
+
+    return {
+        "redis_url": source.get("REDIS_URL", "redis://localhost:6379/0"),
+        "production": True,
+        "worker_id": source.get("WORKER_ID", ""),
+        "worker_group": source.get("WORKER_GROUP", "default"),
+        "region": source.get("WORKER_REGION", "us-east-1"),
+        "shards": _parse_shards(source.get("WORKER_SHARDS", "0")),
+        "capacity": int(source.get("WORKER_CAPACITY", "10")),
+        "version": source.get("WORKER_VERSION", "0.0.0"),
+        "executor_mode": executor_mode,
+        "shard_renew_interval": float(
+            source.get("WORKER_SHARD_RENEW_INTERVAL", "30")
+        ),
+    }
+
+
+def _default_redis_factory(redis_url: str):
+    return redis_async.from_url(redis_url)
+
+
+async def _wait_for_shutdown_signal() -> None:
+    event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    installed: list[signal.Signals] = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, event.set)
+            installed.append(sig)
+        except (NotImplementedError, RuntimeError):
+            continue
+
+    try:
+        await event.wait()
+    finally:
+        for sig in installed:
+            loop.remove_signal_handler(sig)
+
+
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def run_worker_process(
+    *,
+    redis_factory: RedisFactory | None = None,
+    config: Mapping[str, Any] | None = None,
+    wait_for_shutdown: ShutdownWaiter | None = None,
+) -> None:
+    resolved = dict(config_from_env() if config is None else config)
+    resolved["production"] = True
+
+    redis_url = str(
+        resolved.get("redis_url")
+        or os.environ.get("REDIS_URL")
+        or "redis://localhost:6379/0"
+    )
+    factory = redis_factory or _default_redis_factory
+    redis = await _maybe_await(factory(redis_url))
+    service: WorkerService | None = None
+
+    try:
+        service = WorkerService(redis, resolved)
+        await service.start()
+        waiter = wait_for_shutdown or _wait_for_shutdown_signal
+
+        wait_for_failure = getattr(service, "wait_for_failure", None)
+        if not callable(wait_for_failure):
+            await waiter()
+        else:
+            shutdown_task = asyncio.create_task(
+                waiter(),
+                name="worker-process.shutdown-wait",
+            )
+            failure_task = asyncio.create_task(
+                wait_for_failure(),
+                name="worker-process.failure-wait",
+            )
+            try:
+                done, _pending = await asyncio.wait(
+                    {shutdown_task, failure_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if failure_task in done:
+                    failure = await failure_task
+                    if isinstance(failure, BaseException):
+                        raise failure
+                    raise RuntimeError(
+                        "WorkerService reported a fatal failure without "
+                        "an exception"
+                    )
+                await shutdown_task
+            finally:
+                for task in (shutdown_task, failure_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    shutdown_task,
+                    failure_task,
+                    return_exceptions=True,
+                )
+    finally:
+        try:
+            if service is not None:
+                await service.close()
+        finally:
+            close = getattr(redis, "aclose", None)
+            if callable(close):
+                await close()
+
+
+def main() -> int:
+    asyncio.run(run_worker_process())
+    return 0

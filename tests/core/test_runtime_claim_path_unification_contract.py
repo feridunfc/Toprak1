@@ -14,7 +14,7 @@ def test_worker_consumer_declares_legacy_stream_claim_boundary() -> None:
     assert "TaskClaimManager.claim_start" in source
 
 
-def test_worker_consumer_runtime_path_has_gated_canonical_bridge_and_legacy_default() -> None:
+def test_worker_consumer_routes_task_requested_canonically_and_keeps_run_requested_legacy_default() -> None:
     source = Path("hfa-worker/src/hfa_worker/consumer.py").read_text(encoding="utf-8")
     marker = "    async def _process_message("
     if marker not in source:
@@ -23,11 +23,25 @@ def test_worker_consumer_runtime_path_has_gated_canonical_bridge_and_legacy_defa
     runtime_body = source[source.index(marker):]
 
     assert "event = deserialize_run_requested(data)" in runtime_body
-    assert "if is_worker_task_consumer_bridge_enabled():" in runtime_body
+    assert 'event_type == "TaskRequested"' in runtime_body
+    assert "or is_worker_task_consumer_bridge_enabled()" in runtime_body
     assert "await self._process_message_via_task_consumer(event, msg_id, stream, shard)" in runtime_body
     assert "started = await self._guard.try_claim_and_mark_running(" in runtime_body
     assert "result = await self._executor.execute(event)" in runtime_body
     assert ".claim_start(" not in runtime_body
+
+    canonical_route_index = runtime_body.index('event_type == "TaskRequested"')
+    canonical_dispatch_index = runtime_body.index(
+        "await self._process_message_via_task_consumer(event, msg_id, stream, shard)"
+    )
+    legacy_claim_index = runtime_body.index(
+        "started = await self._guard.try_claim_and_mark_running("
+    )
+
+    # Sprint 79: TaskRequested must reach the canonical bridge before the
+    # legacy stream-claim path. The feature flag remains only for explicit
+    # RunRequested compatibility bridging.
+    assert canonical_route_index < canonical_dispatch_index < legacy_claim_index
 
 
 def test_idempotency_guard_declares_state_store_compatibility_claim_boundary() -> None:

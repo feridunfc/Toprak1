@@ -8,7 +8,7 @@ from hfa_worker.drain import DrainManager
 
 
 @pytest.mark.asyncio
-async def test_drain_publishes_event_and_releases_shards():
+async def test_drain_publishes_event_and_preserves_group_shards():
     redis = faredis.FakeRedis()
 
     worker_id = "worker-1"
@@ -44,8 +44,8 @@ async def test_drain_publishes_event_and_releases_shards():
     mock_consumer.stop_pulling.assert_called_once()
 
     for shard in shards:
-        exists = await redis.exists(f"hfa:cp:shard:owner:{shard}")
-        assert exists == 0
+        owner = await redis.get(f"hfa:cp:shard:owner:{shard}")
+        assert owner == worker_group.encode()
 
 
 @pytest.mark.asyncio
@@ -74,5 +74,5 @@ async def test_drain_waits_for_inflight_tasks():
     mock_consumer.inflight_count = 0
     await drain_task
 
-    exists = await redis.exists("hfa:cp:shard:owner:0")
-    assert exists == 0
+    owner = await redis.get("hfa:cp:shard:owner:0")
+    assert owner == worker_group.encode()

@@ -28,6 +28,16 @@ class HeartbeatLoop:
     claim_epoch: str = ""
     _task: asyncio.Task | None = field(default=None, repr=False, compare=False)
     _stopped: asyncio.Event | None = field(default=None, repr=False, compare=False)
+    _ownership_lost: asyncio.Event | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _ownership_loss_status: str = field(
+        default="",
+        repr=False,
+        compare=False,
+    )
 
     async def _run(self) -> None:
         assert self._stopped is not None
@@ -47,6 +57,9 @@ class HeartbeatLoop:
                         "HeartbeatLoop rejected: task=%s status=%s — stopping",
                         self.task_id, result.status,
                     )
+                    self._ownership_loss_status = str(result.status or "")
+                    if self._ownership_lost is not None:
+                        self._ownership_lost.set()
                     return
                 try:
                     await asyncio.wait_for(
@@ -57,12 +70,32 @@ class HeartbeatLoop:
                     pass
         except asyncio.CancelledError:
             raise
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                "HeartbeatLoop failed: task=%s error=%s — failing ownership",
+                self.task_id,
+                exc,
+            )
+            self._ownership_loss_status = (
+                f"heartbeat_error:{type(exc).__name__}"
+            )
+            if self._ownership_lost is not None:
+                self._ownership_lost.set()
 
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
         self._stopped = asyncio.Event()
+        self._ownership_lost = asyncio.Event()
+        self._ownership_loss_status = ""
         self._task = asyncio.create_task(self._run(), name=f"heartbeat:{self.task_id}")
+
+    async def wait_for_ownership_loss(self) -> str:
+        if self._ownership_lost is None:
+            raise RuntimeError("HeartbeatLoop is not started")
+        await self._ownership_lost.wait()
+        return self._ownership_loss_status
 
     async def stop(self) -> None:
         if self._stopped is not None:
