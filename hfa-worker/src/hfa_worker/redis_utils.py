@@ -5,6 +5,8 @@ Minimal Redis stream helpers for control-plane runtime.
 
 from __future__ import annotations
 
+from redis.exceptions import ResponseError
+
 
 async def ensure_consumer_group(redis, stream, group, start_id="0", mkstream=True):
     try:
@@ -14,8 +16,10 @@ async def ensure_consumer_group(redis, stream, group, start_id="0", mkstream=Tru
             id=start_id,
             mkstream=mkstream,
         )
-    except Exception:
-        pass
+    except ResponseError as exc:
+        if "BUSYGROUP" in str(exc).upper():
+            return
+        raise
 
 
 async def ack_message(redis, stream, group, msg_id):

@@ -21,7 +21,12 @@ import logging
 import time
 from typing import Any, Optional, Set
 
+from redis.exceptions import ResponseError
+
 from hfa.config.keys import RedisKey
+from hfa_control.dag_lua import (
+    TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH,
+)
 from hfa.dag.schema import DagRedisKey
 from hfa.events.codec import deserialize_run_requested, serialize_event
 from hfa.events.schema import RunCompletedEvent, RunFailedEvent
@@ -55,6 +60,13 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = "worker_consumers"
+
+
+def _is_nogroup_error(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, ResponseError)
+        and "NOGROUP" in str(exc).upper()
+    )
 
 
 def _identity_text(value: object) -> str:
@@ -157,18 +169,20 @@ class WorkerConsumer:
         self._state = StateStore(redis)
         self._guard = IdempotencyGuard(redis)
         self._inflight: Set[str] = set()
+        self._canonical_inflight: Set[str] = set()
 
         self._consumer_name = worker_id
         self._streams = [RedisKey.stream_shard(s) for s in shards]
 
         self._running = False
         self._pulling = True
+        self._groups_prepared = False
         self._task: Optional[asyncio.Task] = None
         self._renewer_task: Optional[asyncio.Task] = None
 
     @property
     def inflight_count(self) -> int:
-        return len(self._inflight)
+        return len(self._inflight) + len(self._canonical_inflight)
 
     @property
     def is_draining(self) -> bool:
@@ -178,7 +192,15 @@ class WorkerConsumer:
         self._pulling = False
         logger.info("Pulling stopped: worker=%s", self._worker_id)
 
-    async def start(self) -> None:
+    def prepare_for_start(self) -> None:
+        """Reset the accepting-work projection before startup registration."""
+        self._pulling = True
+
+    async def prepare_consumer_groups(self) -> None:
+        # Create durable stream groups without starting background consumers.
+        if self._groups_prepared:
+            return
+
         for stream in self._streams:
             await ensure_consumer_group(
                 self._redis,
@@ -187,6 +209,18 @@ class WorkerConsumer:
                 start_id="0",
                 mkstream=True,
             )
+
+        self._groups_prepared = True
+
+    async def start(self) -> None:
+        if self._running or self._task is not None or self._renewer_task is not None:
+            logger.warning(
+                "WorkerConsumer already started: worker=%s",
+                self._worker_id,
+            )
+            return
+
+        await self.prepare_consumer_groups()
 
         self._running = True
         self._pulling = True
@@ -214,6 +248,7 @@ class WorkerConsumer:
 
         self._task = None
         self._renewer_task = None
+        self._groups_prepared = False
 
     async def _claim_renewer(self) -> None:
         while self._running:
@@ -249,12 +284,84 @@ class WorkerConsumer:
                     _M.claim_renew_failure_total.inc()
 
     async def _main_lifecycle(self) -> None:
-        await self._reclaim_pending_messages()
-        await self._consume_loop()
+        try:
+            await self._consume_assigned_pending_messages()
+            if not self._running or not self._pulling:
+                return
+
+            await self._reclaim_pending_messages()
+            if not self._running or not self._pulling:
+                return
+
+            await self._consume_loop()
+        except BaseException:
+            self._groups_prepared = False
+            raise
+
+    async def _consume_assigned_pending_messages(self) -> None:
+        """Consume PEL entries explicitly assigned to this worker.
+
+        A same-group worker may receive a message whose reservation belongs
+        to another worker. That worker transfers the PEL entry with XCLAIM.
+        The reservation owner drains those assigned entries before reading
+        new stream messages.
+        """
+        for stream in self._streams:
+            cursor = "0"
+            while self._running and self._pulling:
+                messages = await self._redis.xreadgroup(
+                    groupname=CONSUMER_GROUP,
+                    consumername=self._consumer_name,
+                    streams={stream: cursor},
+                    count=100,
+                )
+                if not messages:
+                    break
+
+                last_message_id = cursor
+                advanced = False
+                for stream_name, entries in messages:
+                    resolved_stream = (
+                        stream_name.decode()
+                        if isinstance(stream_name, bytes)
+                        else stream_name
+                    )
+                    shard = int(resolved_stream.split(":")[-1])
+                    for msg_id, data in entries:
+                        if not self._running or not self._pulling:
+                            return
+
+                        msg_id_text = (
+                            msg_id.decode()
+                            if isinstance(msg_id, bytes)
+                            else str(msg_id)
+                        )
+                        last_message_id = msg_id_text
+                        advanced = True
+                        logger.info(
+                            "Consuming assigned pending message: "
+                            "worker=%s stream=%s msg_id=%s",
+                            self._worker_id,
+                            resolved_stream,
+                            msg_id_text,
+                        )
+                        await self._process_message(
+                            msg_id_text,
+                            data,
+                            resolved_stream,
+                            shard,
+                        )
+
+                if not advanced or last_message_id == cursor:
+                    break
+                cursor = last_message_id
 
     async def _reclaim_pending_messages(self) -> None:
         total_reclaimed = 0
         for stream in self._streams:
+            if not self._running or not self._pulling:
+                break
+
             try:
                 pending = await self._redis.xpending_range(
                     stream,
@@ -263,6 +370,8 @@ class WorkerConsumer:
                     max="+",
                     count=100,
                 )
+                if not self._running or not self._pulling:
+                    break
 
                 if not pending:
                     continue
@@ -289,18 +398,36 @@ class WorkerConsumer:
                     self._reclaim_idle_ms,
                     to_claim,
                 )
+                if not self._running or not self._pulling:
+                    break
 
                 for msg_id, data in claimed:
-                    msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                    if not self._running or not self._pulling:
+                        break
+
+                    msg_id_str = (
+                        msg_id.decode()
+                        if isinstance(msg_id, bytes)
+                        else msg_id
+                    )
                     shard = int(stream.split(":")[-1])
                     logger.info(
-                        "Reclaimed pending message: worker=%s stream=%s msg_id=%s",
+                        "Reclaimed pending message: "
+                        "worker=%s stream=%s msg_id=%s",
                         self._worker_id,
                         stream,
                         msg_id_str,
                     )
                     total_reclaimed += 1
-                    await self._process_message(msg_id_str, data, stream, shard)
+                    await self._process_message(
+                        msg_id_str,
+                        data,
+                        stream,
+                        shard,
+                    )
+
+                if not self._running or not self._pulling:
+                    break
 
             except Exception as exc:
                 logger.error("Error reclaiming pending messages: %s", exc)
@@ -310,9 +437,21 @@ class WorkerConsumer:
 
     async def _consume_loop(self) -> None:
         streams_dict = {s: ">" for s in self._streams}
+        assigned_pending_scan_interval = 0.1
+        next_assigned_pending_scan_at = 0.0
 
         while self._running and self._pulling:
             try:
+                now = time.monotonic()
+                if now >= next_assigned_pending_scan_at:
+                    await self._consume_assigned_pending_messages()
+                    if not self._running or not self._pulling:
+                        break
+
+                    next_assigned_pending_scan_at = (
+                        time.monotonic() + assigned_pending_scan_interval
+                    )
+
                 msgs = await self._redis.xreadgroup(
                     groupname=CONSUMER_GROUP,
                     consumername=self._consumer_name,
@@ -321,22 +460,100 @@ class WorkerConsumer:
                     block=100,
                 )
 
+                if not self._running or not self._pulling:
+                    break
+
                 if not msgs:
                     continue
 
                 for stream_name, entries in msgs:
-                    s_name = stream_name.decode() if isinstance(stream_name, bytes) else stream_name
+                    if not self._running or not self._pulling:
+                        break
+
+                    s_name = (
+                        stream_name.decode()
+                        if isinstance(stream_name, bytes)
+                        else stream_name
+                    )
                     shard = int(s_name.split(":")[-1])
 
                     for msg_id, data in entries:
-                        msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
-                        await self._process_message(msg_id_str, data, s_name, shard)
+                        if not self._running or not self._pulling:
+                            break
+
+                        msg_id_str = (
+                            msg_id.decode()
+                            if isinstance(msg_id, bytes)
+                            else msg_id
+                        )
+                        await self._process_message(
+                            msg_id_str,
+                            data,
+                            s_name,
+                            shard,
+                        )
 
             except asyncio.CancelledError:
                 break
             except Exception as exc:
+                if _is_nogroup_error(exc):
+                    self._groups_prepared = False
+                    raise RuntimeError(
+                        "Worker consumer group disappeared after startup"
+                    ) from exc
                 logger.error("Consume loop error: %s", exc)
                 await asyncio.sleep(0.1)
+
+    async def _handoff_reserved_task_message(
+        self,
+        *,
+        task_id: str,
+        msg_id: str,
+        stream: str,
+    ) -> bool:
+        """Transfer a mismatched PEL entry to its reservation owner."""
+        raw_owner = await self._redis.hgetall(
+            DagRedisKey.task_reservation_owner(task_id)
+        )
+        target_worker = _identity_mapping_value(
+            raw_owner,
+            "worker_id",
+        )
+        indexed_task_id = _identity_mapping_value(
+            raw_owner,
+            "task_id",
+        )
+
+        if (
+            not target_worker
+            or target_worker == self._worker_id
+            or (
+                indexed_task_id
+                and indexed_task_id != task_id
+            )
+        ):
+            return False
+
+        claimed = await self._redis.xclaim(
+            stream,
+            CONSUMER_GROUP,
+            target_worker,
+            0,
+            [msg_id],
+        )
+        if not claimed:
+            return False
+
+        logger.info(
+            "Transferred reserved task message: task=%s "
+            "from_worker=%s to_worker=%s stream=%s msg_id=%s",
+            task_id,
+            self._worker_id,
+            target_worker,
+            stream,
+            msg_id,
+        )
+        return True
 
     async def _process_message_via_task_consumer(
         self,
@@ -410,57 +627,95 @@ class WorkerConsumer:
             )
             return
 
-        consumed = await self._task_consumer.consume_once(
-            ctx,
-            claimed_at_ms=int(time.time() * 1000),
-        )
-
-        rejected_reason = str(getattr(consumed, "rejected_reason", "") or "")
-        if rejected_reason:
-            logger.info(
-                "TaskConsumer bridge rejected run=%s reason=%s",
-                ctx.run_id,
-                rejected_reason,
+        inflight_identity = ctx.task_id or ctx.run_id
+        self._canonical_inflight.add(inflight_identity)
+        try:
+            consumed = await self._task_consumer.consume_once(
+                ctx,
+                claimed_at_ms=int(time.time() * 1000),
             )
-            return
 
-        claimed = getattr(consumed, "claimed", None)
-        if claimed is None or not bool(getattr(claimed, "ok", False)):
-            logger.info("TaskConsumer bridge did not claim run=%s", ctx.run_id)
-            return
+            rejected_reason = str(getattr(consumed, "rejected_reason", "") or "")
+            if rejected_reason:
+                logger.info(
+                    "TaskConsumer bridge rejected run=%s reason=%s",
+                    ctx.run_id,
+                    rejected_reason,
+                )
+                return
 
-        executed = getattr(consumed, "executed", None)
-        if executed is None or not bool(getattr(executed, "ok", False)):
-            logger.info("TaskConsumer bridge did not execute successfully run=%s", ctx.run_id)
-            return
+            claimed = getattr(consumed, "claimed", None)
+            if claimed is None or not bool(getattr(claimed, "ok", False)):
+                claim_status = str(
+                    getattr(claimed, "status", "") or ""
+                )
+                if (
+                    claim_status
+                    == TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH
+                    and await self._handoff_reserved_task_message(
+                        task_id=ctx.task_id,
+                        msg_id=msg_id,
+                        stream=stream,
+                    )
+                ):
+                    return
 
-        completed = getattr(consumed, "completed", None)
-        if completed is None:
-            logger.info(
-                "TaskConsumer bridge did not produce fenced completion result run=%s",
-                ctx.run_id,
-            )
-            return
+                logger.info(
+                    "TaskConsumer bridge did not claim run=%s status=%s",
+                    ctx.run_id,
+                    claim_status,
+                )
+                return
 
-        if not bool(getattr(completed, "completed", False)):
-            logger.info(
-                "TaskConsumer bridge completion not committed run=%s status=%s",
-                ctx.run_id,
-                getattr(completed, "status", ""),
-            )
-            return
+            executed = getattr(consumed, "executed", None)
+            if executed is None:
+                logger.info(
+                    "TaskConsumer bridge did not produce execution result run=%s",
+                    ctx.run_id,
+                )
+                return
 
-        await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+            completed = getattr(consumed, "completed", None)
+            if completed is None:
+                logger.info(
+                    "TaskConsumer bridge did not produce fenced completion result run=%s",
+                    ctx.run_id,
+                )
+                return
+
+            if not bool(getattr(completed, "completed", False)):
+                logger.info(
+                    "TaskConsumer bridge completion not committed run=%s status=%s",
+                    ctx.run_id,
+                    getattr(completed, "status", ""),
+                )
+                return
+
+            await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+        finally:
+            self._canonical_inflight.discard(inflight_identity)
 
     async def _process_message(self, msg_id: str, data: dict, stream: str, shard: int) -> None:
         try:
+            event_type = _identity_mapping_value(data, "event_type")
+            if event_type not in {"", "RunRequested", "TaskRequested"}:
+                logger.warning(
+                    "Unsupported worker event type=%s message=%s",
+                    event_type,
+                    msg_id,
+                )
+                return
+
             event = deserialize_run_requested(data)
             if event is None:
                 logger.warning("Failed to deserialize message %s", msg_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
                 return
 
-            if is_worker_task_consumer_bridge_enabled():
+            if (
+                event_type == "TaskRequested"
+                or is_worker_task_consumer_bridge_enabled()
+            ):
                 await self._process_message_via_task_consumer(event, msg_id, stream, shard)
                 return
 

@@ -30,8 +30,23 @@ from hfa_control.exceptions import ShardOwnershipError
 
 logger = logging.getLogger(__name__)
 
-OWNER_TTL = 60  # seconds; worker must publish heartbeat to renew
+OWNER_TTL = 60  # seconds; worker shard renewer must refresh before expiry
 MONITOR_INTERVAL = 15  # seconds
+
+_RENEW_SHARD_LUA = """
+local current = redis.call("GET", KEYS[1])
+if current ~= ARGV[1] then
+    return 0
+end
+
+local renewed = redis.call("EXPIRE", KEYS[1], tonumber(ARGV[2]))
+if renewed ~= 1 then
+    return 0
+end
+
+redis.call("HSET", KEYS[2], ARGV[3], ARGV[1])
+return 1
+"""
 
 
 class ShardOwnershipManager:
@@ -122,23 +137,26 @@ class ShardOwnershipManager:
 
     async def renew_shard(self, shard: int, worker_group: str) -> bool:
         """
-        Extend TTL for an owned shard.
-        Returns False if the shard is no longer owned by this group.
+        Atomically extend TTL only while worker_group is still the owner.
+        Returns False for owner mismatch, missing lease, or rejected EXPIRE.
         """
         key = RedisKey.cp_shard_owner(shard)
-        current = await self._redis.get(key)
-        if (
-            current
-            and (current.decode() if isinstance(current, bytes) else current)
-            == worker_group
-        ):
-            await self._redis.expire(key, OWNER_TTL)
+        renewed = await self._redis.eval(
+            _RENEW_SHARD_LUA,
+            2,
+            key,
+            RedisKey.cp_shard_owners(),
+            worker_group,
+            OWNER_TTL,
+            shard,
+        )
+        if bool(renewed):
             return True
+
         logger.warning(
-            "Shard renew failed: shard=%d requested_group=%s current_owner=%s",
+            "Shard renew failed: shard=%d requested_group=%s",
             shard,
             worker_group,
-            current.decode() if current else "none",
         )
         return False
 

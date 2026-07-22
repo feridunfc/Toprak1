@@ -5,7 +5,11 @@ IRONCLAD Sprint 11/12 — Graceful Drain Management with Metrics
 Sprint 11 semantics preserved:
   - WorkerDrainingEvent emitted on drain start
   - consumer.stop_pulling() called immediately
-  - shard owner keys released after wait
+
+Sprint 79.5 correction:
+  - shard ownership is worker-group scoped
+  - one worker instance must never delete the shared group lease
+  - ownership expires naturally unless another group member renews it
 
 Sprint 12 additions:
   - drain_started / drain_completed / drain_timeout counters
@@ -21,8 +25,8 @@ import logging
 import time
 
 from hfa.events.codec import serialize_event
-from hfa.events.schema import WorkerDrainingEvent
 from hfa.config.keys import RedisKey
+from hfa.events.schema import WorkerDrainingEvent
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -54,6 +58,10 @@ class DrainManager:
     @property
     def is_draining(self) -> bool:
         return self._draining
+
+    def reset(self) -> None:
+        """Reset lifecycle-local drain state after a completed service stop."""
+        self._draining = False
 
     async def start_drain(
         self, reason: str = "shutdown", timeout: float = 30.0
@@ -106,16 +114,15 @@ class DrainManager:
             if _M:
                 _M.worker_drain_completed_total.inc()
 
-        await self._release_shards()
+        # Shard leases are worker-group scoped.  This instance stops
+        # renewing through WorkerService shutdown; the Redis TTL is the only
+        # safe release mechanism while sibling workers may still be alive.
 
     async def _release_shards(self) -> None:
-        for shard in self._shards:
-            key = RedisKey.cp_shard_owner(shard)
-            try:
-                owner = await self._redis.get(key)
-                if owner:
-                    owner_str = owner.decode() if isinstance(owner, bytes) else owner
-                    if owner_str == self._worker_group:
-                        await self._redis.delete(key)
-            except Exception as exc:
-                logger.error("Failed to release shard %d: %s", shard, exc)
+        # Compatibility no-op: group leases expire by TTL, not instance stop.
+        logger.debug(
+            "Shard lease release deferred to TTL: worker=%s group=%s shards=%s",
+            self._worker_id,
+            self._worker_group,
+            self._shards,
+        )

@@ -11,6 +11,7 @@ Sprint 2 change: after a successful claim_start(), the fence tuple
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -130,8 +131,44 @@ class TaskConsumer:
             )
             await loop.start()
 
+        execution_task: asyncio.Task | None = None
+        ownership_task: asyncio.Task | None = None
         try:
-            executed = await self._executor.execute(ctx)
+            if loop is None:
+                executed = await self._executor.execute(ctx)
+            else:
+                execution_task = asyncio.create_task(
+                    self._executor.execute(ctx),
+                    name=f"task-execution:{ctx.task_id}",
+                )
+                ownership_task = asyncio.create_task(
+                    loop.wait_for_ownership_loss(),
+                    name=f"task-ownership:{ctx.task_id}",
+                )
+                done, _pending = await asyncio.wait(
+                    {execution_task, ownership_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if ownership_task in done:
+                    status = ownership_task.result()
+                    execution_task.cancel()
+                    await asyncio.gather(
+                        execution_task,
+                        return_exceptions=True,
+                    )
+                    raise RuntimeError(
+                        "Task ownership lost during execution: "
+                        f"task_id={ctx.task_id} status={status}"
+                    )
+
+                ownership_task.cancel()
+                await asyncio.gather(
+                    ownership_task,
+                    return_exceptions=True,
+                )
+                executed = execution_task.result()
+
             completed = await self._complete_with_fence(ctx, claim, executed)
             return ConsumedTaskResult(
                 claimed=claim,
@@ -139,5 +176,17 @@ class TaskConsumer:
                 completed=completed,
             )
         finally:
+            if ownership_task is not None and not ownership_task.done():
+                ownership_task.cancel()
+                await asyncio.gather(
+                    ownership_task,
+                    return_exceptions=True,
+                )
+            if execution_task is not None and not execution_task.done():
+                execution_task.cancel()
+                await asyncio.gather(
+                    execution_task,
+                    return_exceptions=True,
+                )
             if loop is not None:
                 await loop.stop()
