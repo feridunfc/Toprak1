@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Callable
 
 import pytest
+import pytest_asyncio
+import redis.asyncio as redis_asyncio
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -46,3 +49,19 @@ def repo_root() -> Path:
 @pytest.fixture(scope="session")
 def sprint80_module_loader() -> Callable[[str], ModuleType]:
     return load_sprint80_module
+
+
+@pytest_asyncio.fixture
+async def sprint80_redis():
+    url = os.getenv("SPRINT80_REDIS_URL", "")
+    if not url:
+        pytest.skip("SPRINT80_REDIS_URL is required for Redis-backed diagnostics")
+
+    client = redis_asyncio.Redis.from_url(url, decode_responses=False)
+    await client.ping()
+    await client.flushdb()
+    try:
+        yield client
+    finally:
+        await client.flushdb()
+        await client.aclose()
