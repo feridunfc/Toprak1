@@ -13,6 +13,12 @@ import redis.asyncio as redis_asyncio
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+SUPERSEDED_CARDINALITY_TESTS = {
+    "test_exact_cardinality_operations_are_observed",
+    "test_terminal_duplicate_cleanup_only_acks_transport",
+    "test_no_operation_exposes_aggregate_revision_evidence",
+}
+
 
 def load_sprint80_module(name: str) -> ModuleType:
     path = REPO_ROOT / "scripts" / "sprint80" / f"{name}.py"
@@ -42,23 +48,35 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(items):
-    """Keep only the cardinality report fixture on one module-scoped event loop.
+    """Apply diagnostic-only fixture compatibility and retire stale assertions.
 
-    Existing Redis-backed diagnostics remain function-scoped. A global loop-scope
-    override causes cross-loop Redis futures, so the diagnostic-only scope is
-    attached locally. Replace this private pytest-asyncio hook with the public
-    loop_scope decorator when the repository pins a compatible pytest-asyncio
-    version.
+    The original 80B.4 probe uses a module-scoped async fixture. Until the
+    repository pins a pytest-asyncio version, its loop scope is attached only to
+    that fixture. Three original assertions are explicitly superseded by the
+    80B.4 correction module, which measures nine operations, derives revision
+    evidence from observed fields, and separates worker ACK from operator cleanup.
     """
+
     seen: set[int] = set()
     for item in items:
         module = getattr(item, "module", None)
         fixture = getattr(module, "cardinality_report", None) if module else None
         function = getattr(fixture, "_fixture_function", None)
-        if function is None or id(function) in seen:
-            continue
-        function._loop_scope = "module"
-        seen.add(id(function))
+        if function is not None and id(function) not in seen:
+            function._loop_scope = "module"
+            seen.add(id(function))
+
+        if (
+            item.name in SUPERSEDED_CARDINALITY_TESTS
+            and "test_80_04_transition_cardinality.py" in item.nodeid
+        ):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        "Superseded by test_80_04z_transition_cardinality_corrections.py"
+                    )
+                )
+            )
 
 
 @pytest.fixture(scope="session")
