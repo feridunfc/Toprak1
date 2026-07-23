@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping
 import pytest
 import redis.asyncio as redis_asyncio
 
+from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.terminal_duplicate_cleanup_audit import (
     AUDIT_PHASE_INTENT,
@@ -34,6 +35,12 @@ EXPECTED_CORRECTED_OPERATIONS = {
     "legacy_run_completion_sequence",
     "worker_terminal_duplicate_ack",
     "operator_terminal_duplicate_cleanup_command",
+}
+
+SUPERSEDED_BASE_TESTS = {
+    "test_exact_cardinality_operations_are_observed",
+    "test_terminal_duplicate_cleanup_only_acks_transport",
+    "test_no_operation_exposes_aggregate_revision_evidence",
 }
 
 
@@ -71,7 +78,13 @@ def _record_field_names(observation) -> set[str]:
     return names
 
 
-def _revision_kwargs(model: ModuleType, *, before: Mapping[str, Any], after: Mapping[str, Any], observation) -> dict[str, Any]:
+def _revision_kwargs(
+    model: ModuleType,
+    *,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    observation,
+) -> dict[str, Any]:
     return model.derive_revision_evidence(
         before,
         after,
@@ -96,7 +109,13 @@ async def _capture_base_observations(redis, repo_root: Path, model: ModuleType):
     return base, captured
 
 
-async def _derive_revision_observations(redis, repo_root: Path, model: ModuleType, base: ModuleType, observations: list[Any]) -> dict[str, dict[str, Any]]:
+async def _derive_operation_revision_observations(
+    redis,
+    repo_root: Path,
+    model: ModuleType,
+    base: ModuleType,
+    observations: list[Any],
+) -> dict[str, dict[str, Any]]:
     by_name = {row.operation: row for row in observations}
     derived: dict[str, dict[str, Any]] = {}
     await redis.flushdb()
@@ -109,61 +128,111 @@ async def _derive_revision_observations(redis, repo_root: Path, model: ModuleTyp
     before = await _hash(redis, keys["meta"])
     await base._admit(redis, repo_root, keys, task_id, run_id, tenant_id)
     after = await _hash(redis, keys["meta"])
-    derived["task_admit"] = _revision_kwargs(model, before=before, after=after, observation=by_name["task_admit"])
+    derived["task_admit"] = _revision_kwargs(
+        model, before=before, after=after, observation=by_name["task_admit"]
+    )
 
     before = after
     await base._dispatch(redis, repo_root, keys, task_id, run_id, tenant_id)
     after = await _hash(redis, keys["meta"])
-    derived["task_dispatch"] = _revision_kwargs(model, before=before, after=after, observation=by_name["task_dispatch"])
+    derived["task_dispatch"] = _revision_kwargs(
+        model, before=before, after=after, observation=by_name["task_dispatch"]
+    )
 
     before = after
     await base._claim(redis, repo_root, keys, task_id)
     after = await _hash(redis, keys["meta"])
-    derived["task_claim"] = _revision_kwargs(model, before=before, after=after, observation=by_name["task_claim"])
+    derived["task_claim"] = _revision_kwargs(
+        model, before=before, after=after, observation=by_name["task_claim"]
+    )
 
     before = after
     await base._heartbeat(redis, repo_root, keys, task_id, tenant_id)
     after = await _hash(redis, keys["meta"])
-    derived["task_heartbeat"] = _revision_kwargs(model, before=before, after=after, observation=by_name["task_heartbeat"])
+    derived["task_heartbeat"] = _revision_kwargs(
+        model, before=before, after=after, observation=by_name["task_heartbeat"]
+    )
 
     before = after
     await base._complete(redis, repo_root, keys, task_id, run_id, tenant_id)
     after = await _hash(redis, keys["meta"])
-    derived["task_complete"] = _revision_kwargs(model, before=before, after=after, observation=by_name["task_complete"])
+    derived["task_complete"] = _revision_kwargs(
+        model, before=before, after=after, observation=by_name["task_complete"]
+    )
 
     requeue_task = "s80-revision-requeue"
     requeue_run = "s80-revision-requeue-run"
     requeue_tenant = "s80-revision-requeue-tenant"
     requeue_keys = base._task_keys(requeue_task, requeue_tenant, requeue_run)
-    await base._admit(redis, repo_root, requeue_keys, requeue_task, requeue_run, requeue_tenant)
-    await base._dispatch(redis, repo_root, requeue_keys, requeue_task, requeue_run, requeue_tenant)
+    await base._admit(
+        redis, repo_root, requeue_keys, requeue_task, requeue_run, requeue_tenant
+    )
+    await base._dispatch(
+        redis, repo_root, requeue_keys, requeue_task, requeue_run, requeue_tenant
+    )
     await base._claim(redis, repo_root, requeue_keys, requeue_task)
     before = await _hash(redis, requeue_keys["meta"])
     await base._eval_lua(
         redis,
         repo_root=repo_root,
         script_name="task_requeue",
-        keys=[requeue_keys["state"], requeue_keys["meta"], requeue_keys["ready"], requeue_keys["running"], requeue_keys["completion_stream"]],
-        args=[requeue_task, requeue_tenant, "running", 6000, 6000, 3, "STALE_HEARTBEAT", 10000],
+        keys=[
+            requeue_keys["state"],
+            requeue_keys["meta"],
+            requeue_keys["ready"],
+            requeue_keys["running"],
+            requeue_keys["completion_stream"],
+        ],
+        args=[
+            requeue_task,
+            requeue_tenant,
+            "running",
+            6000,
+            6000,
+            3,
+            "STALE_HEARTBEAT",
+            10000,
+        ],
     )
     after = await _hash(redis, requeue_keys["meta"])
-    derived["task_requeue"] = _revision_kwargs(model, before=before, after=after, observation=by_name["task_requeue"])
+    derived["task_requeue"] = _revision_kwargs(
+        model, before=before, after=after, observation=by_name["task_requeue"]
+    )
 
     await redis.flushdb()
     legacy_observation = await base._observe_legacy_run_complete(redis, model)
     legacy_fields = {}
     legacy_fields.update(await _hash(redis, "hfa:run:meta:s80-card-legacy-run"))
     legacy_fields.update(await _hash(redis, "hfa:run:result:s80-card-legacy-run"))
-    derived["legacy_run_complete"] = _revision_kwargs(model, before={}, after=legacy_fields, observation=legacy_observation)
+    derived["legacy_run_complete"] = _revision_kwargs(
+        model,
+        before={},
+        after=legacy_fields,
+        observation=legacy_observation,
+    )
 
     await redis.flushdb()
     worker_ack_observation = await base._observe_terminal_duplicate_cleanup(redis, model)
-    worker_meta = await _hash(redis, DagRedisKey.task_meta("s80-card-terminal-duplicate"))
-    derived["terminal_duplicate_cleanup"] = _revision_kwargs(model, before={}, after=worker_meta, observation=worker_ack_observation)
+    worker_meta = await _hash(
+        redis, DagRedisKey.task_meta("s80-card-terminal-duplicate")
+    )
+    derived["terminal_duplicate_cleanup"] = _revision_kwargs(
+        model,
+        before={},
+        after=worker_meta,
+        observation=worker_ack_observation,
+    )
     return derived
 
 
-async def _read_new_records(redis, *, key: str, start_length: int, source: str, model: ModuleType):
+async def _read_new_records(
+    redis,
+    *,
+    key: str,
+    start_length: int,
+    source: str,
+    model: ModuleType,
+):
     rows = await redis.xrange(key, min="-", max="+")
     records = []
     for _, raw_fields in rows[start_length:]:
@@ -190,7 +259,10 @@ async def _observe_operator_cleanup(redis, model: ModuleType):
     await redis.set(state_key, "done")
     await redis.hset(meta_key, mapping={"task_id": task_id, "run_id": run_id})
     await redis.xgroup_create(stream, group, id="0", mkstream=True)
-    message_id = await redis.xadd(stream, {"event_type": "TaskRequested", "task_id": task_id, "run_id": run_id})
+    message_id = await redis.xadd(
+        stream,
+        {"event_type": "TaskRequested", "task_id": task_id, "run_id": run_id},
+    )
     await redis.xreadgroup(group, consumer, {stream: ">"}, count=1)
 
     state_before = _decode(await redis.get(state_key))
@@ -212,11 +284,29 @@ async def _observe_operator_cleanup(redis, model: ModuleType):
 
     pending_after = await redis.xpending_range(stream, group, "-", "+", 10)
     meta_after = await _hash(redis, meta_key)
-    runtime_records = await _read_new_records(redis, key=stream, start_length=runtime_length_before, source="shard_stream", model=model)
-    audit_records = await _read_new_records(redis, key=TERMINAL_DUPLICATE_CLEANUP_AUDIT_STREAM, start_length=audit_length_before, source="terminal_duplicate_cleanup_audit", model=model)
+    runtime_records = await _read_new_records(
+        redis,
+        key=stream,
+        start_length=runtime_length_before,
+        source="shard_stream",
+        model=model,
+    )
+    audit_records = await _read_new_records(
+        redis,
+        key=TERMINAL_DUPLICATE_CLEANUP_AUDIT_STREAM,
+        start_length=audit_length_before,
+        source="terminal_duplicate_cleanup_audit",
+        model=model,
+    )
     records = runtime_records + audit_records
     counts = Counter(record.primary_class for record in records)
-    revision = model.derive_revision_evidence(meta_before, meta_after, additional_field_names={field for record in records for field in record.fields})
+    revision = model.derive_revision_evidence(
+        meta_before,
+        meta_after,
+        additional_field_names={
+            field for record in records for field in record.fields
+        },
+    )
 
     assert result.status == CLEANED
     assert result.ack_count == 1
@@ -225,13 +315,17 @@ async def _observe_operator_cleanup(redis, model: ModuleType):
 
     phases = {
         _decode(fields.get(b"event_phase") or fields.get("event_phase"))
-        for _, fields in await redis.xrange(TERMINAL_DUPLICATE_CLEANUP_AUDIT_STREAM, min="-", max="+")
+        for _, fields in await redis.xrange(
+            TERMINAL_DUPLICATE_CLEANUP_AUDIT_STREAM, min="-", max="+"
+        )
     }
     assert phases == {AUDIT_PHASE_INTENT, AUDIT_PHASE_OUTCOME}
 
     return model.OperationObservation(
         operation="operator_terminal_duplicate_cleanup_command",
-        transaction_boundary="multi_command_audit_intent_evidence_recheck_xack_audit_outcome",
+        transaction_boundary=(
+            "multi_command_audit_intent_evidence_recheck_xack_audit_outcome"
+        ),
         state_before=state_before,
         state_after=_decode(await redis.get(state_key)),
         aggregate_revision_candidate=revision["aggregate_revision_evidence_count"],
@@ -253,12 +347,22 @@ async def _observe_operator_cleanup(redis, model: ModuleType):
     )
 
 
-async def _build_corrected_report(*, redis_url: str, repo_root: Path, model: ModuleType) -> dict[str, Any]:
+async def _build_corrected_report(
+    *,
+    redis_url: str,
+    repo_root: Path,
+    model: ModuleType,
+) -> dict[str, Any]:
     redis = redis_asyncio.Redis.from_url(redis_url, decode_responses=False)
     await redis.ping()
     try:
-        base, observations = await _capture_base_observations(redis, repo_root, model)
-        revisions = await _derive_revision_observations(redis, repo_root, model, base, observations)
+        base, observations = await _capture_base_observations(
+            redis, repo_root, model
+        )
+        revisions = await _derive_operation_revision_observations(
+            redis, repo_root, model, base, observations
+        )
+
         corrected = []
         for observation in observations:
             revision = revisions[observation.operation]
@@ -270,13 +374,19 @@ async def _build_corrected_report(*, redis_url: str, repo_root: Path, model: Mod
                 replace(
                     observation,
                     operation=operation_name,
-                    aggregate_revision_candidate=revision["aggregate_revision_evidence_count"],
+                    aggregate_revision_candidate=revision[
+                        "aggregate_revision_evidence_count"
+                    ],
                     **revision,
                 )
             )
+
         corrected.append(await _observe_operator_cleanup(redis, model))
         report = model.render_report(corrected)
-        model.write_json(repo_root / "local_out/sprint80/transition_cardinality.json", report)
+        model.write_json(
+            repo_root / "local_out/sprint80/transition_cardinality.json",
+            report,
+        )
         return report
     finally:
         await redis.flushdb()
@@ -284,12 +394,21 @@ async def _build_corrected_report(*, redis_url: str, repo_root: Path, model: Mod
 
 
 @pytest.fixture(scope="module")
-def corrected_cardinality_report(repo_root: Path, sprint80_module_loader: Callable[[str], ModuleType]):
+def corrected_cardinality_report(
+    repo_root: Path,
+    sprint80_module_loader: Callable[[str], ModuleType],
+):
     redis_url = os.getenv("SPRINT80_REDIS_URL", "")
     if not redis_url:
         pytest.skip("SPRINT80_REDIS_URL is required for corrected cardinality diagnostics")
     model = sprint80_module_loader("transition_cardinality")
-    return asyncio.run(_build_corrected_report(redis_url=redis_url, repo_root=repo_root, model=model))
+    return asyncio.run(
+        _build_corrected_report(
+            redis_url=redis_url,
+            repo_root=repo_root,
+            model=model,
+        )
+    )
 
 
 def _operation(report: dict[str, Any], name: str) -> dict[str, Any]:
@@ -297,14 +416,22 @@ def _operation(report: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 @pytest.mark.sprint80_reality
-def test_corrected_operation_scope_contains_nine_operations(corrected_cardinality_report: dict[str, Any]):
+def test_corrected_operation_scope_contains_nine_operations(
+    corrected_cardinality_report: dict[str, Any],
+):
     assert corrected_cardinality_report["operation_count"] == 9
-    assert {row["operation"] for row in corrected_cardinality_report["operations"]} == EXPECTED_CORRECTED_OPERATIONS
+    assert {
+        row["operation"] for row in corrected_cardinality_report["operations"]
+    } == EXPECTED_CORRECTED_OPERATIONS
 
 
 @pytest.mark.sprint80_reality
-def test_worker_terminal_duplicate_ack_emits_no_new_record(corrected_cardinality_report: dict[str, Any]):
-    operation = _operation(corrected_cardinality_report, "worker_terminal_duplicate_ack")
+def test_worker_terminal_duplicate_ack_emits_no_new_record(
+    corrected_cardinality_report: dict[str, Any],
+):
+    operation = _operation(
+        corrected_cardinality_report, "worker_terminal_duplicate_ack"
+    )
     assert operation["state_before"] == "done"
     assert operation["state_after"] == "done"
     assert operation["transport_ack"] == 1
@@ -313,31 +440,43 @@ def test_worker_terminal_duplicate_ack_emits_no_new_record(corrected_cardinality
 
 
 @pytest.mark.sprint80_reality
-def test_operator_terminal_duplicate_cleanup_emits_intent_and_outcome_audit(corrected_cardinality_report: dict[str, Any]):
-    operation = _operation(corrected_cardinality_report, "operator_terminal_duplicate_cleanup_command")
+def test_operator_terminal_duplicate_cleanup_emits_intent_and_outcome_audit(
+    corrected_cardinality_report: dict[str, Any],
+):
+    operation = _operation(
+        corrected_cardinality_report,
+        "operator_terminal_duplicate_cleanup_command",
+    )
     assert operation["state_before"] == "done"
     assert operation["state_after"] == "done"
     assert operation["execution_lifecycle_mutation"] == 0
     assert operation["transport_ack"] == 1
     assert operation["audit_append"] == 2
-    assert [record["primary_class"] for record in operation["records"]] == ["AuditEvent", "AuditEvent"]
+    assert [record["primary_class"] for record in operation["records"]] == [
+        "AuditEvent",
+        "AuditEvent",
+    ]
     assert corrected_cardinality_report["record_class_counts"]["AuditEvent"] == 2
 
 
 @pytest.mark.sprint80_reality
-def test_revision_evidence_is_derived_from_observed_fields(corrected_cardinality_report: dict[str, Any]):
+def test_revision_evidence_is_derived_from_observed_fields(
+    corrected_cardinality_report: dict[str, Any],
+):
     assert corrected_cardinality_report["aggregate_revision_evidence_count"] == 0
     assert corrected_cardinality_report["aggregate_revision_evidence"] == []
     for operation in corrected_cardinality_report["operations"]:
         assert "revision_fields_observed" in operation
         assert "revision_semantics" in operation
-        assert operation["aggregate_revision_evidence"] == []
+        assert not operation["aggregate_revision_evidence"]
         assert operation["aggregate_revision_evidence_count"] == 0
         assert operation["aggregate_revision_candidate"] == 0
 
 
 @pytest.mark.sprint80_reality
-def test_claim_epoch_is_not_aggregate_revision(corrected_cardinality_report: dict[str, Any]):
+def test_claim_epoch_is_not_aggregate_revision(
+    corrected_cardinality_report: dict[str, Any],
+):
     claim = _operation(corrected_cardinality_report, "task_claim")
     semantics = dict(claim["revision_semantics"])
     assert "claim_epoch" in claim["revision_fields_observed"]
@@ -346,7 +485,9 @@ def test_claim_epoch_is_not_aggregate_revision(corrected_cardinality_report: dic
 
 
 @pytest.mark.sprint80_reality
-def test_scheduler_epoch_is_not_aggregate_revision(corrected_cardinality_report: dict[str, Any]):
+def test_scheduler_epoch_is_not_aggregate_revision(
+    corrected_cardinality_report: dict[str, Any],
+):
     dispatch = _operation(corrected_cardinality_report, "task_dispatch")
     semantics = dict(dispatch["revision_semantics"])
     assert "scheduler_epoch" in dispatch["revision_fields_observed"]
@@ -355,7 +496,9 @@ def test_scheduler_epoch_is_not_aggregate_revision(corrected_cardinality_report:
 
 
 @pytest.mark.sprint80_reality
-def test_field_shape_alone_does_not_verify_canonical_transition_record(sprint80_module_loader: Callable[[str], ModuleType]):
+def test_field_shape_alone_does_not_verify_canonical_transition_record(
+    sprint80_module_loader: Callable[[str], ModuleType],
+):
     model = sprint80_module_loader("transition_cardinality")
     fields = {
         "aggregate_id": "agg-1",
@@ -384,7 +527,9 @@ def test_field_shape_alone_does_not_verify_canonical_transition_record(sprint80_
 
 
 @pytest.mark.sprint80_reality
-def test_corrected_taxonomy_and_verified_canonical_count(corrected_cardinality_report: dict[str, Any]):
+def test_corrected_taxonomy_and_verified_canonical_count(
+    corrected_cardinality_report: dict[str, Any],
+):
     assert corrected_cardinality_report["record_class_counts"] == {
         "AuditEvent": 2,
         "CanonicalTransitionRecord": 0,
@@ -399,8 +544,23 @@ def test_corrected_taxonomy_and_verified_canonical_count(corrected_cardinality_r
 
 
 @pytest.mark.sprint80_contract
-@pytest.mark.xfail(strict=True, reason="Observed lifecycle mutations still do not produce one transaction-coupled, authority-verified CanonicalTransitionRecord")
-def test_each_lifecycle_mutation_produces_one_verified_canonical_transition_record(corrected_cardinality_report: dict[str, Any]):
-    lifecycle_operations = [operation for operation in corrected_cardinality_report["operations"] if operation["execution_lifecycle_mutation"] > 0]
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Observed lifecycle mutations still do not produce one transaction-coupled, "
+        "authority-verified CanonicalTransitionRecord"
+    ),
+)
+def test_each_lifecycle_mutation_produces_one_verified_canonical_transition_record(
+    corrected_cardinality_report: dict[str, Any],
+):
+    lifecycle_operations = [
+        operation
+        for operation in corrected_cardinality_report["operations"]
+        if operation["execution_lifecycle_mutation"] > 0
+    ]
     assert lifecycle_operations
-    assert all(operation["canonical_transition_record_count"] == 1 for operation in lifecycle_operations)
+    assert all(
+        operation["canonical_transition_record_count"] == 1
+        for operation in lifecycle_operations
+    )
