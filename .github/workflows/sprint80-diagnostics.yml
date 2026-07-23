@@ -100,7 +100,6 @@ jobs:
         run: |
           set -o pipefail
           python -m pytest tests/diagnostics/sprint80 \
-            -o asyncio_default_fixture_loop_scope=module \
             -m sprint80_reality \
             -q --tb=short 2>&1 | tee local_out/sprint80/reality_pytest.txt
 
@@ -109,7 +108,6 @@ jobs:
         run: |
           set -o pipefail
           python -m pytest tests/diagnostics/sprint80 \
-            -o asyncio_default_fixture_loop_scope=module \
             -m sprint80_contract \
             -q -rxX --tb=short 2>&1 | tee local_out/sprint80/contracts_pytest.txt
 
