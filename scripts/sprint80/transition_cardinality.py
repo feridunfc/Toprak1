@@ -7,7 +7,7 @@ import subprocess
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 AUDIT_BASE_COMMIT = "2eca85b2d9b115ad4588641b020e98efdd570a2d"
 
@@ -33,6 +33,26 @@ CANONICAL_TRANSITION_REQUIRED_FIELDS = {
     "payload_hash",
 }
 
+AGGREGATE_REVISION_FIELDS = {
+    "aggregate_revision",
+    "revision",
+    "state_revision",
+    "entity_version",
+    "expected_revision",
+    "from_revision",
+    "to_revision",
+}
+
+NON_AGGREGATE_REVISION_FIELDS = {
+    "claim_epoch": "coordination_fence",
+    "scheduler_epoch": "coordination_fence",
+    "stream_message_id": "transport_identity",
+    "message_id": "transport_identity",
+    "requeue_count": "retry_counter",
+    "heartbeat_at_ms": "liveness_timestamp",
+    "last_heartbeat_at_ms": "liveness_timestamp",
+}
+
 
 @dataclass(frozen=True)
 class ObservedRecord:
@@ -42,6 +62,10 @@ class ObservedRecord:
     primary_class: str
     fields: tuple[str, ...]
     canonical_schema_match: bool
+    canonical_schema_candidate_match: bool = False
+    canonical_authority_contract_match: bool = False
+    transaction_coupled: bool = False
+    verified_canonical_transition_record: bool = False
 
 
 @dataclass(frozen=True)
@@ -61,6 +85,12 @@ class OperationObservation:
     changed_keys: tuple[str, ...]
     records: tuple[ObservedRecord, ...]
     notes: tuple[str, ...] = ()
+    revision_fields_observed: tuple[str, ...] = ()
+    revision_values_before: tuple[tuple[str, str], ...] = ()
+    revision_values_after: tuple[tuple[str, str], ...] = ()
+    revision_semantics: tuple[tuple[str, str], ...] = ()
+    aggregate_revision_evidence: tuple[str, ...] = ()
+    aggregate_revision_evidence_count: int = 0
 
 
 def decode(value: Any) -> str:
@@ -71,7 +101,7 @@ def decode(value: Any) -> str:
     return str(value)
 
 
-def decode_mapping(mapping: dict[Any, Any]) -> dict[str, str]:
+def decode_mapping(mapping: Mapping[Any, Any] | None) -> dict[str, str]:
     return {decode(key): decode(value) for key, value in (mapping or {}).items()}
 
 
@@ -81,14 +111,64 @@ def matches_canonical_transition_schema(fields: Iterable[str]) -> bool:
     return CANONICAL_TRANSITION_REQUIRED_FIELDS <= field_set and receipt_present
 
 
-def classify_record(*, source: str, source_key: str, fields: dict[str, str]) -> ObservedRecord:
+def derive_revision_evidence(
+    before_fields: Mapping[str, Any] | None,
+    after_fields: Mapping[str, Any] | None,
+    *,
+    additional_field_names: Iterable[str] = (),
+) -> dict[str, Any]:
+    before = {str(key): decode(value) for key, value in (before_fields or {}).items()}
+    after = {str(key): decode(value) for key, value in (after_fields or {}).items()}
+    field_names = set(before) | set(after) | {str(name) for name in additional_field_names}
+
+    observed = sorted(
+        name
+        for name in field_names
+        if name in AGGREGATE_REVISION_FIELDS or name in NON_AGGREGATE_REVISION_FIELDS
+    )
+    semantics: dict[str, str] = {}
+    evidence: list[str] = []
+    for name in observed:
+        if name in AGGREGATE_REVISION_FIELDS:
+            semantics[name] = "aggregate_revision_candidate"
+            evidence.append(name)
+        else:
+            semantics[name] = NON_AGGREGATE_REVISION_FIELDS[name]
+
+    return {
+        "revision_fields_observed": tuple(observed),
+        "revision_values_before": tuple(
+            sorted((name, before.get(name, "")) for name in observed)
+        ),
+        "revision_values_after": tuple(
+            sorted((name, after.get(name, "")) for name in observed)
+        ),
+        "revision_semantics": tuple(sorted(semantics.items())),
+        "aggregate_revision_evidence": tuple(sorted(evidence)),
+        "aggregate_revision_evidence_count": len(evidence),
+    }
+
+
+def classify_record(
+    *,
+    source: str,
+    source_key: str,
+    fields: dict[str, str],
+    canonical_authority_contract_match: bool = False,
+    transaction_coupled: bool = False,
+) -> ObservedRecord:
     field_names = set(fields)
     event_type = fields.get("event_type", "")
-    canonical = matches_canonical_transition_schema(field_names)
+    schema_candidate = matches_canonical_transition_schema(field_names)
+    verified_canonical = bool(
+        schema_candidate
+        and canonical_authority_contract_match
+        and transaction_coupled
+    )
 
-    if canonical:
+    if verified_canonical:
         primary_class = "CanonicalTransitionRecord"
-    elif source == "event_store":
+    elif source in {"event_store", "terminal_duplicate_cleanup_audit"}:
         primary_class = "AuditEvent"
     elif event_type == "TaskRequested":
         primary_class = "TransportMessage"
@@ -107,20 +187,44 @@ def classify_record(*, source: str, source_key: str, fields: dict[str, str]) -> 
         event_type=event_type,
         primary_class=primary_class,
         fields=tuple(sorted(field_names)),
-        canonical_schema_match=canonical,
+        canonical_schema_match=schema_candidate,
+        canonical_schema_candidate_match=schema_candidate,
+        canonical_authority_contract_match=canonical_authority_contract_match,
+        transaction_coupled=transaction_coupled,
+        verified_canonical_transition_record=verified_canonical,
     )
 
 
 def render_report(observations: Iterable[OperationObservation]) -> dict[str, Any]:
     rows = list(observations)
     class_counts: Counter[str] = Counter()
-    canonical_matches: list[dict[str, str]] = []
+    schema_candidates: list[dict[str, Any]] = []
+    verified_records: list[dict[str, Any]] = []
+    aggregate_revision_evidence: list[dict[str, Any]] = []
 
     for observation in rows:
+        if observation.aggregate_revision_evidence:
+            aggregate_revision_evidence.append(
+                {
+                    "operation": observation.operation,
+                    "fields": list(observation.aggregate_revision_evidence),
+                }
+            )
         for record in observation.records:
             class_counts[record.primary_class] += 1
-            if record.canonical_schema_match:
-                canonical_matches.append(
+            if record.canonical_schema_candidate_match:
+                schema_candidates.append(
+                    {
+                        "operation": observation.operation,
+                        "source_key": record.source_key,
+                        "event_type": record.event_type,
+                        "authority_contract_match": record.canonical_authority_contract_match,
+                        "transaction_coupled": record.transaction_coupled,
+                        "verified": record.verified_canonical_transition_record,
+                    }
+                )
+            if record.verified_canonical_transition_record:
+                verified_records.append(
                     {
                         "operation": observation.operation,
                         "source_key": record.source_key,
@@ -129,7 +233,7 @@ def render_report(observations: Iterable[OperationObservation]) -> dict[str, Any
                 )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "audit_base_commit": AUDIT_BASE_COMMIT,
         "operation_count": len(rows),
         "operations": [
@@ -142,8 +246,14 @@ def render_report(observations: Iterable[OperationObservation]) -> dict[str, Any
         "record_class_counts": {
             name: class_counts.get(name, 0) for name in sorted(PRIMARY_RECORD_CLASSES)
         },
-        "canonical_transition_record_count": class_counts["CanonicalTransitionRecord"],
-        "canonical_schema_matches": canonical_matches,
+        "canonical_transition_record_count": len(verified_records),
+        "verified_canonical_transition_records": verified_records,
+        "canonical_schema_matches": schema_candidates,
+        "canonical_schema_candidate_matches": schema_candidates,
+        "aggregate_revision_evidence": aggregate_revision_evidence,
+        "aggregate_revision_evidence_count": sum(
+            row.aggregate_revision_evidence_count for row in rows
+        ),
     }
 
 
