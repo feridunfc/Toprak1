@@ -268,6 +268,10 @@ def test_semantic_components_are_not_in_production_scheduler_composition(sprint8
         scheduler_loop_idle_sleep_ms=0,
         scheduler_loop_error_sleep_ms=0,
         scheduler_loop_max_failures=2,
+        dispatch_tokens_capacity=10,
+        dispatch_tokens_refill_per_sec=10,
+        dispatch_degraded_refill_per_sec=1,
+        dispatch_aimd_enabled=False,
     )
     scheduler = build_production_scheduler(
         redis=sprint80_redis,
