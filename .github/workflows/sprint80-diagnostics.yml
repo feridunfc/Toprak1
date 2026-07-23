@@ -135,6 +135,13 @@ jobs:
           print("SPRINT80_FINAL_WORKTREE_INVARIANT_OK")
           PY
 
+      - name: Build tamper-evident evidence manifest
+        run: |
+          python scripts/sprint80/transition_cardinality.py \
+            --repo-root . \
+            --directory local_out/sprint80 \
+            --out local_out/sprint80/manifest.json
+
       - name: Show diagnostic worktree state
         run: git status --short --untracked-files=all
 
