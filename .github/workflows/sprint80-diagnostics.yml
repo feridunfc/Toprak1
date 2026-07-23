@@ -1,0 +1,123 @@
+name: Sprint 80 Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - sprint/80b-executable-reconciliation
+    paths:
+      - ".github/workflows/sprint80-diagnostics.yml"
+      - "scripts/sprint80/**"
+      - "tests/diagnostics/sprint80/**"
+
+permissions:
+  contents: read
+
+jobs:
+  executable-reconciliation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      SPRINT80_REDIS_URL: redis://127.0.0.1:6389/0
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout diagnostic branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install diagnostic dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-asyncio redis
+
+      - name: Verify isolated Redis 7
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          import redis
+
+          url = os.environ["SPRINT80_REDIS_URL"]
+          last_error = None
+          for _ in range(30):
+              try:
+                  client = redis.Redis.from_url(url, decode_responses=True)
+                  client.ping()
+                  client.flushdb()
+                  print(client.info("server")["redis_version"])
+                  raise SystemExit(0)
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+          raise SystemExit(f"isolated Redis unavailable: {last_error}")
+          PY
+
+      - name: Run Sprint 80 preflight
+        run: |
+          python scripts/sprint80/preflight.py \
+            --repo-root . \
+            --expected-base-branch baseline/local-import \
+            --expected-base-commit 2eca85b2d9b115ad4588641b020e98efdd570a2d \
+            --redis-url "$SPRINT80_REDIS_URL" \
+            --out local_out/sprint80/preflight.json \
+            --environment-out local_out/sprint80/environment.json
+
+      - name: Generate writer inventory
+        run: |
+          python scripts/sprint80/writer_inventory.py \
+            --repo-root . \
+            --out local_out/sprint80/writer_inventory.json
+
+      - name: Run current reality tests
+        run: |
+          python -m pytest tests/diagnostics/sprint80 \
+            -m sprint80_reality \
+            -q --tb=short
+
+      - name: Run frozen target contracts
+        run: |
+          python -m pytest tests/diagnostics/sprint80 \
+            -m sprint80_contract \
+            -q -rxX --tb=short
+
+      - name: Re-run preflight after diagnostics
+        run: |
+          python scripts/sprint80/preflight.py \
+            --repo-root . \
+            --expected-base-branch baseline/local-import \
+            --expected-base-commit 2eca85b2d9b115ad4588641b020e98efdd570a2d \
+            --redis-url "$SPRINT80_REDIS_URL" \
+            --out local_out/sprint80/preflight_after.json \
+            --environment-out local_out/sprint80/environment_after.json
+
+      - name: Show diagnostic worktree state
+        run: git status --short
+
+      - name: Upload Sprint 80 evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint80-diagnostics-${{ github.sha }}
+          path: local_out/sprint80
+          if-no-files-found: warn
+          retention-days: 14
