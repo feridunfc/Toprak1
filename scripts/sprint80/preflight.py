@@ -126,7 +126,12 @@ def run_preflight(
     )
     changed_paths = tuple(path for path in changed_raw.splitlines() if path.strip())
 
-    status_raw = _run_git(repo_root, "status", "--short")
+    status_raw = _run_git(
+        repo_root,
+        "status",
+        "--short",
+        "--untracked-files=all",
+    )
     worktree_entries = tuple(line for line in status_raw.splitlines() if line.strip())
     worktree_paths = tuple(_parse_status_path(entry) for entry in worktree_entries)
 
