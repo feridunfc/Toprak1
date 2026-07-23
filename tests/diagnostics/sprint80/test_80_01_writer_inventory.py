@@ -75,7 +75,7 @@ def test_raw_redis_capability_distribution_is_reported(writer_payload: dict):
 
 
 @pytest.mark.sprint80_reality
-def test_every_writer_has_production_reachability_classification(
+def test_every_writer_has_allowed_reachability_label(
     writer_payload: dict,
     inventory: ModuleType,
 ):
@@ -85,6 +85,77 @@ def test_every_writer_has_production_reachability_classification(
         if writer["production_reachability"] not in inventory.ALLOWED_REACHABILITY
     ]
     assert invalid == []
+
+
+@pytest.mark.sprint80_reality
+def test_unknown_labels_are_reported_as_unresolved_not_as_completion(writer_payload: dict):
+    assert writer_payload["unknown_writer_count"] > 0
+    assert writer_payload["production_reachability_counts"]["unknown"] > 0
+
+
+@pytest.mark.sprint80_contract
+def test_no_unknown_production_default_writer_remains(writer_payload: dict):
+    offenders = [
+        writer["writer_id"]
+        for writer in writer_payload["writers"]
+        if writer["production_reachability"] == "production_default"
+        and writer["authority_class"] == "unknown"
+    ]
+    assert offenders == []
+
+
+@pytest.mark.sprint80_contract
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Canonical-candidate writers still exist without proven production reachability; "
+        "repository composition evidence has not converged"
+    ),
+)
+def test_no_unknown_canonical_candidate_reachability_remains(writer_payload: dict):
+    offenders = [
+        writer["writer_id"]
+        for writer in writer_payload["writers"]
+        if writer["authority_class"] == "canonical_candidate"
+        and writer["production_reachability"] == "unknown"
+    ]
+    assert offenders == []
+
+
+@pytest.mark.sprint80_contract
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Some production-default or production-flagged writer candidates still lack a "
+        "resolved composition root"
+    ),
+)
+def test_every_production_writer_has_composition_root_evidence(writer_payload: dict):
+    offenders = [
+        writer["writer_id"]
+        for writer in writer_payload["writers"]
+        if writer["production_reachability"]
+        in {"production_default", "production_flagged"}
+        and writer["composition_root"] == "unknown"
+    ]
+    assert offenders == []
+
+
+@pytest.mark.sprint80_contract
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "The current inventory uses filename/path heuristics and does not yet attach "
+        "per-writer classification evidence"
+    ),
+)
+def test_no_writer_is_classified_only_from_filename_without_evidence(writer_payload: dict):
+    assert all(
+        writer.get("authority_evidence")
+        and writer.get("reachability_evidence")
+        and writer.get("composition_evidence")
+        for writer in writer_payload["writers"]
+    )
 
 
 @pytest.mark.sprint80_contract
