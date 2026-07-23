@@ -9,6 +9,13 @@ on:
       - ".github/workflows/sprint80-diagnostics.yml"
       - "scripts/sprint80/**"
       - "tests/diagnostics/sprint80/**"
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - ".github/workflows/sprint80-diagnostics.yml"
+      - "scripts/sprint80/**"
+      - "tests/diagnostics/sprint80/**"
 
 permissions:
   contents: read
@@ -37,7 +44,7 @@ jobs:
       - name: Checkout diagnostic branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
 
       - name: Set up Python
