@@ -96,16 +96,20 @@ jobs:
             --out local_out/sprint80/writer_inventory.json
 
       - name: Run current reality tests
+        shell: bash
         run: |
+          set -o pipefail
           python -m pytest tests/diagnostics/sprint80 \
             -m sprint80_reality \
-            -q --tb=short
+            -q --tb=short 2>&1 | tee local_out/sprint80/reality_pytest.txt
 
       - name: Run frozen target contracts
+        shell: bash
         run: |
+          set -o pipefail
           python -m pytest tests/diagnostics/sprint80 \
             -m sprint80_contract \
-            -q -rxX --tb=short
+            -q -rxX --tb=short 2>&1 | tee local_out/sprint80/contracts_pytest.txt
 
       - name: Re-run preflight after diagnostics
         run: |
@@ -117,8 +121,22 @@ jobs:
             --out local_out/sprint80/preflight_after.json \
             --environment-out local_out/sprint80/environment_after.json
 
+      - name: Assert final diagnostic worktree invariant
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("local_out/sprint80/preflight_after.json").read_text(encoding="utf-8")
+          )
+          assert payload["status"] == "PASS", payload
+          assert payload["unexpected_changed_paths"] == [], payload
+          print("SPRINT80_FINAL_WORKTREE_INVARIANT_OK")
+          PY
+
       - name: Show diagnostic worktree state
-        run: git status --short
+        run: git status --short --untracked-files=all
 
       - name: Upload Sprint 80 evidence bundle
         if: always()
