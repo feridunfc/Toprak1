@@ -18,6 +18,7 @@ ALLOWED_CHANGED_PREFIXES = (
     "scripts/sprint80/",
     "tests/diagnostics/sprint80/",
     "local_out/sprint80/",
+    ".github/workflows/sprint80-diagnostics.yml",
 )
 REQUIRED_RUNTIME_FILES = (
     "hfa-core/src/hfa/state/__init__.py",
