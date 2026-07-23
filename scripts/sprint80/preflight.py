@@ -28,7 +28,7 @@ REQUIRED_RUNTIME_FILES = (
     "hfa-core/src/hfa/lua/task_complete.lua",
     "hfa-worker/src/hfa_worker/consumer.py",
     "hfa-worker/src/hfa_worker/task_consumer.py",
-    "hfa-worker/src/hfa_worker/service.py",
+    "hfa-worker/src/hfa_worker/main.py",
 )
 
 
@@ -70,8 +70,15 @@ def _run_git(repo_root: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
+def _normalize_repo_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
 def _is_allowlisted(path: str, allowed_prefixes: Iterable[str]) -> bool:
-    normalized = path.replace("\\", "/").lstrip("./")
+    normalized = _normalize_repo_path(path)
     return any(normalized.startswith(prefix) for prefix in allowed_prefixes)
 
 
