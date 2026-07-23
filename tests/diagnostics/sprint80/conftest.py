@@ -41,24 +41,6 @@ def pytest_configure(config):
     )
 
 
-def pytest_collection_modifyitems(items):
-    """Keep the long-running cardinality fixture on one module-scoped event loop.
-
-    Existing Redis-backed diagnostics remain function-scoped.  Applying a global
-    asyncio loop-scope override caused cross-loop Redis futures, so the scope is
-    attached only to the cardinality fixture's underlying async function.
-    """
-    seen: set[int] = set()
-    for item in items:
-        module = getattr(item, "module", None)
-        fixture = getattr(module, "cardinality_report", None) if module else None
-        function = getattr(fixture, "_fixture_function", None)
-        if function is None or id(function) in seen:
-            continue
-        function._loop_scope = "module"
-        seen.add(id(function))
-
-
 @pytest.fixture(scope="session")
 def repo_root() -> Path:
     return REPO_ROOT
