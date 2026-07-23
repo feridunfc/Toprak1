@@ -28,6 +28,7 @@ class _ShardManager:
     pass
 
 
+@pytest.mark.asyncio
 @pytest.mark.sprint80_reality
 @pytest.mark.sprint80_real_redis
 async def test_production_worker_composes_taskconsumer(sprint80_redis):
@@ -53,6 +54,7 @@ async def test_production_worker_composes_taskconsumer(sprint80_redis):
     assert service._consumer._task_consumer is service._task_consumer
 
 
+@pytest.mark.asyncio
 @pytest.mark.sprint80_reality
 @pytest.mark.sprint80_real_redis
 async def test_production_worker_composes_daglua_completion(sprint80_redis):
@@ -84,7 +86,7 @@ def test_taskrequested_event_type_selects_modern_taskconsumer_path():
 def test_runrequested_legacy_worker_path_remains_reachable():
     source = inspect.getsource(WorkerConsumer._process_message)
     assert "try_claim_and_mark_running" in source
-    assert "StateStore" not in source  # StateStore is injected on the consumer instance.
+    assert "_process_message_via_task_consumer" in source
 
 
 @pytest.mark.sprint80_reality
@@ -93,6 +95,7 @@ def test_scheduler_event_store_is_optional_in_production_composition():
     assert signature.parameters["event_store"].default is None
 
 
+@pytest.mark.asyncio
 @pytest.mark.sprint80_reality
 @pytest.mark.sprint80_real_redis
 async def test_semantic_components_are_not_in_production_worker_composition(sprint80_redis):
