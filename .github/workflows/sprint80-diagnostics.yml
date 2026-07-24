@@ -1,0 +1,284 @@
+name: Sprint 80 Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - sprint/80b-executable-reconciliation
+    paths:
+      - ".github/workflows/sprint80-diagnostics.yml"
+      - "scripts/sprint80/**"
+      - "tests/diagnostics/sprint80/**"
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - ".github/workflows/sprint80-diagnostics.yml"
+      - "scripts/sprint80/**"
+      - "tests/diagnostics/sprint80/**"
+
+permissions:
+  contents: read
+
+jobs:
+  executable-reconciliation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      SPRINT80_REDIS_URL: redis://127.0.0.1:6389/0
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout diagnostic branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install diagnostic dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-asyncio redis fastapi
+
+      - name: Verify isolated Redis 7
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          import redis
+
+          url = os.environ["SPRINT80_REDIS_URL"]
+          last_error = None
+          for _ in range(30):
+              try:
+                  client = redis.Redis.from_url(url, decode_responses=True)
+                  client.ping()
+                  client.flushdb()
+                  print(client.info("server")["redis_version"])
+                  raise SystemExit(0)
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+          raise SystemExit(f"isolated Redis unavailable: {last_error}")
+          PY
+
+      - name: Run Sprint 80 preflight
+        run: |
+          python scripts/sprint80/preflight.py \
+            --repo-root . \
+            --expected-base-branch baseline/local-import \
+            --expected-base-commit 2eca85b2d9b115ad4588641b020e98efdd570a2d \
+            --redis-url "$SPRINT80_REDIS_URL" \
+            --out local_out/sprint80/preflight.json \
+            --environment-out local_out/sprint80/environment.json
+
+      - name: Generate writer inventory
+        run: |
+          python scripts/sprint80/writer_inventory.py \
+            --repo-root . \
+            --out local_out/sprint80/writer_inventory.json
+
+      - name: Run current reality tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/diagnostics/sprint80 \
+            -m sprint80_reality \
+            -q --tb=short 2>&1 | tee local_out/sprint80/reality_pytest.txt
+
+      - name: Run frozen target contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/diagnostics/sprint80 \
+            -m sprint80_contract \
+            -q -rxX --tb=short 2>&1 | tee local_out/sprint80/contracts_pytest.txt
+
+      - name: Re-run preflight after diagnostics
+        run: |
+          python scripts/sprint80/preflight.py \
+            --repo-root . \
+            --expected-base-branch baseline/local-import \
+            --expected-base-commit 2eca85b2d9b115ad4588641b020e98efdd570a2d \
+            --redis-url "$SPRINT80_REDIS_URL" \
+            --out local_out/sprint80/preflight_after.json \
+            --environment-out local_out/sprint80/environment_after.json
+
+      - name: Assert final diagnostic worktree invariant
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("local_out/sprint80/preflight_after.json").read_text(encoding="utf-8")
+          )
+          assert payload["status"] == "PASS", payload
+          assert payload["unexpected_changed_paths"] == [], payload
+          print("SPRINT80_FINAL_WORKTREE_INVARIANT_OK")
+          PY
+
+      - name: Build pending 80B.8 final summary
+        run: |
+          python scripts/sprint80/final_summary.py \
+            --directory local_out/sprint80 \
+            --out local_out/sprint80/final_summary.json
+
+      - name: Build preliminary evidence manifest
+        run: |
+          python scripts/sprint80/transition_cardinality.py \
+            --repo-root . \
+            --directory local_out/sprint80 \
+            --out local_out/sprint80/manifest.json
+
+      - name: Validate preliminary mandatory evidence set
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          REQUIRED_EVIDENCE = {
+              "preflight.json",
+              "environment.json",
+              "writer_inventory.json",
+              "transition_cardinality.json",
+              "ttl_durability.json",
+              "truth_contradictions.json",
+              "aggregate_boundary.json",
+              "final_summary.json",
+              "reality_pytest.txt",
+              "contracts_pytest.txt",
+              "preflight_after.json",
+              "environment_after.json",
+          }
+
+          directory = Path("local_out/sprint80")
+          manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+          artifacts = manifest["artifacts"]
+          artifact_paths = {item["path"] for item in artifacts}
+          assert artifact_paths == REQUIRED_EVIDENCE, {
+              "missing": sorted(REQUIRED_EVIDENCE - artifact_paths),
+              "unexpected": sorted(artifact_paths - REQUIRED_EVIDENCE),
+          }
+          assert len(artifacts) == len(REQUIRED_EVIDENCE), artifacts
+          for item in artifacts:
+              path = directory / item["path"]
+              assert path.exists(), item
+              assert path.stat().st_size == item["size_bytes"], item
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"], item
+          print("SPRINT80_PRELIMINARY_MANDATORY_EVIDENCE_VALID")
+          PY
+
+      - name: Finalize 80B.8 manifest gate
+        run: |
+          python scripts/sprint80/final_summary.py \
+            --directory local_out/sprint80 \
+            --out local_out/sprint80/final_summary.json \
+            --manifest-validated
+
+      - name: Add consolidated accepted finding register
+        run: |
+          python scripts/sprint80/freeze_hardening.py \
+            --directory local_out/sprint80 \
+            --summary local_out/sprint80/final_summary.json \
+            --harden-summary \
+            --validate-summary
+
+      - name: Build final tamper-evident evidence manifest
+        run: |
+          python scripts/sprint80/transition_cardinality.py \
+            --repo-root . \
+            --directory local_out/sprint80 \
+            --out local_out/sprint80/manifest.json
+
+      - name: Validate 80B.8 closure and mandatory evidence set
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          REQUIRED_EVIDENCE = {
+              "preflight.json",
+              "environment.json",
+              "writer_inventory.json",
+              "transition_cardinality.json",
+              "ttl_durability.json",
+              "truth_contradictions.json",
+              "aggregate_boundary.json",
+              "final_summary.json",
+              "reality_pytest.txt",
+              "contracts_pytest.txt",
+              "preflight_after.json",
+              "environment_after.json",
+          }
+
+          directory = Path("local_out/sprint80")
+          summary = json.loads((directory / "final_summary.json").read_text(encoding="utf-8"))
+          manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+
+          assert summary["schema_version"] == 2, summary
+          assert summary["closure_status"] == "PASS_WITH_EXPLICIT_DISPOSITIONS", summary
+          assert summary["merge_authorized"] is False, summary
+          assert summary["sprint80c_started"] is False, summary
+          assert summary["accepted_findings"]["complete"] is True, summary
+          assert summary["accepted_findings"]["finding_count"] == 15, summary
+          assert summary["closure_gates"]["accepted_finding_register"]["status"] == "PASS", summary
+          assert summary["closure_gates"]["accepted_finding_register"]["unresolved_count"] == 0, summary
+          assert summary["closure_gates"]["evidence_manifest"]["status"] == "VALIDATED_BY_WORKFLOW", summary
+          assert all(
+              row["unresolved_count"] == 0
+              for row in summary["closure_gates"].values()
+              if "unresolved_count" in row
+          ), summary
+          assert summary["closure_gates"]["reality_failures"]["count"] == 0, summary
+          assert summary["closure_gates"]["xpass"]["count"] == 0, summary
+          assert summary["closure_gates"]["unexpected_contract_failure"]["count"] == 0, summary
+          assert summary["closure_gates"]["product_source_mutation"]["count"] == 0, summary
+
+          assert manifest["branch"] == summary["branch"], (manifest, summary)
+          assert manifest["head"] == summary["head"], (manifest, summary)
+          artifacts = manifest["artifacts"]
+          artifact_paths = {item["path"] for item in artifacts}
+          assert artifact_paths == REQUIRED_EVIDENCE, {
+              "missing": sorted(REQUIRED_EVIDENCE - artifact_paths),
+              "unexpected": sorted(artifact_paths - REQUIRED_EVIDENCE),
+          }
+          assert len(artifacts) == len(REQUIRED_EVIDENCE), artifacts
+          for item in artifacts:
+              path = directory / item["path"]
+              assert path.exists(), item
+              assert path.stat().st_size == item["size_bytes"], item
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"], item
+          print("SPRINT80_80B8_CLOSURE_AND_MANDATORY_EVIDENCE_VALID")
+          PY
+
+      - name: Show diagnostic worktree state
+        run: git status --short --untracked-files=all
+
+      - name: Upload Sprint 80 evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint80-diagnostics-${{ github.sha }}
+          path: local_out/sprint80
+          if-no-files-found: warn
+          retention-days: 14
