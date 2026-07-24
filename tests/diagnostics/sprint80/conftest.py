@@ -19,6 +19,10 @@ SUPERSEDED_CARDINALITY_TESTS = {
     "test_no_operation_exposes_aggregate_revision_evidence",
 }
 
+SUPERSEDED_TTL_TESTS = {
+    "test_requeue_removes_state_and_ready_queue_expiry",
+}
+
 
 def load_sprint80_module(name: str) -> ModuleType:
     path = REPO_ROOT / "scripts" / "sprint80" / f"{name}.py"
@@ -48,15 +52,7 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(items):
-    """Apply diagnostic-only fixture compatibility and retire stale assertions.
-
-    The original 80B.4 probe uses a module-scoped async fixture. Until the
-    repository pins a pytest-asyncio version, its loop scope is attached only to
-    that fixture. Three original assertions are explicitly superseded by the
-    80B.4 correction module, which measures nine operations, derives revision
-    evidence from observed fields, and separates worker ACK from operator cleanup.
-    """
-
+    """Apply diagnostic-only fixture compatibility and explicit supersessions."""
     seen: set[int] = set()
     for item in items:
         module = getattr(item, "module", None)
@@ -74,6 +70,20 @@ def pytest_collection_modifyitems(items):
                 pytest.mark.skip(
                     reason=(
                         "Superseded by test_80_04z_transition_cardinality_corrections.py"
+                    )
+                )
+            )
+
+        if (
+            item.name in SUPERSEDED_TTL_TESTS
+            and "test_80_05_ttl_durability.py" in item.nodeid
+        ):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        "Superseded by test_80_05z_ttl_durability_corrections.py; "
+                        "the original setup reused a standalone reservation key and "
+                        "did not reach running -> ready."
                     )
                 )
             )
