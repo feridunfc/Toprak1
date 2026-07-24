@@ -31,8 +31,12 @@ def _decode(value: Any) -> str:
     return str(value)
 
 
+def _row(report: dict[str, Any], family: str) -> dict[str, Any]:
+    return next(item for item in report["observations"] if item["state_family"] == family)
+
+
 def _patch_pttl(report: dict[str, Any], family: str, **updates: int) -> None:
-    row = next(item for item in report["observations"] if item["state_family"] == family)
+    row = _row(report, family)
     values = {stage: int(value) for stage, value in row["pttl_by_transition"]}
     values.update({stage: int(value) for stage, value in updates.items()})
     row["pttl_by_transition"] = [[stage, value] for stage, value in values.items()]
@@ -104,6 +108,7 @@ async def _run_isolated_requeue_probe(*, redis_url: str, repo_root: Path) -> dic
         state_pttl_before = int(await redis.pttl(keys["state"]))
         meta_pttl_before = int(await redis.pttl(keys["meta"]))
         ready_pttl_before = int(await redis.pttl(keys["ready"]))
+        completion_length_before = int(await redis.xlen(keys["completion_stream"]))
 
         requeue = await ttl._requeue(
             redis, base, repo_root, keys, task_id, tenant_id
@@ -112,6 +117,8 @@ async def _run_isolated_requeue_probe(*, redis_url: str, repo_root: Path) -> dic
         state_pttl_after = int(await redis.pttl(keys["state"]))
         meta_pttl_after = int(await redis.pttl(keys["meta"]))
         ready_pttl_after = int(await redis.pttl(keys["ready"]))
+        completion_length_after = int(await redis.xlen(keys["completion_stream"]))
+        completion_pttl_after = int(await redis.pttl(keys["completion_stream"]))
 
         result = {
             "reserve_status": _decode(reserve[0]),
@@ -125,6 +132,9 @@ async def _run_isolated_requeue_probe(*, redis_url: str, repo_root: Path) -> dic
             "meta_pttl_after": meta_pttl_after,
             "ready_pttl_before": ready_pttl_before,
             "ready_pttl_after": ready_pttl_after,
+            "completion_length_before": completion_length_before,
+            "completion_length_after": completion_length_after,
+            "completion_pttl_after": completion_pttl_after,
         }
 
         report_path = repo_root / "local_out/sprint80/ttl_durability.json"
@@ -149,6 +159,14 @@ async def _run_isolated_requeue_probe(*, redis_url: str, repo_root: Path) -> dic
             requeue_before=ready_pttl_before,
             requeue_after=ready_pttl_after,
         )
+        _patch_pttl(
+            report,
+            "completion_stream",
+            requeue_after=completion_pttl_after,
+        )
+        completion_row = _row(report, "completion_stream")
+        completion_row["runtime_key_observed"] = True
+        completion_row["classification_confidence"] = "runtime_observed"
         report_path.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -193,6 +211,15 @@ def test_isolated_requeue_removes_state_and_ready_queue_expiry(
 
 
 @pytest.mark.sprint80_reality
+def test_completion_stream_retention_is_runtime_observed(
+    isolated_requeue_ttl_observation: dict[str, Any],
+):
+    row = isolated_requeue_ttl_observation
+    assert row["completion_length_after"] == row["completion_length_before"] + 1
+    assert row["completion_pttl_after"] == -1
+
+
+@pytest.mark.sprint80_reality
 @pytest.mark.sprint80_contract
 def test_final_ttl_report_contains_corrected_requeue_observation(
     isolated_requeue_ttl_observation: dict[str, Any],
@@ -209,3 +236,12 @@ def test_final_ttl_report_contains_corrected_requeue_observation(
     )
     values = {stage: int(value) for stage, value in state["pttl_by_transition"]}
     assert values["requeue_after"] == -1
+    completion = next(
+        row for row in report["observations"] if row["state_family"] == "completion_stream"
+    )
+    completion_values = {
+        stage: int(value) for stage, value in completion["pttl_by_transition"]
+    }
+    assert completion_values["requeue_after"] == -1
+    assert completion["runtime_key_observed"] is True
+    assert completion["classification_confidence"] == "runtime_observed"
