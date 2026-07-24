@@ -29,6 +29,23 @@ RETENTION_MECHANISMS = {
     "unknown",
 }
 
+CLASSIFICATION_CONFIDENCES = {
+    "runtime_observed",
+    "source_verified",
+    "evidence_inspection",
+    "unknown",
+    "unspecified",
+}
+
+FINDING_STATUSES = {
+    "PASS",
+    "BLOCKING_GAP",
+    "UNRESOLVED",
+    "EXPECTED_EPHEMERAL",
+    "SOURCE_VERIFIED_ONLY",
+    "NOT_TESTED",
+}
+
 PTTL_ABSENT = -2
 PTTL_NO_EXPIRY = -1
 
@@ -50,6 +67,11 @@ class DurabilityObservation:
     reconstruction_tested: bool
     classification_confidence: str
     blocking_finding: bool
+    reconstruction_assessed: bool = False
+    recovery_path_executed: bool = False
+    assessment_basis: tuple[str, ...] = ()
+    runtime_key_observed: bool = False
+    finding_status: str = "NOT_TESTED"
     notes: tuple[str, ...] = ()
 
 
@@ -85,7 +107,7 @@ def classify_blocking(
         return True
 
     if (
-        durability_class == "durable_truth_candidate"
+        durability_class == "audit_history"
         and retention_mechanism == "stream_maxlen_approximate"
         and not external_durable_archive
     ):
@@ -95,6 +117,30 @@ def classify_blocking(
         return True
 
     return False
+
+
+def classify_finding_status(
+    *,
+    blocking_finding: bool,
+    authority_class: str,
+    durability_class: str,
+    reconstructable: bool | None,
+    reconstruction_assessed: bool,
+    recovery_path_executed: bool,
+    classification_confidence: str,
+    runtime_key_observed: bool,
+) -> str:
+    if blocking_finding:
+        return "BLOCKING_GAP"
+    if classification_confidence == "source_verified" and not runtime_key_observed:
+        return "SOURCE_VERIFIED_ONLY"
+    if durability_class == "ephemeral_coordination" and reconstructable is True and recovery_path_executed:
+        return "EXPECTED_EPHEMERAL"
+    if reconstructable is None:
+        return "UNRESOLVED"
+    if not reconstruction_assessed:
+        return "NOT_TESTED"
+    return "PASS"
 
 
 def make_observation(
@@ -112,7 +158,12 @@ def make_observation(
     recovery_source: str = "unknown",
     reconstructable: bool | None = None,
     reconstruction_tested: bool = False,
-    classification_confidence: str = "observed",
+    reconstruction_assessed: bool | None = None,
+    recovery_path_executed: bool | None = None,
+    assessment_basis: Iterable[str] = (),
+    runtime_key_observed: bool | None = None,
+    classification_confidence: str = "unspecified",
+    finding_status: str | None = None,
     external_durable_archive: bool = False,
     notes: Iterable[str] = (),
 ) -> DurabilityObservation:
@@ -120,8 +171,17 @@ def make_observation(
         raise ValueError(f"invalid durability_class: {durability_class}")
     if retention_mechanism not in RETENTION_MECHANISMS:
         raise ValueError(f"invalid retention_mechanism: {retention_mechanism}")
+    if classification_confidence not in CLASSIFICATION_CONFIDENCES:
+        raise ValueError(f"invalid classification_confidence: {classification_confidence}")
 
     ordered_pttl = tuple((name, int(value)) for name, value in pttl_by_transition.items())
+    observed = (
+        any(value != PTTL_ABSENT for _, value in ordered_pttl)
+        if runtime_key_observed is None
+        else bool(runtime_key_observed)
+    )
+    assessed = reconstructable is not None if reconstruction_assessed is None else bool(reconstruction_assessed)
+    path_executed = bool(reconstruction_tested) if recovery_path_executed is None else bool(recovery_path_executed)
     blocking = classify_blocking(
         authority_class=authority_class,
         durability_class=durability_class,
@@ -131,6 +191,19 @@ def make_observation(
         reconstructable=reconstructable,
         external_durable_archive=external_durable_archive,
     )
+    status = finding_status or classify_finding_status(
+        blocking_finding=blocking,
+        authority_class=authority_class,
+        durability_class=durability_class,
+        reconstructable=reconstructable,
+        reconstruction_assessed=assessed,
+        recovery_path_executed=path_executed,
+        classification_confidence=classification_confidence,
+        runtime_key_observed=observed,
+    )
+    if status not in FINDING_STATUSES:
+        raise ValueError(f"invalid finding_status: {status}")
+
     return DurabilityObservation(
         state_family=state_family,
         key_pattern=key_pattern,
@@ -147,6 +220,11 @@ def make_observation(
         reconstruction_tested=bool(reconstruction_tested),
         classification_confidence=classification_confidence,
         blocking_finding=blocking,
+        reconstruction_assessed=assessed,
+        recovery_path_executed=path_executed,
+        assessment_basis=tuple(assessment_basis),
+        runtime_key_observed=observed,
+        finding_status=status,
         notes=tuple(notes),
     )
 
@@ -156,8 +234,9 @@ def render_report(observations: Iterable[DurabilityObservation], *, lifecycle: M
     blocking = [row.state_family for row in rows if row.blocking_finding]
     durability_counts = Counter(row.durability_class for row in rows)
     retention_counts = Counter(row.retention_mechanism for row in rows)
+    finding_status_counts = Counter(row.finding_status for row in rows)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "audit_base_commit": AUDIT_BASE_COMMIT,
         "observation_count": len(rows),
         "lifecycle": dict(lifecycle),
@@ -166,6 +245,7 @@ def render_report(observations: Iterable[DurabilityObservation], *, lifecycle: M
         "blocking_finding_count": len(blocking),
         "durability_class_counts": dict(sorted(durability_counts.items())),
         "retention_mechanism_counts": dict(sorted(retention_counts.items())),
+        "finding_status_counts": dict(sorted(finding_status_counts.items())),
     }
 
 
