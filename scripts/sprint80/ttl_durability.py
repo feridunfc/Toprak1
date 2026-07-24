@@ -134,8 +134,11 @@ def classify_finding_status(
         return "BLOCKING_GAP"
     if classification_confidence == "source_verified" and not runtime_key_observed:
         return "SOURCE_VERIFIED_ONLY"
-    if durability_class == "ephemeral_coordination" and reconstructable is True and recovery_path_executed:
-        return "EXPECTED_EPHEMERAL"
+    if durability_class == "ephemeral_coordination":
+        if reconstructable is True and recovery_path_executed:
+            return "EXPECTED_EPHEMERAL"
+        if reconstructable is True:
+            return "NOT_TESTED"
     if reconstructable is None:
         return "UNRESOLVED"
     if not reconstruction_assessed:
