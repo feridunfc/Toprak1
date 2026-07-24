@@ -25,6 +25,11 @@ SUPERSEDED_TTL_TESTS = {
     "test_blocking_findings_are_explicit",
 }
 
+SUPERSEDED_AGGREGATE_CONTRACT_TESTS = {
+    "test_parent_completion_does_not_mutate_child_aggregate_directly",
+    "test_each_child_transition_has_authority_record_and_revision",
+}
+
 
 def load_sprint80_module(name: str) -> ModuleType:
     path = REPO_ROOT / "scripts" / "sprint80" / f"{name}.py"
@@ -88,6 +93,19 @@ def pytest_collection_modifyitems(items):
             item.add_marker(
                 pytest.mark.skip(
                     reason=f"Superseded by {replacement}"
+                )
+            )
+
+        if (
+            item.name in SUPERSEDED_AGGREGATE_CONTRACT_TESTS
+            and "test_80_07_aggregate_boundary.py" in item.nodeid
+        ):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        "Superseded by the ADR-neutral aggregate revision contract in "
+                        "test_80_08_final_summary.py"
+                    )
                 )
             )
 
