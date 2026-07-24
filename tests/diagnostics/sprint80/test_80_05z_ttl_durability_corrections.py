@@ -193,6 +193,7 @@ def test_isolated_requeue_removes_state_and_ready_queue_expiry(
 
 
 @pytest.mark.sprint80_reality
+@pytest.mark.sprint80_contract
 def test_final_ttl_report_contains_corrected_requeue_observation(
     isolated_requeue_ttl_observation: dict[str, Any],
     repo_root: Path,
