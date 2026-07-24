@@ -21,6 +21,8 @@ SUPERSEDED_CARDINALITY_TESTS = {
 
 SUPERSEDED_TTL_TESTS = {
     "test_requeue_removes_state_and_ready_queue_expiry",
+    "test_operator_audit_is_approximate_maxlen_without_external_archive",
+    "test_blocking_findings_are_explicit",
 }
 
 
@@ -78,13 +80,14 @@ def pytest_collection_modifyitems(items):
             item.name in SUPERSEDED_TTL_TESTS
             and "test_80_05_ttl_durability.py" in item.nodeid
         ):
+            replacement = (
+                "test_80_05z_ttl_durability_corrections.py"
+                if item.name == "test_requeue_removes_state_and_ready_queue_expiry"
+                else "test_80_05zz_ttl_durability_model_corrections.py"
+            )
             item.add_marker(
                 pytest.mark.skip(
-                    reason=(
-                        "Superseded by test_80_05z_ttl_durability_corrections.py; "
-                        "the original setup reused a standalone reservation key and "
-                        "did not reach running -> ready."
-                    )
+                    reason=f"Superseded by {replacement}"
                 )
             )
 
