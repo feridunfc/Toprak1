@@ -55,7 +55,7 @@ jobs:
       - name: Install diagnostic dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-asyncio redis
+          python -m pip install pytest pytest-asyncio redis fastapi
 
       - name: Verify isolated Redis 7
         run: |
