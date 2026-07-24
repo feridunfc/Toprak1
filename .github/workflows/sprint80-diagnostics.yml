@@ -148,22 +148,43 @@ jobs:
             --directory local_out/sprint80 \
             --out local_out/sprint80/manifest.json
 
-      - name: Validate preliminary evidence manifest
+      - name: Validate preliminary mandatory evidence set
         run: |
           python - <<'PY'
           import hashlib
           import json
           from pathlib import Path
 
+          REQUIRED_EVIDENCE = {
+              "preflight.json",
+              "environment.json",
+              "writer_inventory.json",
+              "transition_cardinality.json",
+              "ttl_durability.json",
+              "truth_contradictions.json",
+              "aggregate_boundary.json",
+              "final_summary.json",
+              "reality_pytest.txt",
+              "contracts_pytest.txt",
+              "preflight_after.json",
+              "environment_after.json",
+          }
+
           directory = Path("local_out/sprint80")
           manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-          for item in manifest["artifacts"]:
+          artifacts = manifest["artifacts"]
+          artifact_paths = {item["path"] for item in artifacts}
+          assert artifact_paths == REQUIRED_EVIDENCE, {
+              "missing": sorted(REQUIRED_EVIDENCE - artifact_paths),
+              "unexpected": sorted(artifact_paths - REQUIRED_EVIDENCE),
+          }
+          assert len(artifacts) == len(REQUIRED_EVIDENCE), artifacts
+          for item in artifacts:
               path = directory / item["path"]
               assert path.exists(), item
               assert path.stat().st_size == item["size_bytes"], item
               assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"], item
-          assert any(item["path"] == "final_summary.json" for item in manifest["artifacts"])
-          print("SPRINT80_PRELIMINARY_MANIFEST_VALID")
+          print("SPRINT80_PRELIMINARY_MANDATORY_EVIDENCE_VALID")
           PY
 
       - name: Finalize 80B.8 manifest gate
@@ -173,6 +194,14 @@ jobs:
             --out local_out/sprint80/final_summary.json \
             --manifest-validated
 
+      - name: Add consolidated accepted finding register
+        run: |
+          python scripts/sprint80/freeze_hardening.py \
+            --directory local_out/sprint80 \
+            --summary local_out/sprint80/final_summary.json \
+            --harden-summary \
+            --validate-summary
+
       - name: Build final tamper-evident evidence manifest
         run: |
           python scripts/sprint80/transition_cardinality.py \
@@ -180,24 +209,44 @@ jobs:
             --directory local_out/sprint80 \
             --out local_out/sprint80/manifest.json
 
-      - name: Validate 80B.8 closure and final manifest
+      - name: Validate 80B.8 closure and mandatory evidence set
         run: |
           python - <<'PY'
           import hashlib
           import json
           from pathlib import Path
 
+          REQUIRED_EVIDENCE = {
+              "preflight.json",
+              "environment.json",
+              "writer_inventory.json",
+              "transition_cardinality.json",
+              "ttl_durability.json",
+              "truth_contradictions.json",
+              "aggregate_boundary.json",
+              "final_summary.json",
+              "reality_pytest.txt",
+              "contracts_pytest.txt",
+              "preflight_after.json",
+              "environment_after.json",
+          }
+
           directory = Path("local_out/sprint80")
           summary = json.loads((directory / "final_summary.json").read_text(encoding="utf-8"))
           manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
 
+          assert summary["schema_version"] == 2, summary
           assert summary["closure_status"] == "PASS_WITH_EXPLICIT_DISPOSITIONS", summary
           assert summary["merge_authorized"] is False, summary
           assert summary["sprint80c_started"] is False, summary
+          assert summary["accepted_findings"]["complete"] is True, summary
+          assert summary["accepted_findings"]["finding_count"] == 15, summary
+          assert summary["closure_gates"]["accepted_finding_register"]["status"] == "PASS", summary
+          assert summary["closure_gates"]["accepted_finding_register"]["unresolved_count"] == 0, summary
           assert summary["closure_gates"]["evidence_manifest"]["status"] == "VALIDATED_BY_WORKFLOW", summary
           assert all(
               row["unresolved_count"] == 0
-              for name, row in summary["closure_gates"].items()
+              for row in summary["closure_gates"].values()
               if "unresolved_count" in row
           ), summary
           assert summary["closure_gates"]["reality_failures"]["count"] == 0, summary
@@ -207,13 +256,19 @@ jobs:
 
           assert manifest["branch"] == summary["branch"], (manifest, summary)
           assert manifest["head"] == summary["head"], (manifest, summary)
-          for item in manifest["artifacts"]:
+          artifacts = manifest["artifacts"]
+          artifact_paths = {item["path"] for item in artifacts}
+          assert artifact_paths == REQUIRED_EVIDENCE, {
+              "missing": sorted(REQUIRED_EVIDENCE - artifact_paths),
+              "unexpected": sorted(artifact_paths - REQUIRED_EVIDENCE),
+          }
+          assert len(artifacts) == len(REQUIRED_EVIDENCE), artifacts
+          for item in artifacts:
               path = directory / item["path"]
               assert path.exists(), item
               assert path.stat().st_size == item["size_bytes"], item
               assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"], item
-          assert any(item["path"] == "final_summary.json" for item in manifest["artifacts"])
-          print("SPRINT80_80B8_CLOSURE_AND_MANIFEST_VALID")
+          print("SPRINT80_80B8_CLOSURE_AND_MANDATORY_EVIDENCE_VALID")
           PY
 
       - name: Show diagnostic worktree state
