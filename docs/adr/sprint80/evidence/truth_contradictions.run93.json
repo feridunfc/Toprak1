@@ -1,0 +1,193 @@
+{
+  "audit_base_commit": "2eca85b2d9b115ad4588641b020e98efdd570a2d",
+  "caller_counts": {
+    "control_api_run_state": 2,
+    "legacy_worker_run_guard": 1,
+    "run_recovery_missing_state": 1,
+    "run_recovery_terminal_guard": 1,
+    "scheduler_dag_dispatch": 1,
+    "task_recovery_missing_state": 1,
+    "worker_task_duplicate_guard_nonterminal": 1,
+    "worker_task_duplicate_guard_terminal": 1
+  },
+  "deterministic_winner_counts": {
+    "FAIL_CLOSED": 2,
+    "RUN_WINS": 4,
+    "TASK_WINS": 3
+  },
+  "fail_mode_counts": {
+    "fail_closed": 5,
+    "fail_open": 2,
+    "not_applicable": 2
+  },
+  "global_truth_policy": "INCONSISTENT_BY_CALLER",
+  "metadata": {
+    "legacy_worker_guard_reads_task_state": false,
+    "method": "real_redis_entry_point_observation",
+    "run_api_reads_task_state": false,
+    "run_recovery_reads_task_state": false,
+    "scheduler_dispatch_reads_run_state": false,
+    "task_recovery_reads_run_state": false,
+    "worker_task_guard_reads_run_state": false
+  },
+  "observation_count": 9,
+  "observations": [
+    {
+      "caller": "control_api_run_state",
+      "deterministic_winner": "RUN_WINS",
+      "fail_open_or_closed": "not_applicable",
+      "mutation_attempted": false,
+      "notes": [
+        "API route delegates to ControlPlaneService.get_run_state",
+        "DAG task state is not read"
+      ],
+      "recovery_action": "none",
+      "returned_status": "done",
+      "run_state": "done",
+      "scenario": "api_run_done_task_running",
+      "selected_truth_source": "run_state_and_meta",
+      "task_state": "running"
+    },
+    {
+      "caller": "control_api_run_state",
+      "deterministic_winner": "RUN_WINS",
+      "fail_open_or_closed": "not_applicable",
+      "mutation_attempted": false,
+      "notes": [
+        "API route delegates to ControlPlaneService.get_run_state",
+        "DAG task state is not read"
+      ],
+      "recovery_action": "none",
+      "returned_status": "running",
+      "run_state": "running",
+      "scenario": "api_run_running_task_done",
+      "selected_truth_source": "run_state_and_meta",
+      "task_state": "done"
+    },
+    {
+      "caller": "run_recovery_missing_state",
+      "deterministic_winner": "FAIL_CLOSED",
+      "fail_open_or_closed": "fail_closed",
+      "mutation_attempted": false,
+      "notes": [
+        "candidate_count=0",
+        "running_zset_entry_retained=True",
+        "terminal task state is ignored by run recovery"
+      ],
+      "recovery_action": "none_stale_zset_entry_retained",
+      "returned_status": "no_candidate_missing_run_state",
+      "run_state": "missing",
+      "scenario": "run_missing_task_terminal",
+      "selected_truth_source": "running_zset_plus_run_state",
+      "task_state": "done"
+    },
+    {
+      "caller": "run_recovery_terminal_guard",
+      "deterministic_winner": "RUN_WINS",
+      "fail_open_or_closed": "fail_closed",
+      "mutation_attempted": true,
+      "notes": [
+        "candidate_count=0",
+        "running_zset_entry_removed=True",
+        "running task state is ignored by run recovery"
+      ],
+      "recovery_action": "remove_terminal_run_from_running_zset",
+      "returned_status": "terminal_run_not_candidate",
+      "run_state": "done",
+      "scenario": "run_terminal_task_running_recovery",
+      "selected_truth_source": "running_zset_plus_run_state",
+      "task_state": "running"
+    },
+    {
+      "caller": "task_recovery_missing_state",
+      "deterministic_winner": "FAIL_CLOSED",
+      "fail_open_or_closed": "fail_closed",
+      "mutation_attempted": true,
+      "notes": [
+        "ready_queue_score=None",
+        "terminal run state is ignored by task recovery",
+        "missing heartbeat makes the task a stale candidate before state CAS blocks mutation"
+      ],
+      "recovery_action": "requeue_blocked_by_missing_task_state",
+      "returned_status": "candidate=True;requeue=TASK_STATE_CONFLICT",
+      "run_state": "done",
+      "scenario": "task_missing_run_terminal",
+      "selected_truth_source": "task_running_zset_plus_task_meta_then_task_state",
+      "task_state": "missing"
+    },
+    {
+      "caller": "worker_task_duplicate_guard_nonterminal",
+      "deterministic_winner": "TASK_WINS",
+      "fail_open_or_closed": "fail_open",
+      "mutation_attempted": false,
+      "notes": [
+        "suppress_execution=False",
+        "terminal run state is not read"
+      ],
+      "recovery_action": "allow_downstream_claim_path",
+      "returned_status": "not_terminal_duplicate_delivery",
+      "run_state": "done",
+      "scenario": "run_done_task_running_duplicate_guard",
+      "selected_truth_source": "task_state_and_meta",
+      "task_state": "running"
+    },
+    {
+      "caller": "worker_task_duplicate_guard_terminal",
+      "deterministic_winner": "TASK_WINS",
+      "fail_open_or_closed": "fail_closed",
+      "mutation_attempted": false,
+      "notes": [
+        "ack_allowed=True",
+        "ack_policy=ack_explicit_task_run_terminal_evidence",
+        "nonterminal run state is not read"
+      ],
+      "recovery_action": "suppress_claim_execution_completion_and_allow_ack",
+      "returned_status": "terminal_duplicate_delivery",
+      "run_state": "running",
+      "scenario": "run_running_task_done_worker_guard",
+      "selected_truth_source": "task_state_and_meta",
+      "task_state": "done"
+    },
+    {
+      "caller": "legacy_worker_run_guard",
+      "deterministic_winner": "RUN_WINS",
+      "fail_open_or_closed": "fail_closed",
+      "mutation_attempted": false,
+      "notes": [
+        "legacy RunRequested path uses IdempotencyGuard.should_execute",
+        "running DAG task state is not read"
+      ],
+      "recovery_action": "suppress_legacy_execution",
+      "returned_status": "should_execute=false",
+      "run_state": "done",
+      "scenario": "run_done_task_running_legacy_worker_guard",
+      "selected_truth_source": "run_state",
+      "task_state": "running"
+    },
+    {
+      "caller": "scheduler_dag_dispatch",
+      "deterministic_winner": "TASK_WINS",
+      "fail_open_or_closed": "fail_open",
+      "mutation_attempted": true,
+      "notes": [
+        "run_state_after_dispatch=done",
+        "task_dispatch.lua does not read run state"
+      ],
+      "recovery_action": "dispatch_committed_despite_terminal_run",
+      "returned_status": "committed:ready->scheduled",
+      "run_state": "done",
+      "scenario": "run_terminal_task_ready_scheduler",
+      "selected_truth_source": "task_state",
+      "task_state": "ready"
+    }
+  ],
+  "schema_version": 1,
+  "selected_truth_source_counts": {
+    "run_state": 1,
+    "run_state_and_meta": 2,
+    "running_zset_plus_run_state": 2,
+    "task_running_zset_plus_task_meta_then_task_state": 1,
+    "task_state": 1,
+    "task_state_and_meta": 2
+  }
+}

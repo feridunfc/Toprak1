@@ -1,0 +1,49 @@
+name: Sprint 80C.1 Runtime Truth Authority
+
+on:
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - ".github/workflows/sprint80c1-runtime-truth-authority.yml"
+      - "docs/adr/sprint80/ADR-080C1-runtime-truth-authority.md"
+      - "docs/adr/sprint80/evidence/truth_contradictions.run93.json"
+      - "docs/adr/sprint80/runtime_truth_authority_matrix.json"
+      - "docs/adr/sprint80/runtime_truth_authority_manifest.json"
+      - "scripts/sprint80c/validate_runtime_truth_authority.py"
+      - "tests/diagnostics/sprint80c/test_80c1_runtime_truth_authority.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-truth-authority:
+    name: runtime-truth-authority
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Run Sprint 80C.1 package tests
+        run: >-
+          python -m pytest
+          tests/diagnostics/sprint80c/test_80c1_runtime_truth_authority.py
+          -q
+
+      - name: Validate Sprint 80C.1 package and source bindings
+        run: >-
+          python scripts/sprint80c/validate_runtime_truth_authority.py
+          --repo-root .
+          --verify-source-bindings
+          --verify-git-scope

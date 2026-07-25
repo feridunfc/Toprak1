@@ -1,0 +1,50 @@
+{
+  "artifacts": [
+    {
+      "path": ".github/workflows/sprint80c1-runtime-truth-authority.yml",
+      "sha256": "5d8d66929e5c482b4a355816dc62cc94ace67ce116416fcadfabede163b37f63",
+      "size_bytes": 1497
+    },
+    {
+      "path": "docs/adr/sprint80/ADR-080C1-runtime-truth-authority.md",
+      "sha256": "2241eb39a43bbf2fc57c6a10ed5799deed1a54cc73d7c1742435461233055bf0",
+      "size_bytes": 8044
+    },
+    {
+      "path": "docs/adr/sprint80/evidence/truth_contradictions.run93.json",
+      "sha256": "037fcd91c5aeec88039dd17705a05678790ab7f7969647a1cb7e624fcfda9d07",
+      "size_bytes": 6738
+    },
+    {
+      "path": "docs/adr/sprint80/runtime_truth_authority_matrix.json",
+      "sha256": "9e8c499ac55b61a0fdacec0eeac1a91c0693b67156b43c00fa480a46594ee2dd",
+      "size_bytes": 13566
+    },
+    {
+      "path": "scripts/sprint80c/validate_runtime_truth_authority.py",
+      "sha256": "dd297b9ba45340c260e67916c485fa425e0c67ac77f6bd69d1f861757817b8bc",
+      "size_bytes": 21854
+    },
+    {
+      "path": "tests/diagnostics/sprint80c/test_80c1_runtime_truth_authority.py",
+      "sha256": "1cb859e84053c45b5c698b549211d2c4a343efe1e99b524599f4f1b5800fc168",
+      "size_bytes": 7386
+    }
+  ],
+  "base_branch": "baseline/local-import",
+  "base_head": "3439618ea7ad8cf8bdd0e49d660217fc455c787c",
+  "branch": "sprint/80c1-runtime-truth-authority",
+  "bundle_index_algorithm": "sorted_utf8_lines:path\\0size_bytes\\0sha256\\n",
+  "bundle_index_sha256": "96019e7056a513509bc626dd2b0434e169ab866d6a265636bcaa9b73f359f4e4",
+  "decision_id": "ADR-080C1",
+  "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+  "frozen_source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+  "historical_frozen_zip_verification": "ALREADY_FROZEN_AND_DIGEST_PINNED",
+  "human_architecture_acceptance": "PENDING",
+  "implementation_authorized": false,
+  "package_specific_check_name": "Sprint 80C.1 Runtime Truth Authority / runtime-truth-authority",
+  "product_source_mutation": 0,
+  "required_check_enforcement": "REPOSITORY_RULESET_REQUIRED_SEPARATELY",
+  "schema_version": 2,
+  "truth_evidence_sha256": "037fcd91c5aeec88039dd17705a05678790ab7f7969647a1cb7e624fcfda9d07"
+}
