@@ -1,0 +1,219 @@
+{
+  "base": {
+    "branch": "baseline/local-import",
+    "head": "3439618ea7ad8cf8bdd0e49d660217fc455c787c"
+  },
+  "caller_decisions": [
+    {
+      "caller": "control_api_run_state",
+      "migration_sprint": 82,
+      "observed_source": "run_state_and_meta",
+      "scenarios": [
+        "api_run_done_task_running",
+        "api_run_running_task_done"
+      ],
+      "target_authority": "RUN_AGGREGATE_FOR_RUN_QUERY",
+      "target_behavior": "return run authority plus task-conflict metadata; remain read-only"
+    },
+    {
+      "caller": "run_recovery_missing_state",
+      "migration_sprint": 82,
+      "observed_source": "running_zset_plus_run_state",
+      "scenarios": [
+        "run_missing_task_terminal"
+      ],
+      "target_authority": "RUN_AGGREGATE",
+      "target_behavior": "missing run authority blocks recovery mutation; emit reconciliation candidate; do not retain ambiguity silently"
+    },
+    {
+      "caller": "run_recovery_terminal_guard",
+      "migration_sprint": 82,
+      "observed_source": "running_zset_plus_run_state",
+      "scenarios": [
+        "run_terminal_task_running_recovery"
+      ],
+      "target_authority": "RUN_AGGREGATE_WITH_TASK_CONFLICT_GUARD",
+      "target_behavior": "detect contradiction before ZSET cleanup; no mutation until reconciliation classification is recorded"
+    },
+    {
+      "caller": "task_recovery_missing_state",
+      "migration_sprint": 82,
+      "observed_source": "task_running_zset_plus_task_meta_then_task_state",
+      "scenarios": [
+        "task_missing_run_terminal"
+      ],
+      "target_authority": "TASK_AGGREGATE",
+      "target_behavior": "missing task authority blocks requeue; terminal run conflict is recorded; no mutation"
+    },
+    {
+      "caller": "worker_task_duplicate_guard_nonterminal",
+      "migration_sprint": 82,
+      "observed_source": "task_state_and_meta",
+      "scenarios": [
+        "run_done_task_running_duplicate_guard"
+      ],
+      "target_authority": "TASK_AGGREGATE_WITH_RUN_TERMINAL_GUARD",
+      "target_behavior": "terminal run blocks downstream claim; emit reconciliation candidate"
+    },
+    {
+      "caller": "worker_task_duplicate_guard_terminal",
+      "migration_sprint": 82,
+      "observed_source": "task_state_and_meta",
+      "scenarios": [
+        "run_running_task_done_worker_guard"
+      ],
+      "target_authority": "TASK_AGGREGATE",
+      "target_behavior": "suppress task execution; explicit-identity ACK remains transport cleanup; surface run conflict"
+    },
+    {
+      "caller": "legacy_worker_run_guard",
+      "migration_sprint": 82,
+      "observed_source": "run_state",
+      "removal_sprint": 86,
+      "scenarios": [
+        "run_done_task_running_legacy_worker_guard"
+      ],
+      "target_authority": "COMPATIBILITY_ONLY_NO_TASK_MUTATION_AUTHORITY",
+      "target_behavior": "cannot authorize task execution; migrate production graph away and retain only bounded compatibility read"
+    },
+    {
+      "caller": "scheduler_dag_dispatch",
+      "migration_sprint": 82,
+      "observed_source": "task_state",
+      "scenarios": [
+        "run_terminal_task_ready_scheduler"
+      ],
+      "target_authority": "TASK_AGGREGATE_WITH_RUN_TERMINAL_GUARD",
+      "target_behavior": "block dispatch before Lua mutation when run is terminal; emit reconciliation candidate"
+    }
+  ],
+  "decision_id": "ADR-080C1",
+  "decision_status": "TECHNICAL_RECOMMENDATION_READY_FOR_HUMAN_REVIEW",
+  "dependencies": [
+    "ADR-080C3 canonical transition/revision contract",
+    "ADR-080C6 stable writer identity and allowlist"
+  ],
+  "global_policy": {
+    "cross_plane_conflict_mutation": "FAIL_CLOSED",
+    "missing_authority_record": "FAIL_CLOSED",
+    "query_conflict": "RETURN_SCOPED_AUTHORITY_WITH_EXPLICIT_CONFLICT_METADATA",
+    "repair_path": "EXPLICIT_RECONCILIATION",
+    "run_lifecycle_authority": "RUN_AGGREGATE",
+    "silent_auto_repair": false,
+    "stale_projection": "DO_NOT_AUTHORIZE_MUTATION;EMIT_RECONCILIATION_CANDIDATE",
+    "task_lifecycle_authority": "TASK_AGGREGATE",
+    "terminal_conflict": "BLOCK_NEW_LIFECYCLE_MUTATION_UNTIL_RECONCILED"
+  },
+  "human_architecture_acceptance": "PENDING",
+  "immutable_evidence": {
+    "artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+    "global_truth_policy": "INCONSISTENT_BY_CALLER",
+    "observation_count": 9,
+    "source_branch": "sprint/80b-executable-reconciliation",
+    "source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+    "truth_contradictions_sha256": "037fcd91c5aeec88039dd17705a05678790ab7f7969647a1cb7e624fcfda9d07"
+  },
+  "operation_classes": [
+    {
+      "authority": "REQUESTED_AGGREGATE_SCOPE",
+      "conflict_behavior": "return authority result plus conflict metadata; no mutation",
+      "operation_class": "read_query",
+      "projection_use": "enrichment_and_conflict_detection_only",
+      "run_scope": "RUN_AGGREGATE",
+      "task_scope": "TASK_AGGREGATE",
+      "writer_role": "READ_ONLY_QUERY"
+    },
+    {
+      "authority": "AGGREGATE_LOCAL",
+      "conflict_behavior": "fail closed before mutation",
+      "cross_plane_precondition": "task admission requires existing nonterminal run authority or explicit standalone-task contract",
+      "operation_class": "admission",
+      "run_scope": "RUN_AGGREGATE",
+      "task_scope": "TASK_AGGREGATE",
+      "writer_role": "RUN_ADMISSION_WRITER_OR_TASK_ADMISSION_WRITER"
+    },
+    {
+      "authority": "TASK_AGGREGATE",
+      "conflict_behavior": "block ready->scheduled and emit reconciliation candidate",
+      "cross_plane_precondition": "run authority must not be terminal",
+      "operation_class": "dispatch",
+      "writer_role": "TASK_DISPATCH_WRITER"
+    },
+    {
+      "authority": "TASK_AGGREGATE",
+      "conflict_behavior": "block claim before ownership mutation",
+      "cross_plane_precondition": "run authority must not be terminal",
+      "operation_class": "claim",
+      "writer_role": "TASK_CLAIM_WRITER"
+    },
+    {
+      "authority": "TASK_AGGREGATE",
+      "conflict_behavior": "reject heartbeat; do not refresh liveness",
+      "cross_plane_precondition": "task must be running under matching owner and claim epoch",
+      "operation_class": "heartbeat",
+      "writer_role": "TASK_HEARTBEAT_WRITER"
+    },
+    {
+      "authority": "TASK_AGGREGATE",
+      "conflict_behavior": "fail closed for contradictory mutation; terminal duplicate transport cleanup may ACK only with explicit task/run identity",
+      "cross_plane_precondition": "task ownership and revision/fence must match; run conflict is surfaced",
+      "operation_class": "completion_failure",
+      "writer_role": "TASK_COMPLETION_WRITER"
+    },
+    {
+      "authority": "TASK_AGGREGATE",
+      "conflict_behavior": "no requeue; emit reconciliation candidate",
+      "cross_plane_precondition": "run authority must not be terminal and task must match expected running state",
+      "operation_class": "requeue",
+      "writer_role": "TASK_REQUEUE_WRITER"
+    },
+    {
+      "authority": "AGGREGATE_LOCAL",
+      "conflict_behavior": "no mutation when cross-plane contradiction or missing authority exists",
+      "operation_class": "recovery",
+      "run_scope": "RUN_AGGREGATE_ONLY",
+      "task_scope": "TASK_AGGREGATE_ONLY",
+      "writer_role": "RUN_RECOVERY_WRITER_OR_TASK_RECOVERY_WRITER"
+    },
+    {
+      "authority": "DEDICATED_RECONCILIATION_COORDINATOR",
+      "conflict_behavior": "preserve evidence, issue deterministic candidate, never choose a caller-local winner",
+      "initial_mode": "READ_ONLY_DIAGNOSIS",
+      "mutation_mode": "EXPLICIT_OPERATOR_OR_POLICY_COMMAND_AFTER_SEPARATE_ACCEPTANCE",
+      "operation_class": "reconciliation",
+      "writer_role": "RECONCILIATION_WRITER"
+    }
+  ],
+  "product_implementation_authorized": false,
+  "schema_version": 1,
+  "source_bindings": [
+    {"blob_sha": "ebc15272498fafbe115c164df4075257c090d539", "path": "docs/adr/sprint80/ADR-080C-decision-package.md", "purpose": "80C parent decision package"},
+    {"blob_sha": "ba3e1b8e89c64d3aa78de7aa5144a31e031850de", "path": "tests/diagnostics/sprint80/test_80_06_truth_contradictions.py", "purpose": "nine real-Redis caller observations and strict target contracts"},
+    {"blob_sha": "4a07352e33424e32332c916acdfd29e02b3eb71b", "path": "tests/diagnostics/sprint80/test_80_04_transition_cardinality.py", "purpose": "task operation taxonomy and Lua bindings"},
+    {"blob_sha": "75ec7a1aab7445e9f293cec45f509dd701fc22cb", "path": "hfa-control/src/hfa_control/service.py", "purpose": "run query caller"},
+    {"blob_sha": "b4dcaf72e0583d3fa697e5b6fa766d24f467ae2b", "path": "hfa-control/src/hfa_control/recovery.py", "purpose": "run recovery caller"},
+    {"blob_sha": "d1355f3cccd8e1ee17320dbdebe4558b78dd50f0", "path": "hfa-control/src/hfa_control/task_recovery.py", "purpose": "task heartbeat and recovery caller"},
+    {"blob_sha": "49a9f9a3be9184a3dc934f088cb2f07b0b1fb28e", "path": "hfa-worker/src/hfa_worker/idempotency.py", "purpose": "legacy run guard"},
+    {"blob_sha": "eec7ed91d7d386ef9832c4268b541d1384cd7b43", "path": "hfa-worker/src/hfa_worker/runtime/terminal_duplicate_delivery.py", "purpose": "modern task duplicate guard"},
+    {"blob_sha": "e25cda0df5bcb54c974f43987e713775e6b58143", "path": "hfa-core/src/hfa/runtime/state_store.py", "purpose": "legacy run state compatibility surface and conflicting authority annotations"},
+    {"blob_sha": "e5bd30953f4c7c3258e589d240113295f8bccadc", "path": "hfa-core/src/hfa/lua/task_admit.lua", "purpose": "task admission authority mutation"},
+    {"blob_sha": "f43f431eead940b07d995320dfd1a8548ac1e1a4", "path": "hfa-core/src/hfa/lua/task_dispatch_commit.lua", "purpose": "task dispatch authority mutation"},
+    {"blob_sha": "50edc573cafb2b75a60e2cf7acbcb41dabf8c2ad", "path": "hfa-core/src/hfa/lua/task_claim_start.lua", "purpose": "task claim authority mutation"},
+    {"blob_sha": "0efde7a88fbc988b524b810f691d77ee3d1fa0ff", "path": "hfa-core/src/hfa/lua/task_heartbeat.lua", "purpose": "task heartbeat authority mutation"},
+    {"blob_sha": "8ee2b51cd94642f56d5e38680419a2e3988b26a9", "path": "hfa-core/src/hfa/lua/task_complete.lua", "purpose": "task completion and child effects"},
+    {"blob_sha": "f8ee723fdedcb0175fd9f596831af84299065f27", "path": "hfa-core/src/hfa/lua/task_requeue.lua", "purpose": "task recovery/requeue authority mutation"}
+  ],
+  "title": "Runtime Truth Authority",
+  "verification_contracts": {
+    "all_expected_callers_mapped": true,
+    "all_frozen_observations_mapped": true,
+    "all_operation_classes_decided": true,
+    "cross_plane_conflict_mutation": "ZERO",
+    "implementation_claims": 0,
+    "missing_authority_mutation": "ZERO",
+    "product_source_mutation": 0,
+    "technical_unresolved_choice": 0,
+    "unclassified_truth_reader": 0,
+    "unclassified_truth_writer": 0
+  }
+}
