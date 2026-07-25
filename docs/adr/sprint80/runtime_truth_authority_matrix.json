@@ -187,21 +187,81 @@
   "product_implementation_authorized": false,
   "schema_version": 1,
   "source_bindings": [
-    {"blob_sha": "ebc15272498fafbe115c164df4075257c090d539", "path": "docs/adr/sprint80/ADR-080C-decision-package.md", "purpose": "80C parent decision package"},
-    {"blob_sha": "ba3e1b8e89c64d3aa78de7aa5144a31e031850de", "path": "tests/diagnostics/sprint80/test_80_06_truth_contradictions.py", "purpose": "nine real-Redis caller observations and strict target contracts"},
-    {"blob_sha": "4a07352e33424e32332c916acdfd29e02b3eb71b", "path": "tests/diagnostics/sprint80/test_80_04_transition_cardinality.py", "purpose": "task operation taxonomy and Lua bindings"},
-    {"blob_sha": "75ec7a1aab7445e9f293cec45f509dd701fc22cb", "path": "hfa-control/src/hfa_control/service.py", "purpose": "run query caller"},
-    {"blob_sha": "b4dcaf72e0583d3fa697e5b6fa766d24f467ae2b", "path": "hfa-control/src/hfa_control/recovery.py", "purpose": "run recovery caller"},
-    {"blob_sha": "d1355f3cccd8e1ee17320dbdebe4558b78dd50f0", "path": "hfa-control/src/hfa_control/task_recovery.py", "purpose": "task heartbeat and recovery caller"},
-    {"blob_sha": "49a9f9a3be9184a3dc934f088cb2f07b0b1fb28e", "path": "hfa-worker/src/hfa_worker/idempotency.py", "purpose": "legacy run guard"},
-    {"blob_sha": "eec7ed91d7d386ef9832c4268b541d1384cd7b43", "path": "hfa-worker/src/hfa_worker/runtime/terminal_duplicate_delivery.py", "purpose": "modern task duplicate guard"},
-    {"blob_sha": "e25cda0df5bcb54c974f43987e713775e6b58143", "path": "hfa-core/src/hfa/runtime/state_store.py", "purpose": "legacy run state compatibility surface and conflicting authority annotations"},
-    {"blob_sha": "e5bd30953f4c7c3258e589d240113295f8bccadc", "path": "hfa-core/src/hfa/lua/task_admit.lua", "purpose": "task admission authority mutation"},
-    {"blob_sha": "f43f431eead940b07d995320dfd1a8548ac1e1a4", "path": "hfa-core/src/hfa/lua/task_dispatch_commit.lua", "purpose": "task dispatch authority mutation"},
-    {"blob_sha": "50edc573cafb2b75a60e2cf7acbcb41dabf8c2ad", "path": "hfa-core/src/hfa/lua/task_claim_start.lua", "purpose": "task claim authority mutation"},
-    {"blob_sha": "0efde7a88fbc988b524b810f691d77ee3d1fa0ff", "path": "hfa-core/src/hfa/lua/task_heartbeat.lua", "purpose": "task heartbeat authority mutation"},
-    {"blob_sha": "8ee2b51cd94642f56d5e38680419a2e3988b26a9", "path": "hfa-core/src/hfa/lua/task_complete.lua", "purpose": "task completion and child effects"},
-    {"blob_sha": "f8ee723fdedcb0175fd9f596831af84299065f27", "path": "hfa-core/src/hfa/lua/task_requeue.lua", "purpose": "task recovery/requeue authority mutation"}
+    {
+      "blob_sha": "ebc15272498fafbe115c164df4075257c090d539",
+      "path": "docs/adr/sprint80/ADR-080C-decision-package.md",
+      "purpose": "80C parent decision package"
+    },
+    {
+      "blob_sha": "ba3e1b8e89c64d3aa78de7aa5144a31e031850de",
+      "path": "tests/diagnostics/sprint80/test_80_06_truth_contradictions.py",
+      "purpose": "nine real-Redis caller observations and strict target contracts"
+    },
+    {
+      "blob_sha": "4a07352e33424e32332c916acdfd29e02b3eb71b",
+      "path": "tests/diagnostics/sprint80/test_80_04_transition_cardinality.py",
+      "purpose": "task operation taxonomy and Lua bindings"
+    },
+    {
+      "blob_sha": "75ec7a1aab7445e9f293cec45f509dd701fc22cb",
+      "path": "hfa-control/src/hfa_control/service.py",
+      "purpose": "run query caller"
+    },
+    {
+      "blob_sha": "b4dcaf72e0583d3fa697e5b6fa766d24f467ae2b",
+      "path": "hfa-control/src/hfa_control/recovery.py",
+      "purpose": "run recovery caller"
+    },
+    {
+      "blob_sha": "d1355f3cccd8e1ee17320dbdebe4558b78dd50f0",
+      "path": "hfa-control/src/hfa_control/task_recovery.py",
+      "purpose": "task heartbeat and recovery caller"
+    },
+    {
+      "blob_sha": "49a9f9a3be9184a3dc934f088cb2f07b0b1fb28e",
+      "path": "hfa-worker/src/hfa_worker/idempotency.py",
+      "purpose": "legacy run guard"
+    },
+    {
+      "blob_sha": "eec7ed91d7d386ef9832c4268b541d1384cd7b43",
+      "path": "hfa-worker/src/hfa_worker/runtime/terminal_duplicate_delivery.py",
+      "purpose": "modern task duplicate guard"
+    },
+    {
+      "blob_sha": "e25cda0df5bcb54c974f43987e713775e6b58143",
+      "path": "hfa-core/src/hfa/runtime/state_store.py",
+      "purpose": "legacy run state compatibility surface and conflicting authority annotations"
+    },
+    {
+      "blob_sha": "e5bd30953f4c7c3258e589d240113295f8bccadc",
+      "path": "hfa-core/src/hfa/lua/task_admit.lua",
+      "purpose": "task admission authority mutation"
+    },
+    {
+      "blob_sha": "f43f431eead940b07d995320dfd1a8548ac1e1a4",
+      "path": "hfa-core/src/hfa/lua/task_dispatch_commit.lua",
+      "purpose": "task dispatch authority mutation"
+    },
+    {
+      "blob_sha": "50edc573cafb2b75a60e2cf7acbcb41dabf8c2ad",
+      "path": "hfa-core/src/hfa/lua/task_claim_start.lua",
+      "purpose": "task claim authority mutation"
+    },
+    {
+      "blob_sha": "0efde7a88fbc988b524b810f691d77ee3d1fa0ff",
+      "path": "hfa-core/src/hfa/lua/task_heartbeat.lua",
+      "purpose": "task heartbeat authority mutation"
+    },
+    {
+      "blob_sha": "8ee2b51cd94642f56d5e38680419a2e3988b26a9",
+      "path": "hfa-core/src/hfa/lua/task_complete.lua",
+      "purpose": "task completion and child effects"
+    },
+    {
+      "blob_sha": "f8ee723fdedcb0175fd9f596831af84299065f27",
+      "path": "hfa-core/src/hfa/lua/task_requeue.lua",
+      "purpose": "task recovery/requeue authority mutation"
+    }
   ],
   "title": "Runtime Truth Authority",
   "verification_contracts": {
