@@ -1,0 +1,39 @@
+{
+  "artifacts": [
+    {
+      "path": "docs/adr/sprint80/ADR-080C1-runtime-truth-authority.md",
+      "sha256": "876fee3d69b6e492ce9e906a0365a5e5e7362a9ee6c068483c8d1d00bae849fe",
+      "size_bytes": 8075
+    },
+    {
+      "path": "docs/adr/sprint80/runtime_truth_authority_matrix.json",
+      "sha256": "068c169318bf63292467ff7994d1cb66261059561d9423bfd5e7e11edf12e44b",
+      "size_bytes": 11163
+    },
+    {
+      "path": "docs/adr/sprint80/evidence/truth_contradictions.run93.json",
+      "sha256": "037fcd91c5aeec88039dd17705a05678790ab7f7969647a1cb7e624fcfda9d07",
+      "size_bytes": 6738
+    },
+    {
+      "path": "scripts/sprint80c/validate_runtime_truth_authority.py",
+      "sha256": "ee22a8638d919354e2fadfd8bfcd62728ba5596d6a5b501dd8601b4965bd65cc",
+      "size_bytes": 12456
+    },
+    {
+      "path": "tests/diagnostics/sprint80c/test_80c1_runtime_truth_authority.py",
+      "sha256": "51c260ab60af5b31f19e2e117201aae8335b7fcf8038dba0e6a0a474d7131a2b",
+      "size_bytes": 2689
+    }
+  ],
+  "base_branch": "baseline/local-import",
+  "base_head": "3439618ea7ad8cf8bdd0e49d660217fc455c787c",
+  "branch": "sprint/80c1-runtime-truth-authority",
+  "decision_id": "ADR-080C1",
+  "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+  "frozen_source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+  "implementation_authorized": false,
+  "product_source_mutation": 0,
+  "schema_version": 1,
+  "truth_evidence_sha256": "037fcd91c5aeec88039dd17705a05678790ab7f7969647a1cb7e624fcfda9d07"
+}
