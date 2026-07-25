@@ -1,179 +1,202 @@
-# ADR-080C.1 — Runtime Truth Authority
+# ADR-080C.1 — Runtime Truth Ownership
 
-- Status: **TECHNICAL RECOMMENDATION — READY FOR HUMAN ARCHITECTURE REVIEW**
+- Status: **CORRECTED TECHNICAL RECOMMENDATION — READY FOR RE-REVIEW**
 - Sprint: 80C.1
 - Branch: `sprint/80c1-runtime-truth-authority`
 - Base: `baseline/local-import@3439618ea7ad8cf8bdd0e49d660217fc455c787c`
+- Human architecture acceptance: **PENDING**
 - Product implementation authorized: **NO**
 - Product source mutation in this tranche: **0**
 
 ## 1. Immutable input
 
-This decision consumes the frozen Sprint 80B evidence package without reinterpretation:
+This decision consumes the frozen Sprint 80B evidence package without changing its meaning:
 
 ```yaml
 source_head: 5734ac60704f8546b8ce67e766e042ff2ce4c412
 artifact_sha256: 7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588
 truth_contradictions_sha256: 037fcd91c5aeec88039dd17705a05678790ab7f7969647a1cb7e624fcfda9d07
+historical_frozen_zip_verification: ALREADY_FROZEN_AND_DIGEST_PINNED
 observation_count: 9
+caller_count: 8
 global_truth_policy: INCONSISTENT_BY_CALLER
 ```
 
-The evidence remains an observed product gap. Passing reality tests do not mean the authority problem is fixed.
+The immutable repository evidence copy is retained at
+`docs/adr/sprint80/evidence/truth_contradictions.run93.json`. Its bytes remain
+identical to `truth_contradictions.json` in the frozen run-93 ZIP. The evidence
+remains an observed product gap and is not reclassified as resolved by this ADR.
 
-## 2. Decision
+## 2. Decision boundary
 
-### 2.1 Aggregate-scoped authority
-
-The system must not choose one global winner between RUN and TASK records.
+80C.1 decides **truth ownership** only. It does not decide transaction aggregate identity, revision ownership, or the atomic mutation boundary.
 
 ```yaml
-task_lifecycle_authority: TASK_AGGREGATE
-run_lifecycle_authority: RUN_AGGREGATE
+task_lifecycle_truth_owner: TASK_STATE_AUTHORITY
+run_lifecycle_truth_owner: RUN_STATE_AUTHORITY
+
+transaction_aggregate_boundary:
+  status: DEFERRED_TO_ADR_080C2
+aggregate_identity:
+  status: DEFERRED_TO_ADR_080C2
+revision_owner:
+  status: DEFERRED_TO_ADR_080C2
+atomic_mutation_boundary:
+  status: DEFERRED_TO_ADR_080C2
+```
+
+Therefore the terms `TASK_AGGREGATE` and `RUN_AGGREGATE` are not frozen by this ADR. ADR-080C.2 remains free to choose independent task aggregates plus a process manager or a DAG/run aggregate.
+
+## 3. Normative truth contract
+
+```yaml
 cross_plane_conflict_mutation: FAIL_CLOSED
+missing_authority_record: FAIL_CLOSED
 repair_path: EXPLICIT_RECONCILIATION
+silent_auto_repair: false
 ```
 
-A RUN record is authoritative only for run-level lifecycle decisions. A TASK record is authoritative for task admission, dispatch, claim, heartbeat, completion/failure and requeue. Records in the other plane may be used as projections, precondition guards and conflict detectors, but never as a second co-authority for the same lifecycle mutation.
+A terminal/nonterminal RUN–TASK contradiction blocks every new lifecycle mutation until reconciliation classifies the conflict. A stale projection never authorizes mutation.
 
-### 2.2 Cross-plane invariant
+Queries are scope-specific:
 
-A terminal/nonterminal contradiction between the run and task planes blocks every new lifecycle mutation that could deepen the contradiction.
+- a run query returns RUN state truth;
+- a task query returns TASK state truth;
+- cross-plane data is conflict metadata or enrichment only;
+- queries remain read-only;
+- contradiction is never silently hidden.
 
-- Terminal run + ready/running task: dispatch, claim and requeue are blocked.
-- Nonterminal run + terminal task: claim, heartbeat and completion are blocked by task terminal truth.
-- Missing authority record: mutation is blocked.
-- Stale or missing projection: projection data cannot authorize mutation.
-- Contradiction: produce a deterministic reconciliation candidate with causation and evidence references.
+## 4. Terminal RUN contracts
 
-Transport cleanup is not a lifecycle transition. An already-terminal task delivery may be ACKed only when explicit task identity, explicit run identity and terminal task evidence match. The RUN/TASK conflict must still be surfaced for reconciliation.
+### 4.1 Heartbeat
 
-### 2.3 Query behavior
+When RUN truth is terminal and TASK truth is running, a valid owner and claim epoch are not sufficient to refresh liveness.
 
-Queries are scoped rather than winner-take-all:
-
-- run endpoint → RUN authority;
-- task endpoint → TASK authority;
-- cross-plane data → enrichment and conflict metadata only;
-- query paths remain read-only;
-- contradiction is never silently hidden by returning only one plane.
-
-### 2.4 Recovery behavior
-
-Run recovery may mutate only the run aggregate and its projections. Task recovery may mutate only the task aggregate and its projections. Before any mutation, recovery must classify cross-plane contradiction and missing authority.
-
-When contradiction exists:
-
-```text
-business mutation: 0
-projection cleanup: 0 before reconciliation classification
-requeue/reschedule: 0
-output: reconciliation candidate
+```yaml
+run_terminal_task_running_heartbeat:
+  result: REJECT
+  liveness_ttl_refresh: 0
+  running_zset_refresh: 0
+  reconciliation_candidate: REQUIRED
 ```
 
-### 2.5 Legacy compatibility
+### 4.2 Normal completion and failure
 
-`IdempotencyGuard.should_execute(run_id)` is a bounded legacy compatibility reader. It cannot authorize task execution in the production task graph. The production graph must use task authority and the cross-plane terminal guard. Legacy run-based execution authority is scheduled for migration in Sprint 82 and removal/kill-switch convergence in Sprint 86.
+When RUN truth is terminal and TASK truth is running, normal task completion and normal task failure are rejected.
 
-## 3. Operation authority table
+```yaml
+normal_completion_when_run_terminal: REJECT
+normal_failure_when_run_terminal: REJECT
+child_effects: 0
+output_commit: 0
+normal_ack_authorization: 0
+next_path: EXPLICIT_RECONCILIATION_OR_CANCELLATION_COMMAND
+```
 
-| Operation class | Authority | Other-plane use | Conflict result |
+Transport duplicate cleanup is separate from lifecycle completion. An already-terminal task delivery may be ACKed only when explicit task ID, explicit run ID, and terminal task evidence match. This exception does not authorize heartbeat, completion, failure, child effects, or output writes.
+
+## 5. Operation ownership table
+
+| Operation | Truth owner | Required cross-plane rule | Conflict result |
 |---|---|---|---|
-| read/query | requested aggregate scope | enrichment/conflict detection | return conflict metadata; no mutation |
-| admission | aggregate-local | nonterminal/existence precondition | fail closed |
-| dispatch | TASK | terminal RUN guard | block before Lua mutation |
-| claim | TASK | terminal RUN guard | block before ownership mutation |
-| heartbeat | TASK | none for authority | reject; do not refresh liveness |
-| completion/failure | TASK | RUN conflict signal | reject conflicting mutation |
-| requeue | TASK | terminal RUN guard | no requeue |
-| recovery | aggregate-local | contradiction classification | no mutation; reconciliation candidate |
-| reconciliation | dedicated coordinator | reads both authorities and evidence | explicit audited command only |
+| read/query | requested state authority | expose contradiction metadata | read-only result |
+| admission | operation-scoped state authority | required counterpart exists and is compatible | fail closed |
+| dispatch | TASK state authority | RUN exists and is nonterminal | zero mutation |
+| claim | TASK state authority | RUN exists and is nonterminal | zero ownership mutation |
+| heartbeat | TASK state authority | RUN exists and is nonterminal | reject; zero TTL refresh |
+| completion/failure | TASK state authority | RUN exists and is nonterminal | reject; zero child/output effect |
+| requeue | TASK state authority | RUN exists and is nonterminal | zero requeue |
+| recovery | operation-scoped state authority | classify both truth planes before mutation | reconciliation candidate |
+| reconciliation | dedicated coordinator | preserve evidence and explicit command authority | audited explicit path |
 
-The machine-readable normative table is `runtime_truth_authority_matrix.json`.
+The machine-readable normative contract is `runtime_truth_authority_matrix.json`.
 
-## 4. Caller migration decisions
+## 6. Caller migration decisions
 
-### Control API run query
+- **Control API run query:** retain RUN truth for run-scoped output and add explicit TASK conflict metadata.
+- **Run recovery:** missing RUN truth or RUN/TASK contradiction yields zero cleanup/reschedule mutation before reconciliation classification.
+- **Task recovery:** missing TASK truth or terminal RUN conflict yields zero requeue mutation.
+- **Modern worker duplicate guard:** TASK terminal truth suppresses execution; terminal RUN with nonterminal TASK blocks claim, heartbeat, and normal completion.
+- **Legacy worker guard:** may suppress legacy execution but cannot authorize modern task lifecycle mutation.
+- **Scheduler dispatch:** terminal or missing RUN truth blocks `ready -> scheduled` before Lua mutation.
 
-Keep RUN authority for a run-scoped query, but add explicit task-conflict metadata. The current behavior reads run state/meta only and hides a contradictory task plane.
-
-### Run recovery
-
-`RecoveryService._find_stale_runs()` must not remove a run projection or reschedule a run before classifying task-plane contradiction. Missing run authority and terminal/nonterminal disagreement both produce no mutation and a reconciliation candidate.
-
-### Task recovery
-
-Missing task state blocks requeue even when the running ZSET suggests a stale candidate. A terminal RUN record is a blocking cross-plane conflict, not permission to infer task truth.
-
-### Modern worker duplicate guard
-
-TASK state remains the task-delivery authority. If RUN is terminal while TASK is nonterminal, downstream claim is blocked. If TASK is terminal, execution is suppressed; explicit-identity ACK may proceed as transport cleanup while the conflict is recorded.
-
-### Legacy worker guard
-
-RUN state may suppress legacy execution but cannot authorize modern task execution. Production composition must not route task lifecycle authority through this guard.
-
-### Scheduler dispatch
-
-The current Lua commit reads task state and identity but not run state. The production dispatch boundary must perform a terminal RUN guard in the same accepted authority boundary before `ready -> scheduled` can commit.
-
-## 5. Alternatives rejected
-
-### RUN always wins
-
-Rejected because task claim, fencing, heartbeat, completion and dependency effects are task-scoped. RUN-only authority would discard the stronger ownership and revision domain.
-
-### TASK always wins
-
-Rejected because run creation, run cancellation and run-level lifecycle remain real aggregate decisions. A task record cannot define the whole run lifecycle by itself.
-
-### Caller-local winner
-
-Rejected because Sprint 80B proved caller-local selection produces fail-open, fail-closed, suppressed and committed outcomes for equivalent contradictions.
-
-### Silent eventual consistency
-
-Rejected because there is no durable canonical revision/replay contract that can safely converge contradictions without explicit evidence and ownership.
-
-## 6. Consequences
-
-- Existing callers require migration; this ADR does not implement it.
-- Cross-plane reads increase at mutation boundaries until a canonical aggregate/revision contract is implemented.
-- Some currently successful operations become deterministic conflicts.
-- Reconciliation becomes a first-class product capability rather than ad-hoc cleanup.
-- Stable writer IDs remain dependent on ADR-080C.6.
-- Canonical revision and transition records remain dependent on ADR-080C.3.
-
-## 7. Verification contract
-
-80C.1 is technically complete only when the decision package proves:
+## 7. Frozen finding dispositions
 
 ```yaml
-frozen_artifact_sha256_matches: true
-truth_evidence_sha256_matches: true
-observations_mapped: 9
-callers_mapped: 8
-operation_classes_decided: 9
-unclassified_truth_reader: 0
-unclassified_truth_writer: 0
-technical_unresolved_choice: 0
-product_source_mutation: 0
-implementation_claims: 0
+inconsistent_by_caller:
+  decision_status: ARCHITECTURE_DECISION_ASSIGNED
+  resolved_in_product: false
+  implementation_sprint: 82
+
+contradictory_mutation_not_guaranteed_blocked:
+  decision_status: ARCHITECTURE_DECISION_ASSIGNED
+  resolved_in_product: false
+  implementation_sprint: 82
 ```
 
-Future Sprint 82 implementation closes only when:
+These dispositions map the two accepted Sprint 80B truth findings to this ADR. They do not claim product resolution.
 
-- the two Sprint 80B truth XFAIL contracts pass;
-- all observed callers follow this deterministic matrix;
-- contradictory mutation count is zero;
-- missing authority mutation count is zero;
-- every conflict produces reconciliation evidence.
+## 8. Dependencies
 
-## 8. Acceptance state
+80C.1 has explicit dependencies on:
+
+1. **ADR-080C.2** — aggregate identity, revision owner, and atomic boundary;
+2. **ADR-080C.3** — canonical transition/revision contract;
+3. **ADR-080C.6** — stable writer identity and allowlist.
+
+## 9. Alternatives rejected
+
+- **Global RUN wins:** rejected because task ownership, fencing, heartbeat, completion, and dependency effects require TASK state truth.
+- **Global TASK wins:** rejected because run creation, cancellation, and run-level lifecycle require RUN state truth.
+- **Caller-local winner:** rejected because Sprint 80B proved inconsistent fail-open, fail-closed, suppression, and committed mutation.
+- **Silent eventual consistency:** rejected because no accepted durable revision/replay contract exists yet.
+- **Prejudging aggregate boundary in 80C.1:** rejected because that choice belongs to ADR-080C.2.
+
+## 10. Verification contract
 
 ```yaml
-technical_recommendation: COMPLETE
+scope:
+  exact_changed_files: 7
+  product_source_mutation: 0
+
+evidence:
+  historical_frozen_zip_verification: ALREADY_FROZEN_AND_DIGEST_PINNED
+  truth_evidence_digest: PASS
+  observations_mapped: 9
+  callers_mapped: 8
+
+truth_decision:
+  task_lifecycle_truth_owner: DECIDED
+  run_lifecycle_truth_owner: DECIDED
+  cross_plane_conflict_mutation: FAIL_CLOSED
+  heartbeat_terminal_run_behavior: DECIDED
+  completion_terminal_run_behavior: DECIDED
+  technical_unresolved_choice: 0
+
+aggregate_boundary:
+  prejudged_by_80C1: false
+  dependency_on_80C2: EXPLICIT
+
+finding_mapping:
+  expected_truth_findings: 2
+  mapped_truth_findings: 2
+  resolved_in_product: 0
+
+governance:
+  human_architecture_acceptance: PENDING
+  adr_document_merge_authorized: false
+  product_implementation_authorized: false
+```
+
+The package-specific workflow must run the dedicated pytest file and validator on every relevant PR HEAD. Repository ruleset configuration must separately mark that check as required; this ADR does not claim that ruleset enforcement already exists.
+
+## 11. Acceptance state
+
+```yaml
+technical_correction: COMPLETE
+package_specific_CI: REQUIRED_TO_PASS
+existing_authority_gate: REQUIRED_TO_PASS
 human_architecture_acceptance: PENDING
-ADR_status_after_human_acceptance: ACCEPTED
-product_implementation_authorized_by_this_PR: false
+merge_authorized: false
+product_implementation_authorized: false
 ```
