@@ -769,11 +769,11 @@ def evaluate_authority_commit(
     if not context.permits(command):
         return AuthorityEvaluation(_decision(AuthorityDecisionCode.AUTHORITY_ENTRY_REJECTED), None)
 
-    contract = OPERATION_CONTRACTS[command.operation_type]
-    if contract.mutation_class is MutationClass.UNSUPPORTED_LEGACY_OPERATION:
-        return AuthorityEvaluation(_decision(AuthorityDecisionCode.UNSUPPORTED_LEGACY_OPERATION), None)
-    if contract.mutation_class is not MutationClass.ACCEPTED_AUTHORITY_MUTATION:
-        return AuthorityEvaluation(_decision(AuthorityDecisionCode.OPERATION_NOT_AUTHORITY_MUTATION), None)
+    # Receipt resolution precedes every operation-class, revision and state
+    # classification. Operation receipt keys are aggregate identity + operation
+    # ID; operation type and mutation class are command payload, not lookup-key
+    # material. A durable receipt therefore always gets first right of refusal
+    # after the outer authority-entry gate.
 
     # Receipt resolution precedes incoming revision/state comparison.  Stored
     # proof is validated against itself and lookup keys, never against mutable
@@ -808,6 +808,12 @@ def evaluate_authority_commit(
             _decision(AuthorityDecisionCode.ALREADY_APPLIED, return_existing_transition_id=record.transition_id),
             None,
         )
+
+    contract = OPERATION_CONTRACTS[command.operation_type]
+    if contract.mutation_class is MutationClass.UNSUPPORTED_LEGACY_OPERATION:
+        return AuthorityEvaluation(_decision(AuthorityDecisionCode.UNSUPPORTED_LEGACY_OPERATION), None)
+    if contract.mutation_class is not MutationClass.ACCEPTED_AUTHORITY_MUTATION:
+        return AuthorityEvaluation(_decision(AuthorityDecisionCode.OPERATION_NOT_AUTHORITY_MUTATION), None)
 
     if current_revision < command.expected_revision:
         return AuthorityEvaluation(_decision(AuthorityDecisionCode.FUTURE_REVISION_CONFLICT, reconciliation_candidate=True), None)

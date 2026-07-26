@@ -89,3 +89,25 @@ A receipt bound to another aggregate returns `PROJECTION_CORRUPTION_CONFLICT` be
 ## Deliberate exclusions
 
 This slice does not modify Redis/Lua scripts, choose a physical canonical-store layout, migrate existing keys, cut over runtime traffic, or claim production readiness.
+
+## Final receipt-first operation-class correction
+
+After the trusted authority-entry gate, operation receipt resolution precedes
+operation mutation-class classification for every incoming operation type. The
+receipt lookup key is canonical aggregate identity plus operation ID; operation
+type and mutation class are command payload and cannot bypass an existing
+receipt.
+
+```yaml
+receipt_present:
+  same_operation_same_command: ALREADY_APPLIED
+  same_operation_any_different_command: IDEMPOTENCY_CONFLICT
+receipt_missing:
+  unsupported_legacy_operation: UNSUPPORTED_LEGACY_OPERATION
+  coordination_or_transport_operation: OPERATION_NOT_AUTHORITY_MUTATION
+  accepted_authority_operation: CONTINUE_TO_REVISION_AND_STATE_CHECK
+```
+
+Regression coverage includes authority-to-coordination, authority-to-transport
+and run-create-to-unsupported-legacy operation-ID reuse, plus the corresponding
+receipt-missing classifications.

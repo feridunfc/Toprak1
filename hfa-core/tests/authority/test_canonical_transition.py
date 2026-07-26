@@ -500,6 +500,110 @@ def test_record_writer_is_trusted_context_claim_not_command_override():
     assert AUTHORITY_CONTEXT_TRUST_MODEL["security_boundary"] == "OUTSIDE_THIS_MODULE"
 
 
+@pytest.mark.parametrize(
+    "incoming",
+    [
+        command(
+            operation_type=OperationType.TASK_HEARTBEAT,
+            previous_state="running",
+            next_state="running",
+            intents=(intent("LIVENESS_TTL"),),
+        ),
+        command(
+            operation_type=OperationType.TERMINAL_DUPLICATE_CLEANUP,
+            previous_state="terminal",
+            next_state="terminal",
+            intents=(intent("AUDIT_INTENT"), intent("AUDIT_OUTCOME")),
+        ),
+    ],
+)
+def test_task_admit_receipt_precedes_non_authority_operation_classification(incoming):
+    original = command(payload={"x": 1})
+    plan = accepted(original).commit_plan
+    assert incoming.operation_id == original.operation_id
+    result = evaluate_authority_commit(
+        context=context(incoming),
+        command=incoming,
+        current_revision=99,
+        current_state="terminal",
+        receipt_probe=ReceiptProbe(plan.receipt, plan.record),
+        committed_at_ms=11,
+    )
+    assert result.decision.code is AuthorityDecisionCode.IDEMPOTENCY_CONFLICT
+
+
+def test_run_create_receipt_precedes_unsupported_legacy_classification():
+    original = command(
+        aggregate_identity=run_identity(),
+        operation_type=OperationType.RUN_CREATE,
+        previous_state=None,
+        next_state="pending",
+        intents=(intent("RUN_STATUS_PROJECTION"),),
+    )
+    plan = accepted(original).commit_plan
+    incoming = command(
+        aggregate_identity=run_identity(),
+        operation_type=OperationType.LEGACY_RUN_COMPLETE,
+        previous_state="running",
+        next_state="done",
+        intents=(),
+    )
+    result = evaluate_authority_commit(
+        context=context(incoming),
+        command=incoming,
+        current_revision=99,
+        current_state="done",
+        receipt_probe=ReceiptProbe(plan.receipt, plan.record),
+        committed_at_ms=11,
+    )
+    assert result.decision.code is AuthorityDecisionCode.IDEMPOTENCY_CONFLICT
+
+
+@pytest.mark.parametrize(
+    "incoming,expected",
+    [
+        (
+            command(
+                operation_type=OperationType.TASK_HEARTBEAT,
+                previous_state="running",
+                next_state="running",
+                intents=(intent("LIVENESS_TTL"),),
+            ),
+            AuthorityDecisionCode.OPERATION_NOT_AUTHORITY_MUTATION,
+        ),
+        (
+            command(
+                operation_type=OperationType.TERMINAL_DUPLICATE_CLEANUP,
+                previous_state="terminal",
+                next_state="terminal",
+                intents=(intent("AUDIT_INTENT"), intent("AUDIT_OUTCOME")),
+            ),
+            AuthorityDecisionCode.OPERATION_NOT_AUTHORITY_MUTATION,
+        ),
+        (
+            command(
+                aggregate_identity=run_identity(),
+                operation_type=OperationType.LEGACY_RUN_COMPLETE,
+                previous_state="running",
+                next_state="done",
+                intents=(),
+            ),
+            AuthorityDecisionCode.UNSUPPORTED_LEGACY_OPERATION,
+        ),
+    ],
+)
+def test_non_authority_and_legacy_classification_is_preserved_without_receipt(incoming, expected):
+    result = evaluate_authority_commit(
+        context=context(incoming),
+        command=incoming,
+        current_revision=incoming.expected_revision,
+        current_state=incoming.intended_previous_state,
+        receipt_probe=None,
+        committed_at_ms=1,
+    )
+    assert result.decision.code is expected
+
+
 def test_legacy_and_transport_operations_cannot_create_commit_plan():
     legacy = command(aggregate_identity=run_identity(), operation_type=OperationType.LEGACY_RUN_COMPLETE, previous_state="running", next_state="done", intents=())
     legacy_result = evaluate_authority_commit(context=context(legacy), command=legacy, current_revision=0, current_state="running", receipt_probe=None, committed_at_ms=1)
