@@ -1,4 +1,4 @@
-Traceback (most recent call last):
-  File "/tmp/harden80c2.py", line 153, in <module>
-    raise RuntimeError("validator terminal missing authority: needle absent")
-RuntimeError: validator terminal missing authority: needle absent
+  File "/tmp/harden80c2.py", line 149
+    missing_guard = '            and disposition.get("missing_authority_evidence")
+                    ^
+SyntaxError: unterminated string literal (detected at line 149)
