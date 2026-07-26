@@ -1,8 +1,13 @@
-"""Persistence-independent canonical transition authority core.
+"""Persistence-independent canonical transition policy-evaluation core.
 
-This module implements the accepted Sprint 80C authority contract without
-choosing a Redis/Lua storage layout.  The only public commit-producing entry
-point is :func:`evaluate_authority_commit`.
+Sprint 81.1 deliberately uses a *trusted-process boundary* threat model.
+``AuthorityEntryContext`` is trusted adapter input; this module validates the
+claims carried by that context against a command but does not authenticate the
+issuer, mint capabilities, or verify a lease against an external store.  Those
+security boundaries belong to a later trusted authority adapter.
+
+The module-level construction token is only an accidental-misuse guard.  It is
+not presented as protection from an arbitrary in-process Python caller.
 """
 from __future__ import annotations
 
@@ -21,7 +26,21 @@ import rfc8785
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 _MAX_SAFE_INTEGER = 2**53 - 1
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_INTERNAL_TOKEN = object()
+_INTERNAL_TOKEN = object()  # accidental-misuse guard only; not a security boundary
+
+AUTHORITY_CONTEXT_TRUST_MODEL: Mapping[str, str] = MappingProxyType(
+    {
+        "model": "TRUSTED_PROCESS_BOUNDARY",
+        "arbitrary_in_process_python_caller": "TRUSTED",
+        "AuthorityEntryContext": "TRUSTED_ADAPTER_INPUT",
+        "internal_token": "ACCIDENTAL_MISUSE_GUARD_ONLY",
+        "security_boundary": "OUTSIDE_THIS_MODULE",
+        "later_adapter_responsibilities": (
+            "AUTHENTICATE_PRINCIPAL;ISSUE_OPERATION_CAPABILITY;"
+            "VERIFY_TARGET_IDENTITY;VERIFY_LEASE_OR_FENCE"
+        ),
+    }
+)
 
 
 class AuthorityContractError(ValueError):
@@ -116,6 +135,8 @@ OPERATION_CONTRACTS: Mapping[OperationType, OperationContract] = MappingProxyTyp
     }
 )
 
+_CREATE_OPERATIONS = frozenset({OperationType.TASK_ADMIT, OperationType.RUN_CREATE})
+
 
 class AuthorityDecisionCode(str, Enum):
     ACCEPTED = "ACCEPTED"
@@ -145,13 +166,13 @@ class ProjectionDecision(str, Enum):
     PROJECTION_CORRUPTION_CONFLICT = "PROJECTION_CORRUPTION_CONFLICT"
 
 
-def _nfc(value: str, *, field_name: str, allow_empty: bool = False) -> str:
+def _nfc(value: Any, *, field_name: str, allow_empty: bool = False) -> str:
     if type(value) is not str:
         raise AuthorityContractError(f"{field_name} must be an exact string")
-    value = unicodedata.normalize("NFC", value)
-    if not allow_empty and not value:
+    normalized = unicodedata.normalize("NFC", value)
+    if not allow_empty and not normalized:
         raise AuthorityContractError(f"{field_name} must not be empty")
-    return value
+    return normalized
 
 
 def _safe_int(value: Any, *, field_name: str, minimum: int = 0) -> int:
@@ -212,24 +233,24 @@ def _normalize_json(value: Any, *, path: str = "$") -> JsonValue:
             result[key] = _normalize_json(raw_value, path=f"{path}.{key}")
         return result
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_normalize_json(item, path=f"{path}[{i}]") for i, item in enumerate(value)]
+        return [_normalize_json(item, path=f"{path}[{index}]") for index, item in enumerate(value)]
     raise AuthorityContractError(f"{path} contains unsupported type {type(value).__name__}")
 
 
 def _freeze(value: Any) -> Any:
     normalized = _normalize_json(value)
     if isinstance(normalized, dict):
-        return MappingProxyType({k: _freeze(v) for k, v in normalized.items()})
+        return MappingProxyType({key: _freeze(item) for key, item in normalized.items()})
     if isinstance(normalized, list):
-        return tuple(_freeze(v) for v in normalized)
+        return tuple(_freeze(item) for item in normalized)
     return normalized
 
 
 def _thaw(value: Any) -> JsonValue:
     if isinstance(value, Mapping):
-        return {str(k): _thaw(v) for k, v in value.items()}
+        return {str(key): _thaw(item) for key, item in value.items()}
     if isinstance(value, tuple):
-        return [_thaw(v) for v in value]
+        return [_thaw(item) for item in value]
     return value
 
 
@@ -288,9 +309,7 @@ class CanonicalAggregateIdentity:
 
     @property
     def value(self) -> str:
-        if self.aggregate_type is AggregateType.TASK:
-            return f"task:{self.run_id}:{self.task_id}"
-        return f"run:{self.run_id}"
+        return f"task:{self.run_id}:{self.task_id}" if self.aggregate_type is AggregateType.TASK else f"run:{self.run_id}"
 
     @property
     def structured(self) -> dict[str, str | None]:
@@ -328,9 +347,9 @@ class AuthorityCommand:
         object.__setattr__(self, "authoritative_payload", _freeze(self.authoritative_payload))
         object.__setattr__(self, "authoritative_metadata_changes", _freeze(self.authoritative_metadata_changes))
         object.__setattr__(self, "requested_child_effects", _freeze(self.requested_child_effects))
-        frozen_intents = tuple(_freeze(item) for item in self.requested_projection_intents)
-        _projection_kinds(frozen_intents)
-        object.__setattr__(self, "requested_projection_intents", frozen_intents)
+        intents = tuple(_freeze(item) for item in self.requested_projection_intents)
+        _projection_kinds(intents)
+        object.__setattr__(self, "requested_projection_intents", intents)
 
     @property
     def canonical_hash_payload(self) -> dict[str, Any]:
@@ -357,6 +376,8 @@ class AuthorityCommand:
 
 @dataclass(frozen=True)
 class AuthorityEntryContext:
+    """Claims issued and verified by a trusted adapter outside this module."""
+
     authenticated_writer_id: str
     allowed_operations: frozenset[OperationType]
     target_aggregate_identity_sha256: str
@@ -365,13 +386,14 @@ class AuthorityEntryContext:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "authenticated_writer_id", _nfc(self.authenticated_writer_id, field_name="authenticated_writer_id"))
-        if not isinstance(self.allowed_operations, frozenset) or any(not isinstance(v, OperationType) for v in self.allowed_operations):
+        if not isinstance(self.allowed_operations, frozenset) or any(not isinstance(value, OperationType) for value in self.allowed_operations):
             raise AuthorityContractError("allowed_operations must be frozenset[OperationType]")
         object.__setattr__(self, "target_aggregate_identity_sha256", _sha256_hex(self.target_aggregate_identity_sha256, field_name="target_aggregate_identity_sha256"))
         _exact_bool(self.fence_required, field_name="fence_required")
         _exact_bool(self.fence_valid, field_name="fence_valid")
 
     def permits(self, command: AuthorityCommand) -> bool:
+        """Evaluate trusted adapter claims; this does not prove their issuer."""
         return (
             command.operation_type in self.allowed_operations
             and self.target_aggregate_identity_sha256 == command.aggregate_identity.sha256
@@ -433,7 +455,7 @@ class CanonicalTransitionRecord:
 
     def __init__(self, *, _token: object, **values: Any) -> None:
         if _token is not _INTERNAL_TOKEN:
-            raise AuthorityContractError("CanonicalTransitionRecord must be created by authority evaluation")
+            raise AuthorityContractError("CanonicalTransitionRecord is produced only by policy evaluation")
         for field_name in self.__dataclass_fields__:  # type: ignore[attr-defined]
             object.__setattr__(self, field_name, values[field_name])
 
@@ -483,7 +505,7 @@ class OperationReceipt:
 
     def __init__(self, *, _token: object, **values: Any) -> None:
         if _token is not _INTERNAL_TOKEN:
-            raise AuthorityContractError("OperationReceipt must be created by authority evaluation")
+            raise AuthorityContractError("OperationReceipt is produced only by policy evaluation")
         for field_name in self.__dataclass_fields__:  # type: ignore[attr-defined]
             object.__setattr__(self, field_name, values[field_name])
 
@@ -502,23 +524,35 @@ class ReceiptProbe:
 
 @dataclass(frozen=True, init=False)
 class ProjectionApplicationReceipt:
+    canonical_aggregate_identity_sha256: str
     applied_revision: int
     applied_transition_id: str
     applied_record_hash: str
 
-    def __init__(self, *, _token: object, applied_revision: int, applied_transition_id: str, applied_record_hash: str) -> None:
+    def __init__(self, *, _token: object, canonical_aggregate_identity_sha256: str, applied_revision: int, applied_transition_id: str, applied_record_hash: str) -> None:
         if _token is not _INTERNAL_TOKEN:
             raise AuthorityContractError("use ProjectionApplicationReceipt.create")
+        object.__setattr__(self, "canonical_aggregate_identity_sha256", canonical_aggregate_identity_sha256)
         object.__setattr__(self, "applied_revision", applied_revision)
         object.__setattr__(self, "applied_transition_id", applied_transition_id)
         object.__setattr__(self, "applied_record_hash", applied_record_hash)
 
     @classmethod
-    def create(cls, *, applied_revision: int, applied_transition_id: str, applied_record_hash: str) -> "ProjectionApplicationReceipt":
-        revision = _safe_int(applied_revision, field_name="applied_revision", minimum=1)
-        transition_id = _nfc(applied_transition_id, field_name="applied_transition_id")
-        record_hash = _sha256_hex(applied_record_hash, field_name="applied_record_hash")
-        return cls(_token=_INTERNAL_TOKEN, applied_revision=revision, applied_transition_id=transition_id, applied_record_hash=record_hash)
+    def create(
+        cls,
+        *,
+        canonical_aggregate_identity_sha256: str,
+        applied_revision: int,
+        applied_transition_id: str,
+        applied_record_hash: str,
+    ) -> "ProjectionApplicationReceipt":
+        return cls(
+            _token=_INTERNAL_TOKEN,
+            canonical_aggregate_identity_sha256=_sha256_hex(canonical_aggregate_identity_sha256, field_name="canonical_aggregate_identity_sha256"),
+            applied_revision=_safe_int(applied_revision, field_name="applied_revision", minimum=1),
+            applied_transition_id=_nfc(applied_transition_id, field_name="applied_transition_id"),
+            applied_record_hash=_sha256_hex(applied_record_hash, field_name="applied_record_hash"),
+        )
 
 
 @dataclass(frozen=True, init=False)
@@ -533,7 +567,7 @@ class AuthorityDecision:
 
     def __init__(self, *, _token: object, **values: Any) -> None:
         if _token is not _INTERNAL_TOKEN:
-            raise AuthorityContractError("AuthorityDecision is evaluator-produced and cannot be constructed by callers")
+            raise AuthorityContractError("AuthorityDecision is evaluator-produced")
         for field_name in self.__dataclass_fields__:  # type: ignore[attr-defined]
             object.__setattr__(self, field_name, values[field_name])
 
@@ -586,13 +620,7 @@ class AuthorityEvaluation:
     commit_plan: AuthorityCommitPlan | None
 
 
-def _new_record(
-    command: AuthorityCommand,
-    *,
-    writer_id: str,
-    committed_at_ms: int,
-    correlation_id: str | None,
-) -> CanonicalTransitionRecord:
+def _new_record(command: AuthorityCommand, *, writer_id: str, committed_at_ms: int, correlation_id: str | None) -> CanonicalTransitionRecord:
     to_revision = command.expected_revision + 1
     values: dict[str, Any] = {
         "schema_version": "ctr.v1",
@@ -669,38 +697,43 @@ def validate_canonical_transition_record(record: CanonicalTransitionRecord) -> N
         raise AuthorityContractError("canonical record hash mismatch")
 
 
-def _validate_receipt(receipt: OperationReceipt, command: AuthorityCommand) -> None:
+def _validate_receipt_internal(receipt: OperationReceipt) -> OperationType:
     if not isinstance(receipt, OperationReceipt):
         raise AuthorityContractError("receipt must be OperationReceipt")
     _nfc(receipt.operation_id, field_name="receipt.operation_id")
     _sha256_hex(receipt.canonical_command_hash, field_name="receipt.canonical_command_hash")
     _sha256_hex(receipt.canonical_record_hash, field_name="receipt.canonical_record_hash")
+    _nfc(receipt.transition_id, field_name="receipt.transition_id")
     _safe_int(receipt.aggregate_revision, field_name="receipt.aggregate_revision", minimum=1)
     _safe_int(receipt.committed_at_ms, field_name="receipt.committed_at_ms")
-    operation = _coerce_operation(receipt.operation_type)
-    expected_revision = command.expected_revision + 1
-    expected_transition = _transition_id(command.aggregate_identity.sha256, expected_revision, command.operation_id)
-    if receipt.operation_id != command.operation_id or operation is not command.operation_type:
-        raise AuthorityContractError("receipt operation identity mismatch")
-    if receipt.aggregate_revision != expected_revision or receipt.transition_id != expected_transition:
-        raise AuthorityContractError("receipt revision/transition identity mismatch")
+    return _coerce_operation(receipt.operation_type)
 
 
-def _validate_duplicate_proof(probe: ReceiptProbe, command: AuthorityCommand) -> tuple[OperationReceipt, CanonicalTransitionRecord]:
+def _validate_stored_duplicate_proof(
+    probe: ReceiptProbe,
+    *,
+    lookup_aggregate_identity_sha256: str,
+    lookup_operation_id: str,
+) -> tuple[OperationReceipt, CanonicalTransitionRecord]:
+    """Validate stored proof independently from the incoming command payload."""
     receipt = probe.receipt
-    _validate_receipt(receipt, command)
+    _validate_receipt_internal(receipt)
     record = probe.canonical_store_record
     if record is None:
         raise AuthorityContractError("actual canonical store record is required")
     validate_canonical_transition_record(record)
+    if record.aggregate_identity_sha256 != lookup_aggregate_identity_sha256:
+        raise AuthorityContractError("stored proof aggregate lookup mismatch")
+    if receipt.operation_id != lookup_operation_id or record.operation_id != lookup_operation_id:
+        raise AuthorityContractError("stored proof operation lookup mismatch")
     if (
-        record.transition_id != receipt.transition_id
-        or record.operation_id != receipt.operation_id
-        or record.operation_type != receipt.operation_type
-        or record.to_revision != receipt.aggregate_revision
-        or record.canonical_command_hash != receipt.canonical_command_hash
-        or record.canonical_record_hash != receipt.canonical_record_hash
-        or record.aggregate_identity_sha256 != command.aggregate_identity.sha256
+        receipt.operation_id != record.operation_id
+        or receipt.operation_type != record.operation_type
+        or receipt.aggregate_revision != record.to_revision
+        or receipt.transition_id != record.transition_id
+        or receipt.canonical_command_hash != record.canonical_command_hash
+        or receipt.canonical_record_hash != record.canonical_record_hash
+        or receipt.committed_at_ms != record.committed_at_ms
     ):
         raise AuthorityContractError("receipt and canonical record proof mismatch")
     return receipt, record
@@ -716,6 +749,12 @@ def evaluate_authority_commit(
     committed_at_ms: int,
     correlation_id: str | None = None,
 ) -> AuthorityEvaluation:
+    """Evaluate trusted adapter claims and return a deterministic commit plan.
+
+    ``context`` provenance is an external precondition under the Sprint 81.1
+    trusted-process threat model.  This function evaluates those claims; it does
+    not authenticate or mint them.
+    """
     if not isinstance(context, AuthorityEntryContext) or not isinstance(command, AuthorityCommand):
         raise AuthorityContractError("context and command must be authority primitives")
     current_revision = _safe_int(current_revision, field_name="current_revision")
@@ -736,17 +775,33 @@ def evaluate_authority_commit(
     if contract.mutation_class is not MutationClass.ACCEPTED_AUTHORITY_MUTATION:
         return AuthorityEvaluation(_decision(AuthorityDecisionCode.OPERATION_NOT_AUTHORITY_MUTATION), None)
 
+    # Receipt resolution precedes incoming revision/state comparison.  Stored
+    # proof is validated against itself and lookup keys, never against mutable
+    # fields of the incoming command.  The command hash comparison is the sole
+    # same-operation/same-command discriminator.
     if receipt_probe is not None:
         try:
-            receipt, record = _validate_duplicate_proof(receipt_probe, command)
+            receipt, record = _validate_stored_duplicate_proof(
+                receipt_probe,
+                lookup_aggregate_identity_sha256=command.aggregate_identity.sha256,
+                lookup_operation_id=command.operation_id,
+            )
         except AuthorityContractError:
             return AuthorityEvaluation(
-                _decision(AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT, durable_conflict_record=True, reconciliation_candidate=True),
+                _decision(
+                    AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT,
+                    durable_conflict_record=True,
+                    reconciliation_candidate=True,
+                ),
                 None,
             )
         if receipt.canonical_command_hash != command.canonical_command_hash:
             return AuthorityEvaluation(
-                _decision(AuthorityDecisionCode.IDEMPOTENCY_CONFLICT, durable_conflict_record=True, reconciliation_candidate=True),
+                _decision(
+                    AuthorityDecisionCode.IDEMPOTENCY_CONFLICT,
+                    durable_conflict_record=True,
+                    reconciliation_candidate=True,
+                ),
                 None,
             )
         return AuthorityEvaluation(
@@ -757,8 +812,9 @@ def evaluate_authority_commit(
     if current_revision < command.expected_revision:
         return AuthorityEvaluation(_decision(AuthorityDecisionCode.FUTURE_REVISION_CONFLICT, reconciliation_candidate=True), None)
     if current_revision > command.expected_revision:
-        code = AuthorityDecisionCode.AGGREGATE_ALREADY_EXISTS_CONFLICT if command.expected_revision == 0 else AuthorityDecisionCode.STALE_REVISION_CONFLICT
-        return AuthorityEvaluation(_decision(code, durable_conflict_record=command.expected_revision == 0), None)
+        is_create_conflict = command.operation_type in _CREATE_OPERATIONS and command.expected_revision == 0
+        code = AuthorityDecisionCode.AGGREGATE_ALREADY_EXISTS_CONFLICT if is_create_conflict else AuthorityDecisionCode.STALE_REVISION_CONFLICT
+        return AuthorityEvaluation(_decision(code, durable_conflict_record=is_create_conflict), None)
     if current_state != command.intended_previous_state:
         return AuthorityEvaluation(_decision(AuthorityDecisionCode.ILLEGAL_STATE_TRANSITION), None)
     try:
@@ -806,10 +862,13 @@ def evaluate_projection_application(current: ProjectionApplicationReceipt | None
     if not isinstance(current, ProjectionApplicationReceipt):
         return ProjectionDecision.PROJECTION_CORRUPTION_CONFLICT
     try:
+        current_identity = _sha256_hex(current.canonical_aggregate_identity_sha256, field_name="canonical_aggregate_identity_sha256")
         _safe_int(current.applied_revision, field_name="applied_revision", minimum=1)
         _nfc(current.applied_transition_id, field_name="applied_transition_id")
         _sha256_hex(current.applied_record_hash, field_name="applied_record_hash")
     except AuthorityContractError:
+        return ProjectionDecision.PROJECTION_CORRUPTION_CONFLICT
+    if current_identity != incoming.aggregate_identity_sha256:
         return ProjectionDecision.PROJECTION_CORRUPTION_CONFLICT
     if incoming.to_revision == current.applied_revision:
         if incoming.transition_id == current.applied_transition_id and incoming.canonical_record_hash == current.applied_record_hash:

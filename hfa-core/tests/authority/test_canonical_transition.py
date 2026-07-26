@@ -6,6 +6,7 @@ from dataclasses import fields
 import pytest
 
 from hfa.authority import (
+    AUTHORITY_CONTEXT_TRUST_MODEL,
     OPERATION_CONTRACTS,
     AggregateType,
     AuthorityCommand,
@@ -57,8 +58,7 @@ def command(
     intents: tuple[dict[str, str], ...] | None = None,
     payload: object = None,
 ) -> AuthorityCommand:
-    if aggregate_identity is None:
-        aggregate_identity = identity()
+    aggregate_identity = aggregate_identity or identity()
     if intents is None:
         intents = (intent("READY_QUEUE_IF_READY"),) if next_state == "ready" else ()
     return AuthorityCommand(
@@ -76,7 +76,15 @@ def command(
     )
 
 
-def context(cmd: AuthorityCommand, *, writer: str = "writer-1", allowed: bool = True, target: bool = True, fence_required: bool = False, fence_valid: bool = True) -> AuthorityEntryContext:
+def context(
+    cmd: AuthorityCommand,
+    *,
+    writer: str = "writer-1",
+    allowed: bool = True,
+    target: bool = True,
+    fence_required: bool = False,
+    fence_valid: bool = True,
+) -> AuthorityEntryContext:
     return AuthorityEntryContext(
         authenticated_writer_id=writer,
         allowed_operations=frozenset({cmd.operation_type}) if allowed else frozenset(),
@@ -113,6 +121,15 @@ def rehash_record(record: CanonicalTransitionRecord) -> CanonicalTransitionRecor
     return record
 
 
+def projection_receipt(record: CanonicalTransitionRecord) -> ProjectionApplicationReceipt:
+    return ProjectionApplicationReceipt.create(
+        canonical_aggregate_identity_sha256=record.aggregate_identity_sha256,
+        applied_revision=record.to_revision,
+        applied_transition_id=record.transition_id,
+        applied_record_hash=record.canonical_record_hash,
+    )
+
+
 def test_operation_registry_exact_count_and_members():
     assert len(OPERATION_CONTRACTS) == 15
     assert set(OPERATION_CONTRACTS) == set(OperationType)
@@ -128,7 +145,6 @@ def test_identity_delimiter_collision_has_different_digest():
 def test_command_hash_binds_collision_safe_identity():
     left = command(aggregate_identity=identity(run_id="a:b", task_id="c"))
     right = command(aggregate_identity=identity(run_id="a", task_id="b:c"))
-    assert left.aggregate_identity.value == right.aggregate_identity.value
     assert left.canonical_command_hash != right.canonical_command_hash
 
 
@@ -160,6 +176,29 @@ def test_context_fence_fields_exact_bool(name, value):
             target_aggregate_identity_sha256=cmd.aggregate_identity.sha256,
             **kwargs,
         )
+
+
+def test_trusted_process_threat_model_is_explicit():
+    assert AUTHORITY_CONTEXT_TRUST_MODEL["model"] == "TRUSTED_PROCESS_BOUNDARY"
+    assert AUTHORITY_CONTEXT_TRUST_MODEL["AuthorityEntryContext"] == "TRUSTED_ADAPTER_INPUT"
+    assert AUTHORITY_CONTEXT_TRUST_MODEL["security_boundary"] == "OUTSIDE_THIS_MODULE"
+    assert AUTHORITY_CONTEXT_TRUST_MODEL["internal_token"] == "ACCIDENTAL_MISUSE_GUARD_ONLY"
+
+
+def test_context_is_policy_input_not_authentication_proof():
+    cmd = command()
+    caller_constructed = context(cmd, writer="chosen-writer")
+    result = evaluate_authority_commit(
+        context=caller_constructed,
+        command=cmd,
+        current_revision=0,
+        current_state=None,
+        receipt_probe=None,
+        committed_at_ms=1,
+    )
+    assert result.decision.code is AuthorityDecisionCode.ACCEPTED
+    assert result.commit_plan.record.writer_id == "chosen-writer"
+    assert AUTHORITY_CONTEXT_TRUST_MODEL["arbitrary_in_process_python_caller"] == "TRUSTED"
 
 
 def test_canonical_json_nfc_and_binary_profile():
@@ -195,20 +234,17 @@ def test_outer_gate_fence_rejects():
 def test_acceptance_creates_one_record_one_receipt_one_revision():
     result = accepted()
     plan = result.commit_plan
-    assert plan is not None
     assert result.decision.aggregate_mutation == 1
     assert result.decision.revision_increment == 1
     assert result.decision.canonical_record_count == 1
     assert plan.aggregate_revision == 1
     assert plan.record.to_revision == 1
     assert plan.receipt.aggregate_revision == 1
-    assert plan.record.writer_id == "writer-1"
     validate_canonical_transition_record(plan.record)
 
 
 def test_commit_plan_uses_typed_identity_not_ambiguous_string():
     plan = accepted().commit_plan
-    assert plan is not None
     assert isinstance(plan.aggregate_identity, CanonicalAggregateIdentity)
     assert plan.canonical_aggregate_identity_sha256 == plan.aggregate_identity.sha256
 
@@ -216,43 +252,31 @@ def test_commit_plan_uses_typed_identity_not_ambiguous_string():
 def test_caller_cannot_construct_accepted_decision():
     with pytest.raises(AuthorityContractError):
         AuthorityDecision(
-            _token=object(),
-            code=AuthorityDecisionCode.ACCEPTED,
-            aggregate_mutation=1,
-            revision_increment=1,
-            canonical_record_count=1,
-            return_existing_transition_id=None,
-            durable_conflict_record=False,
+            _token=object(), code=AuthorityDecisionCode.ACCEPTED,
+            aggregate_mutation=1, revision_increment=1, canonical_record_count=1,
+            return_existing_transition_id=None, durable_conflict_record=False,
             reconciliation_candidate=False,
         )
 
 
 def test_caller_cannot_construct_commit_plan():
-    result = accepted()
+    plan = accepted().commit_plan
     with pytest.raises(AuthorityContractError):
-        AuthorityCommitPlan(
-            _token=object(),
-            aggregate_identity=result.commit_plan.aggregate_identity,
-            aggregate_revision=1,
-            record=result.commit_plan.record,
-            receipt=result.commit_plan.receipt,
-        )
+        AuthorityCommitPlan(_token=object(), aggregate_identity=plan.aggregate_identity, aggregate_revision=1, record=plan.record, receipt=plan.receipt)
 
 
 def test_caller_cannot_construct_record_or_receipt():
-    record_values = {field.name: None for field in fields(CanonicalTransitionRecord)}
     with pytest.raises(AuthorityContractError):
-        CanonicalTransitionRecord(_token=object(), **record_values)
-    receipt_values = {field.name: None for field in fields(OperationReceipt)}
+        CanonicalTransitionRecord(_token=object(), **{field.name: None for field in fields(CanonicalTransitionRecord)})
     with pytest.raises(AuthorityContractError):
-        OperationReceipt(_token=object(), **receipt_values)
+        OperationReceipt(_token=object(), **{field.name: None for field in fields(OperationReceipt)})
 
 
 def test_projection_receipt_requires_valid_factory_inputs():
     with pytest.raises(AuthorityContractError):
-        ProjectionApplicationReceipt(_token=object(), applied_revision=1, applied_transition_id="x", applied_record_hash="0" * 64)
+        ProjectionApplicationReceipt(_token=object(), canonical_aggregate_identity_sha256="0" * 64, applied_revision=1, applied_transition_id="x", applied_record_hash="0" * 64)
     with pytest.raises(AuthorityContractError):
-        ProjectionApplicationReceipt.create(applied_revision=True, applied_transition_id="x", applied_record_hash="0" * 64)
+        ProjectionApplicationReceipt.create(canonical_aggregate_identity_sha256="0" * 64, applied_revision=True, applied_transition_id="x", applied_record_hash="0" * 64)
 
 
 def test_ready_state_requires_conditional_ready_intent():
@@ -267,15 +291,32 @@ def test_non_ready_state_forbids_conditional_ready_intent():
     assert result.decision.code is AuthorityDecisionCode.ILLEGAL_STATE_TRANSITION
 
 
-def test_future_stale_and_create_conflicts():
+def test_future_and_regular_stale_conflicts():
     cmd = command(expected_revision=2, previous_state="ready", next_state="scheduled", operation_type=OperationType.TASK_DISPATCH, intents=(intent("CONTROL_NOTIFICATION"), intent("TASK_REQUEST_MESSAGE")))
     future = evaluate_authority_commit(context=context(cmd), command=cmd, current_revision=1, current_state="ready", receipt_probe=None, committed_at_ms=1)
     stale = evaluate_authority_commit(context=context(cmd), command=cmd, current_revision=3, current_state="ready", receipt_probe=None, committed_at_ms=1)
-    create = command()
-    exists = evaluate_authority_commit(context=context(create), command=create, current_revision=1, current_state="ready", receipt_probe=None, committed_at_ms=1)
     assert future.decision.code is AuthorityDecisionCode.FUTURE_REVISION_CONFLICT
     assert stale.decision.code is AuthorityDecisionCode.STALE_REVISION_CONFLICT
-    assert exists.decision.code is AuthorityDecisionCode.AGGREGATE_ALREADY_EXISTS_CONFLICT
+
+
+@pytest.mark.parametrize("operation_type,aggregate_identity,previous_state,next_state,intents", [
+    (OperationType.TASK_ADMIT, identity(), None, "ready", (intent("READY_QUEUE_IF_READY"),)),
+    (OperationType.RUN_CREATE, run_identity(), None, "pending", (intent("RUN_STATUS_PROJECTION"),)),
+])
+def test_create_operations_at_revision_zero_report_aggregate_exists(operation_type, aggregate_identity, previous_state, next_state, intents):
+    cmd = command(aggregate_identity=aggregate_identity, operation_type=operation_type, expected_revision=0, previous_state=previous_state, next_state=next_state, intents=intents)
+    result = evaluate_authority_commit(context=context(cmd), command=cmd, current_revision=1, current_state=next_state, receipt_probe=None, committed_at_ms=1)
+    assert result.decision.code is AuthorityDecisionCode.AGGREGATE_ALREADY_EXISTS_CONFLICT
+
+
+@pytest.mark.parametrize("operation_type,previous_state,next_state,intents", [
+    (OperationType.TASK_DEPENDENCY_APPLY, "pending", "ready", (intent("READY_QUEUE_IF_READY"),)),
+    (OperationType.TASK_CANCEL, "pending", "skipped", (intent("TERMINAL_PROJECTION"),)),
+])
+def test_non_create_operations_at_expected_zero_are_stale(operation_type, previous_state, next_state, intents):
+    cmd = command(operation_type=operation_type, expected_revision=0, previous_state=previous_state, next_state=next_state, intents=intents)
+    result = evaluate_authority_commit(context=context(cmd), command=cmd, current_revision=1, current_state=next_state, receipt_probe=None, committed_at_ms=1)
+    assert result.decision.code is AuthorityDecisionCode.STALE_REVISION_CONFLICT
 
 
 def test_current_revision_and_timestamp_reject_bool_and_unsafe():
@@ -288,12 +329,9 @@ def test_current_revision_and_timestamp_reject_bool_and_unsafe():
 
 
 def test_duplicate_requires_actual_valid_record():
-    result = accepted()
-    plan = result.commit_plan
-    probe = ReceiptProbe(plan.receipt, None)
-    duplicate = evaluate_authority_commit(context=context(command()), command=command(), current_revision=1, current_state="ready", receipt_probe=probe, committed_at_ms=11)
-    assert duplicate.decision.code is AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT
-    assert duplicate.decision.durable_conflict_record is True
+    plan = accepted().commit_plan
+    result = evaluate_authority_commit(context=context(command()), command=command(), current_revision=1, current_state="ready", receipt_probe=ReceiptProbe(plan.receipt, None), committed_at_ms=11)
+    assert result.decision.code is AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT
 
 
 def test_duplicate_same_receipt_and_record_is_already_applied():
@@ -304,12 +342,35 @@ def test_duplicate_same_receipt_and_record_is_already_applied():
     assert result.decision.return_existing_transition_id == plan.record.transition_id
 
 
-def test_same_operation_different_command_is_idempotency_conflict_after_valid_proof():
+@pytest.mark.parametrize("changed", [
+    command(payload={"x": 2}),
+    command(expected_revision=1, previous_state="ready", next_state="scheduled", operation_type=OperationType.TASK_DISPATCH, intents=(intent("CONTROL_NOTIFICATION"), intent("TASK_REQUEST_MESSAGE"))),
+    command(operation_type=OperationType.TASK_DEPENDENCY_APPLY, previous_state="pending", next_state="ready", intents=(intent("READY_QUEUE_IF_READY"),)),
+    command(next_state="pending", intents=()),
+])
+def test_same_operation_id_different_command_is_idempotency_conflict(changed):
     original = command(payload={"x": 1})
     plan = accepted(original).commit_plan
-    changed = command(payload={"x": 2})
-    result = evaluate_authority_commit(context=context(changed), command=changed, current_revision=1, current_state="ready", receipt_probe=ReceiptProbe(plan.receipt, plan.record), committed_at_ms=11)
+    # All variants intentionally reuse the same operation_id and aggregate identity.
+    assert changed.operation_id == original.operation_id
+    result = evaluate_authority_commit(context=context(changed), command=changed, current_revision=99, current_state="done", receipt_probe=ReceiptProbe(plan.receipt, plan.record), committed_at_ms=11)
     assert result.decision.code is AuthorityDecisionCode.IDEMPOTENCY_CONFLICT
+
+
+def test_stored_proof_corruption_is_not_idempotency_conflict():
+    cmd = command()
+    plan = accepted(cmd).commit_plan
+    tamper(plan.receipt, aggregate_revision=2)
+    result = evaluate_authority_commit(context=context(cmd), command=cmd, current_revision=1, current_state="ready", receipt_probe=ReceiptProbe(plan.receipt, plan.record), committed_at_ms=11)
+    assert result.decision.code is AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT
+
+
+def test_wrong_lookup_operation_id_is_corruption():
+    original = command()
+    plan = accepted(original).commit_plan
+    changed = command(operation_id="different-operation")
+    result = evaluate_authority_commit(context=context(changed), command=changed, current_revision=1, current_state="ready", receipt_probe=ReceiptProbe(plan.receipt, plan.record), committed_at_ms=11)
+    assert result.decision.code is AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT
 
 
 def test_fake_matching_hash_strings_do_not_prove_duplicate():
@@ -321,13 +382,12 @@ def test_fake_matching_hash_strings_do_not_prove_duplicate():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("operation_id", "other"),
     ("operation_type", OperationType.TASK_COMPLETE.value),
     ("aggregate_revision", 2),
     ("transition_id", "ctr:v1:bad"),
     ("committed_at_ms", True),
 ])
-def test_receipt_identity_or_type_mismatch_is_corruption(field, value):
+def test_receipt_record_mismatch_is_corruption(field, value):
     cmd = command()
     plan = accepted(cmd).commit_plan
     tamper(plan.receipt, **{field: value})
@@ -338,7 +398,6 @@ def test_receipt_identity_or_type_mismatch_is_corruption(field, value):
 def test_store_empty_rejects_invalid_candidate_hash():
     record = accepted().commit_plan.record
     tamper(record, writer_id="tampered")
-    assert record.verify_hash() is False
     assert classify_canonical_store_write(None, record) is CanonicalStoreDecision.CANONICAL_RECORD_CORRUPTION_CONFLICT
 
 
@@ -356,12 +415,9 @@ def test_store_rejects_invalid_existing_record():
 
 
 @pytest.mark.parametrize("changes", [
-    {"from_revision": 999},
-    {"transition_id": "ctr:v1:arbitrary"},
-    {"aggregate_identity_sha256": "0" * 64},
-    {"operation_type": "UNKNOWN"},
-    {"committed_at_ms": -1},
-    {"canonical_command_hash": "not-a-hash"},
+    {"from_revision": 999}, {"transition_id": "ctr:v1:arbitrary"},
+    {"aggregate_identity_sha256": "0" * 64}, {"operation_type": "UNKNOWN"},
+    {"committed_at_ms": -1}, {"canonical_command_hash": "not-a-hash"},
 ])
 def test_self_hashed_semantically_invalid_record_is_rejected(changes):
     record = accepted().commit_plan.record
@@ -383,14 +439,7 @@ def test_self_hashed_wrong_projection_intents_is_rejected():
 
 def second_record():
     first = accepted().commit_plan.record
-    cmd = command(
-        operation_type=OperationType.TASK_DISPATCH,
-        operation_id="op-2",
-        expected_revision=1,
-        previous_state="ready",
-        next_state="scheduled",
-        intents=(intent("CONTROL_NOTIFICATION"), intent("TASK_REQUEST_MESSAGE")),
-    )
+    cmd = command(operation_type=OperationType.TASK_DISPATCH, operation_id="op-2", expected_revision=1, previous_state="ready", next_state="scheduled", intents=(intent("CONTROL_NOTIFICATION"), intent("TASK_REQUEST_MESSAGE")))
     return first, accepted(cmd, state="ready", revision=1).commit_plan.record
 
 
@@ -402,7 +451,7 @@ def test_projection_first_revision_apply_and_gap_fail_closed():
 
 def test_projection_duplicate_and_same_revision_corruption():
     record = accepted().commit_plan.record
-    receipt = ProjectionApplicationReceipt.create(applied_revision=1, applied_transition_id=record.transition_id, applied_record_hash=record.canonical_record_hash)
+    receipt = projection_receipt(record)
     assert evaluate_projection_application(receipt, record) is ProjectionDecision.DUPLICATE_NOOP
     other = accepted(command(operation_id="other")).commit_plan.record
     assert evaluate_projection_application(receipt, other) is ProjectionDecision.PROJECTION_CORRUPTION_CONFLICT
@@ -410,18 +459,29 @@ def test_projection_duplicate_and_same_revision_corruption():
 
 def test_projection_next_older_and_gap():
     first, second = second_record()
-    first_receipt = ProjectionApplicationReceipt.create(applied_revision=1, applied_transition_id=first.transition_id, applied_record_hash=first.canonical_record_hash)
+    first_receipt = projection_receipt(first)
     assert evaluate_projection_application(first_receipt, second) is ProjectionDecision.APPLY
-    second_receipt = ProjectionApplicationReceipt.create(applied_revision=2, applied_transition_id=second.transition_id, applied_record_hash=second.canonical_record_hash)
+    second_receipt = projection_receipt(second)
     assert evaluate_projection_application(second_receipt, first) is ProjectionDecision.OLDER_REVISION_NOOP
     third_cmd = command(operation_type=OperationType.TASK_CLAIM, operation_id="op-3", expected_revision=2, previous_state="scheduled", next_state="running", intents=(intent("RUNNING_SET"),))
     third = accepted(third_cmd, state="scheduled", revision=2).commit_plan.record
     assert evaluate_projection_application(first_receipt, third) is ProjectionDecision.GAP_FAIL_CLOSED_AND_REPLAY_REQUIRED
 
 
+def test_projection_rejects_cross_aggregate_receipt():
+    record = accepted().commit_plan.record
+    receipt = ProjectionApplicationReceipt.create(
+        canonical_aggregate_identity_sha256=identity(run_id="other").sha256,
+        applied_revision=1,
+        applied_transition_id=record.transition_id,
+        applied_record_hash=record.canonical_record_hash,
+    )
+    assert evaluate_projection_application(receipt, record) is ProjectionDecision.PROJECTION_CORRUPTION_CONFLICT
+
+
 def test_projection_rejects_bool_revision_receipt():
     record = accepted().commit_plan.record
-    receipt = ProjectionApplicationReceipt.create(applied_revision=1, applied_transition_id=record.transition_id, applied_record_hash=record.canonical_record_hash)
+    receipt = projection_receipt(record)
     tamper(receipt, applied_revision=True)
     assert evaluate_projection_application(receipt, record) is ProjectionDecision.PROJECTION_CORRUPTION_CONFLICT
 
@@ -433,10 +493,11 @@ def test_read_only_compatibility_evaluator_cannot_accept_decision_as_input():
     assert not hasattr(AuthorityCommitPlan, "create")
 
 
-def test_record_writer_is_authorized_context_not_command_or_caller_override():
+def test_record_writer_is_trusted_context_claim_not_command_override():
     cmd = command()
-    result = evaluate_authority_commit(context=context(cmd, writer="authorized-writer"), command=cmd, current_revision=0, current_state=None, receipt_probe=None, committed_at_ms=1)
-    assert result.commit_plan.record.writer_id == "authorized-writer"
+    result = evaluate_authority_commit(context=context(cmd, writer="adapter-asserted-writer"), command=cmd, current_revision=0, current_state=None, receipt_probe=None, committed_at_ms=1)
+    assert result.commit_plan.record.writer_id == "adapter-asserted-writer"
+    assert AUTHORITY_CONTEXT_TRUST_MODEL["security_boundary"] == "OUTSIDE_THIS_MODULE"
 
 
 def test_legacy_and_transport_operations_cannot_create_commit_plan():

@@ -1,5 +1,6 @@
-"""Aggregate authority primitives."""
+"""Aggregate authority policy-evaluation primitives."""
 from .canonical_transition import (
+    AUTHORITY_CONTEXT_TRUST_MODEL,
     OPERATION_CONTRACTS,
     AggregateType,
     AuthorityCommand,
@@ -30,6 +31,7 @@ from .canonical_transition import (
 )
 
 __all__ = [
+    "AUTHORITY_CONTEXT_TRUST_MODEL",
     "OPERATION_CONTRACTS",
     "AggregateType",
     "AuthorityCommand",
