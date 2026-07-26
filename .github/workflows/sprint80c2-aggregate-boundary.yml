@@ -60,19 +60,7 @@ jobs:
           source = source[:block_start] + replacement + source[block_end + 1:]
           path.write_text(source, encoding='utf-8')
           PY
-          set +e
-          python /tmp/harden80c2.py > /tmp/harden80c2.log 2>&1
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            tail -n 60 /tmp/harden80c2.log > .harden80c2-error.txt
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add .harden80c2-error.txt
-            git commit -m 'chore(sprint80c): capture hardener failure'
-            git push origin HEAD:sprint/80c2-aggregate-boundary
-            exit "$status"
-          fi
+          python /tmp/harden80c2.py
           python - <<'PY'
           from pathlib import Path
           path = Path('scripts/sprint80c/validate_aggregate_boundary.py')
@@ -123,11 +111,11 @@ jobs:
           ]
           path.write_text(source[:start] + '\n'.join(lines) + source[end:], encoding='utf-8')
           PY
-      - name: Restore final seven-file package
+      - name: Prepare final package bytes
         shell: bash
         run: |
           set -euo pipefail
-          cat > .github/workflows/sprint80c2-aggregate-boundary.yml <<'EOF'
+          cat > /tmp/final-workflow.yml <<'EOF'
           name: Sprint 80C.2 Aggregate Boundary
 
           on:
@@ -172,9 +160,8 @@ jobs:
                 - name: Check patch whitespace
                   run: git diff --check 9d7c7a6ad52a8a546a708dda048f28d4e23befc6...HEAD
           EOF
-          sed -i 's/^          //' .github/workflows/sprint80c2-aggregate-boundary.yml
-          rm .github/workflows/temp-harden-80c2.yml
-          rm -f .harden80c2-error.txt
+          sed -i 's/^          //' /tmp/final-workflow.yml
+          cp /tmp/final-workflow.yml .github/workflows/sprint80c2-aggregate-boundary.yml
           python - <<'PY'
           import hashlib, json
           from pathlib import Path
@@ -182,7 +169,8 @@ jobs:
           path = root / 'docs/adr/sprint80/aggregate_boundary_manifest.json'
           manifest = json.loads(path.read_text(encoding='utf-8'))
           for row in manifest['artifacts']:
-              data = (root / row['path']).read_bytes()
+              artifact = root / row['path']
+              data = artifact.read_bytes()
               row['size_bytes'] = len(data)
               row['sha256'] = hashlib.sha256(data).hexdigest()
           bundle = ''.join(
@@ -200,13 +188,17 @@ jobs:
           python -m pytest tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py -q
           python scripts/sprint80c/validate_aggregate_boundary.py --repo-root .
           git diff --check
-      - name: Commit exact correction
+      - name: Commit correction payload
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add docs/adr/sprint80/ADR-080C2-aggregate-boundary.md
+          git add docs/adr/sprint80/aggregate_boundary_matrix.json
+          git add docs/adr/sprint80/aggregate_boundary_manifest.json
+          git add scripts/sprint80c/validate_aggregate_boundary.py
+          git add tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py
           git diff --cached --check
           git commit -m 'test(sprint80c): harden executable verification contracts'
           git push origin HEAD:sprint/80c2-aggregate-boundary
