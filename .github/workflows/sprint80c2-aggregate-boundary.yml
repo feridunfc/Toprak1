@@ -48,15 +48,11 @@ jobs:
           label_position = source.index('"validator terminal missing authority"')
           block_start = source.rfind('validator = replace_once(', 0, label_position)
           block_end = source.index('\nvalidator = replace_once(', label_position)
-          replacement = """needle = '''            == {"terminal_transition_id", "child_state_authority_revision"}
-            and disposition.get("retry") == "STOP",'''
-          terminal_replacement = '''            == {"terminal_transition_id", "child_state_authority_revision"}
-            and disposition.get("missing_authority_evidence")
-            == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"
-            and disposition.get("retry") == "STOP",'''
-          if needle not in validator:
-              raise RuntimeError("validator terminal missing authority: needle absent")
-          validator = validator.replace(needle, terminal_replacement, 1)
+          replacement = """terminal_loop = validator.index('    for state in ("dead_lettered", "skipped"):')
+          retry_marker = '            and disposition.get("retry") == "STOP",'
+          retry_position = validator.index(retry_marker, terminal_loop)
+          missing_guard = '            and disposition.get("missing_authority_evidence")\n            == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"\n'
+          validator = validator[:retry_position] + missing_guard + validator[retry_position:]
           """
           source = source[:block_start] + replacement + source[block_end + 1:]
           path.write_text(source, encoding='utf-8')
