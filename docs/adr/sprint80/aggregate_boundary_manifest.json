@@ -3,8 +3,8 @@
   "artifacts": [
     {
       "path": ".github/workflows/sprint80c2-aggregate-boundary.yml",
-      "sha256": "0bfb850ad2c44a5a7fbe231942e3fbc7ec70dc3f698622906d355551e875e3e7",
-      "size_bytes": 1412
+      "sha256": "ac0957adcf0ca19b7cbc2a77c8c0f82d4702eed1403bfc8604bbd2a879dd7f5e",
+      "size_bytes": 1483
     },
     {
       "path": "docs/adr/sprint80/ADR-080C2-aggregate-boundary.md",
@@ -36,7 +36,7 @@
   "base_head": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6",
   "branch": "sprint/80c2-aggregate-boundary",
   "bundle_index_algorithm": "sorted_utf8_lines:path\\0size_bytes\\0sha256\\n",
-  "bundle_index_sha256": "f954d38db5e89f1e948cc6fdee27706cba2c4adefe4d491489394e744088a7d4",
+  "bundle_index_sha256": "a06bd8bb4f5b1fd16add53ab688049a2285aa648fcff37875d8573adf821ea4a",
   "decision_id": "ADR-080C2",
   "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
   "frozen_source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
