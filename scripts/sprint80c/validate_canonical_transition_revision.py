@@ -30,29 +30,25 @@ SOURCE_BINDINGS = {
     "tests/diagnostics/sprint80/test_80_04_transition_cardinality.py": "4a07352e33424e32332c916acdfd29e02b3eb71b",
 }
 FROZEN_OPERATIONS = {
-    "task_admit",
-    "task_dispatch",
-    "task_claim",
-    "task_heartbeat",
-    "task_complete",
-    "task_requeue",
-    "legacy_run_completion_sequence",
-    "worker_terminal_duplicate_ack",
-    "operator_terminal_duplicate_cleanup_command",
+    "task_admit", "task_dispatch", "task_claim", "task_heartbeat", "task_complete", "task_requeue",
+    "legacy_run_completion_sequence", "worker_terminal_duplicate_ack", "operator_terminal_duplicate_cleanup_command",
 }
 TAXONOMY = {
-    "TASK_ADMIT", "TASK_DISPATCH", "TASK_CLAIM", "TASK_HEARTBEAT", "TASK_COMPLETE",
-    "TASK_FAIL", "TASK_REQUEUE", "TASK_CANCEL", "TASK_DEPENDENCY_APPLY", "RUN_CREATE",
-    "RUN_TERMINATE", "LEGACY_RUN_COMPLETE", "TERMINAL_DUPLICATE_CLEANUP", "MESSAGE_APPEND", "MESSAGE_ACK",
+    "TASK_ADMIT", "TASK_DISPATCH", "TASK_CLAIM", "TASK_HEARTBEAT", "TASK_COMPLETE", "TASK_FAIL",
+    "TASK_REQUEUE", "TASK_CANCEL", "TASK_DEPENDENCY_APPLY", "RUN_CREATE", "RUN_TERMINATE",
+    "LEGACY_RUN_COMPLETE", "TERMINAL_DUPLICATE_CLEANUP", "MESSAGE_APPEND", "MESSAGE_ACK",
 }
 FINDINGS = {"no_verified_canonical_transition_record", "no_aggregate_revision_evidence"}
-RECEIPT_FIELDS = {"operation_id", "canonical_command_hash", "transition_id", "aggregate_revision", "operation_type", "committed_at_ms"}
+RECEIPT_FIELDS = {
+    "operation_id", "canonical_command_hash", "canonical_record_hash", "transition_id", "aggregate_revision",
+    "operation_type", "committed_at_ms",
+}
 RECORD_FIELDS = {
     "schema_version", "transition_id", "aggregate_type", "canonical_aggregate_identity",
-    "canonical_aggregate_identity_sha256", "from_revision", "to_revision", "operation_type",
-    "operation_id", "canonical_command_hash", "previous_state", "next_state",
-    "authoritative_metadata_changes", "child_effects", "causation_id", "correlation_id",
-    "writer_id", "committed_at_ms", "durable_projection_intents",
+    "canonical_aggregate_identity_sha256", "from_revision", "to_revision", "operation_type", "operation_id",
+    "canonical_command_hash", "canonical_record_hash", "previous_state", "next_state",
+    "authoritative_metadata_changes", "child_effects", "causation_id", "correlation_id", "writer_id",
+    "committed_at_ms", "durable_projection_intents",
 }
 OP_FIELDS = {
     "operation", "decision_status", "authority_owner", "lifecycle_state_before", "lifecycle_state_after",
@@ -60,6 +56,223 @@ OP_FIELDS = {
     "canonical_record_count_on_success", "operation_receipt_required", "duplicate_behavior",
     "stale_revision_behavior", "projection_intents", "evidence_binding",
 }
+MANIFEST_EXACT_REGISTER = {
+    "base_branch": "baseline/local-import",
+    "branch": "sprint/80c3-canonical-transition-revision",
+    "exact_changed_files": 8,
+    "human_architecture_acceptance": "PENDING",
+    "merge_authorized": False,
+}
+EXPECTED_OPERATION_CONTRACTS = {'LEGACY_RUN_COMPLETE': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                         'authority_owner': 'LEGACY_RUN_COMPATIBILITY_PATH',
+                         'canonical_record_count_on_success': 0,
+                         'consumes_revision': False,
+                         'decision_status': 'BLOCKED',
+                         'duplicate_behavior': 'BLOCKED_UNTIL_MIGRATED_OR_EXPLICIT_COMPATIBILITY_CONTRACT',
+                         'evidence_binding': 'run93:legacy_run_completion_sequence',
+                         'lifecycle_state_after': 'done',
+                         'lifecycle_state_before': 'running',
+                         'mutation_class': 'UNSUPPORTED_LEGACY_OPERATION',
+                         'operation': 'LEGACY_RUN_COMPLETE',
+                         'operation_receipt_required': False,
+                         'projection_intents': [],
+                         'stale_revision_behavior': 'BLOCKED_UNTIL_MIGRATED_OR_EXPLICIT_COMPATIBILITY_CONTRACT'},
+ 'MESSAGE_ACK': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                 'authority_owner': 'TRANSPORT',
+                 'canonical_record_count_on_success': 0,
+                 'consumes_revision': False,
+                 'decision_status': 'DECIDED',
+                 'duplicate_behavior': 'TRANSPORT_ACK_DUPLICATE_NOOP',
+                 'evidence_binding': 'run93:worker_terminal_duplicate_ack',
+                 'lifecycle_state_after': 'NOT_APPLICABLE',
+                 'lifecycle_state_before': 'NOT_APPLICABLE',
+                 'mutation_class': 'TRANSPORT_ONLY_MUTATION',
+                 'operation': 'MESSAGE_ACK',
+                 'operation_receipt_required': False,
+                 'projection_intents': ['STREAM_ACK'],
+                 'stale_revision_behavior': 'NOT_APPLICABLE'},
+ 'MESSAGE_APPEND': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                    'authority_owner': 'TRANSPORT',
+                    'canonical_record_count_on_success': 0,
+                    'consumes_revision': False,
+                    'decision_status': 'DECIDED',
+                    'duplicate_behavior': 'TRANSPORT_IDEMPOTENCY_CONTRACT',
+                    'evidence_binding': 'run93:task_dispatch:TaskRequested',
+                    'lifecycle_state_after': 'NOT_APPLICABLE',
+                    'lifecycle_state_before': 'NOT_APPLICABLE',
+                    'mutation_class': 'TRANSPORT_ONLY_MUTATION',
+                    'operation': 'MESSAGE_APPEND',
+                    'operation_receipt_required': False,
+                    'projection_intents': ['STREAM_APPEND'],
+                    'stale_revision_behavior': 'NOT_APPLICABLE'},
+ 'RUN_CREATE': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                'authority_owner': 'RUN_AGGREGATE',
+                'canonical_record_count_on_success': 1,
+                'consumes_revision': True,
+                'decision_status': 'DECIDED',
+                'duplicate_behavior': 'ALREADY_APPLIED',
+                'evidence_binding': 'NO_RUN93_DIRECT_OBSERVATION',
+                'lifecycle_state_after': 'pending',
+                'lifecycle_state_before': None,
+                'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                'operation': 'RUN_CREATE',
+                'operation_receipt_required': True,
+                'projection_intents': ['RUN_STATUS_PROJECTION'],
+                'stale_revision_behavior': 'AGGREGATE_ALREADY_EXISTS_CONFLICT'},
+ 'RUN_TERMINATE': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                   'authority_owner': 'RUN_AGGREGATE',
+                   'canonical_record_count_on_success': 1,
+                   'consumes_revision': True,
+                   'decision_status': 'DECIDED',
+                   'duplicate_behavior': 'ALREADY_APPLIED',
+                   'evidence_binding': 'NO_RUN93_DIRECT_OBSERVATION',
+                   'lifecycle_state_after': ['done', 'failed'],
+                   'lifecycle_state_before': ['pending', 'running'],
+                   'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                   'operation': 'RUN_TERMINATE',
+                   'operation_receipt_required': True,
+                   'projection_intents': ['RUN_RESULT_PROJECTION'],
+                   'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TASK_ADMIT': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                'authority_owner': 'TASK_AGGREGATE',
+                'canonical_record_count_on_success': 1,
+                'consumes_revision': True,
+                'decision_status': 'DECIDED',
+                'duplicate_behavior': 'ALREADY_APPLIED',
+                'evidence_binding': 'run93:task_admit',
+                'lifecycle_state_after': ['pending', 'ready'],
+                'lifecycle_state_before': None,
+                'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                'operation': 'TASK_ADMIT',
+                'operation_receipt_required': True,
+                'projection_intents': ['READY_QUEUE_IF_READY'],
+                'stale_revision_behavior': 'AGGREGATE_ALREADY_EXISTS_CONFLICT'},
+ 'TASK_CANCEL': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                 'authority_owner': 'TASK_AGGREGATE',
+                 'canonical_record_count_on_success': 1,
+                 'consumes_revision': True,
+                 'decision_status': 'DECIDED',
+                 'duplicate_behavior': 'ALREADY_APPLIED',
+                 'evidence_binding': 'NO_RUN93_DIRECT_OBSERVATION',
+                 'lifecycle_state_after': 'skipped',
+                 'lifecycle_state_before': ['pending', 'ready', 'scheduled', 'running'],
+                 'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                 'operation': 'TASK_CANCEL',
+                 'operation_receipt_required': True,
+                 'projection_intents': ['TERMINAL_PROJECTION'],
+                 'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TASK_CLAIM': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                'authority_owner': 'TASK_AGGREGATE',
+                'canonical_record_count_on_success': 1,
+                'consumes_revision': True,
+                'decision_status': 'DECIDED',
+                'duplicate_behavior': 'ALREADY_APPLIED',
+                'evidence_binding': 'run93:task_claim',
+                'lifecycle_state_after': 'running',
+                'lifecycle_state_before': 'scheduled',
+                'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                'operation': 'TASK_CLAIM',
+                'operation_receipt_required': True,
+                'projection_intents': ['RUNNING_SET'],
+                'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TASK_COMPLETE': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                   'authority_owner': 'TASK_AGGREGATE',
+                   'canonical_record_count_on_success': 1,
+                   'consumes_revision': True,
+                   'decision_status': 'DECIDED',
+                   'duplicate_behavior': 'ALREADY_APPLIED',
+                   'evidence_binding': 'run93:task_complete',
+                   'lifecycle_state_after': 'done',
+                   'lifecycle_state_before': 'running',
+                   'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                   'operation': 'TASK_COMPLETE',
+                   'operation_receipt_required': True,
+                   'projection_intents': ['OUTPUT_PROJECTION', 'DEPENDENCY_FANOUT_INTENT'],
+                   'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TASK_DEPENDENCY_APPLY': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                           'authority_owner': 'CHILD_TASK_AGGREGATE',
+                           'canonical_record_count_on_success': 1,
+                           'consumes_revision': True,
+                           'decision_status': 'DECIDED',
+                           'duplicate_behavior': 'ALREADY_APPLIED',
+                           'evidence_binding': 'ADR-080C2_LOGICAL_EDGE_CONTRACT',
+                           'lifecycle_state_after': ['pending', 'ready', 'blocked_by_failure'],
+                           'lifecycle_state_before': 'pending',
+                           'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                           'operation': 'TASK_DEPENDENCY_APPLY',
+                           'operation_receipt_required': True,
+                           'projection_intents': ['READY_QUEUE_IF_READY'],
+                           'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TASK_DISPATCH': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                   'authority_owner': 'TASK_AGGREGATE',
+                   'canonical_record_count_on_success': 1,
+                   'consumes_revision': True,
+                   'decision_status': 'DECIDED',
+                   'duplicate_behavior': 'ALREADY_APPLIED',
+                   'evidence_binding': 'run93:task_dispatch',
+                   'lifecycle_state_after': 'scheduled',
+                   'lifecycle_state_before': 'ready',
+                   'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                   'operation': 'TASK_DISPATCH',
+                   'operation_receipt_required': True,
+                   'projection_intents': ['CONTROL_NOTIFICATION', 'TASK_REQUEST_MESSAGE'],
+                   'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TASK_FAIL': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+               'authority_owner': 'TASK_AGGREGATE',
+               'canonical_record_count_on_success': 1,
+               'consumes_revision': True,
+               'decision_status': 'DECIDED',
+               'duplicate_behavior': 'ALREADY_APPLIED',
+               'evidence_binding': 'NO_RUN93_DIRECT_OBSERVATION',
+               'lifecycle_state_after': 'failed',
+               'lifecycle_state_before': 'running',
+               'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+               'operation': 'TASK_FAIL',
+               'operation_receipt_required': True,
+               'projection_intents': ['DEPENDENCY_FAILURE_FANOUT_INTENT'],
+               'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TASK_HEARTBEAT': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                    'authority_owner': 'TASK_AGGREGATE',
+                    'canonical_record_count_on_success': 0,
+                    'consumes_revision': False,
+                    'decision_status': 'DECIDED',
+                    'duplicate_behavior': 'COORDINATION_DUPLICATE_NOOP',
+                    'evidence_binding': 'run93:task_heartbeat',
+                    'lifecycle_state_after': 'running',
+                    'lifecycle_state_before': 'running',
+                    'mutation_class': 'COORDINATION_ONLY_MUTATION',
+                    'operation': 'TASK_HEARTBEAT',
+                    'operation_receipt_required': False,
+                    'projection_intents': ['LIVENESS_TTL'],
+                    'stale_revision_behavior': 'NOT_APPLICABLE'},
+ 'TASK_REQUEUE': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                  'authority_owner': 'TASK_AGGREGATE',
+                  'canonical_record_count_on_success': 1,
+                  'consumes_revision': True,
+                  'decision_status': 'DECIDED',
+                  'duplicate_behavior': 'ALREADY_APPLIED',
+                  'evidence_binding': 'run93:task_requeue',
+                  'lifecycle_state_after': 'ready',
+                  'lifecycle_state_before': 'running',
+                  'mutation_class': 'ACCEPTED_AUTHORITY_MUTATION',
+                  'operation': 'TASK_REQUEUE',
+                  'operation_receipt_required': True,
+                  'projection_intents': ['READY_QUEUE', 'REQUEUE_NOTIFICATION'],
+                  'stale_revision_behavior': 'STALE_REVISION_CONFLICT'},
+ 'TERMINAL_DUPLICATE_CLEANUP': {'authoritative_metadata_mutation': 'ALLOWED_ONLY_IF_DECLARED_IN_CANONICAL_COMMAND',
+                                'authority_owner': 'OPERATOR_COORDINATION',
+                                'canonical_record_count_on_success': 0,
+                                'consumes_revision': False,
+                                'decision_status': 'DECIDED',
+                                'duplicate_behavior': 'AUDITABLE_TRANSPORT_DUPLICATE_NOOP',
+                                'evidence_binding': 'run93:operator_terminal_duplicate_cleanup_command',
+                                'lifecycle_state_after': 'terminal',
+                                'lifecycle_state_before': 'terminal',
+                                'mutation_class': 'TRANSPORT_ONLY_MUTATION',
+                                'operation': 'TERMINAL_DUPLICATE_CLEANUP',
+                                'operation_receipt_required': False,
+                                'projection_intents': ['AUDIT_INTENT', 'AUDIT_OUTCOME'],
+                                'stale_revision_behavior': 'NOT_APPLICABLE'}}
 
 
 def sha(data: bytes) -> str:
@@ -102,7 +315,7 @@ def validate_evidence(evidence: dict[str, Any]) -> list[str]:
 def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     add(matrix.get("schema_version") == 2 and matrix.get("decision_id") == "ADR-080C3", "matrix identity", errors)
-    add(matrix.get("decision_status") == "TECHNICAL_RECOMMENDATION_READY_FOR_INDEPENDENT_REVIEW", "matrix status", errors)
+    add(matrix.get("decision_status") == "CORRECTED_TECHNICAL_RECOMMENDATION_READY_FOR_FINAL_REVIEW", "matrix status", errors)
     add(matrix.get("base_head") == BASE, "matrix base", errors)
     add(matrix.get("product_implementation_authorized") is False and matrix.get("sprint81_implementation_authorized") is False, "implementation flags", errors)
     add(matrix.get("merge_authorized") is False and matrix.get("human_architecture_acceptance") == "PENDING", "governance flags", errors)
@@ -132,12 +345,58 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
     add(transition.get("component_encoding") == "SHA256_OF_LENGTH_PREFIXED_UTF8_COMPONENT" and transition.get("raw_delimiter_concatenation") == "FORBIDDEN", "transition encoding", errors)
     add(transition.get("uniqueness_scope") == "GLOBAL" and transition.get("operation_id_scope") == "AGGREGATE_LOCAL_STABLE_IDEMPOTENCY_IDENTITY", "transition uniqueness", errors)
 
+    preconditions = matrix.get("authority_entry_preconditions") or {}
+    expected_preconditions = {
+        "order": "OUTER_GATE_BEFORE_OPERATION_RECEIPT_LOOKUP",
+        "validate_authenticated_writer": "REQUIRED",
+        "validate_writer_operation_capability": "REQUIRED",
+        "validate_claim_or_lease_fence_when_applicable": "REQUIRED",
+        "validate_target_aggregate_identity": "REQUIRED",
+        "accepted_predecessor_binding": "ADR-080C1_RUNTIME_TRUTH_AUTHORITY_AND_ADR-080C2_AGGREGATE_BOUNDARY",
+        "precondition_failure": {
+            "result": "AUTHORITY_ENTRY_REJECTED", "operation_receipt_disclosure": "FORBIDDEN",
+            "aggregate_mutation": 0, "revision_increment": 0, "canonical_record_count": 0,
+            "durable_conflict_record": "AS_REQUIRED_BY_SECURITY_AUDIT_POLICY",
+        },
+    }
+    add(preconditions == expected_preconditions, "authority entry preconditions", errors)
+    add(matrix.get("authority_evaluation_order") == ["VALIDATE_AUTHORITY_ENTRY_PRECONDITIONS", *matrix.get("authority_commit_order", [])], "authority evaluation order", errors)
+
     command_hash = matrix.get("canonical_command_hash") or {}
+    expected_hash_members = [
+        "aggregate_type", "canonical_aggregate_identity", "operation_type", "operation_id", "expected_revision",
+        "intended_previous_state", "intended_next_state", "authoritative_payload",
+        "authoritative_metadata_changes", "requested_child_effects", "requested_projection_intents", "causation_id",
+    ]
+    expected_jcs = {
+        "standard": "RFC_8785_JCS", "unicode_input_normalization": "UTF8_NFC_BEFORE_JCS",
+        "integer_float_encoding": "RFC_8785_ECMASCRIPT_NUMBER_SERIALIZATION",
+        "negative_zero": "RFC_8785_NORMALIZATION", "non_finite_numbers": "FORBIDDEN",
+        "duplicate_object_keys": "FORBIDDEN", "array_order": "PRESERVED",
+        "binary_values": "BASE64URL_WITH_EXPLICIT_TYPE_TAG", "timestamp_representation": "INTEGER_MILLISECONDS_UTC",
+    }
     add(command_hash.get("required") is True and command_hash.get("algorithm") == "SHA256", "canonical command hash required", errors)
-    add(command_hash.get("serialization") == "CANONICAL_JSON" and command_hash.get("object_key_order") == "LEXICOGRAPHIC", "canonical hash serialization", errors)
+    add(command_hash.get("serialization") == "RFC_8785_JCS" and command_hash.get("serialization_profile") == "CANONICAL_JSON_RFC_8785_JCS_WITH_UTF8_NFC_INPUT", "canonical hash serialization", errors)
+    add(command_hash.get("canonical_json_standard") == expected_jcs, "canonical JSON exact standard", errors)
     add(command_hash.get("omitted_optional_fields") == "FORBIDDEN_USE_EXPLICIT_NULL" and command_hash.get("caller_supplied_hash_trusted") is False, "canonical hash trust", errors)
-    add(command_hash.get("hash_members") == ["aggregate_type", "canonical_aggregate_identity", "operation_type", "operation_id", "expected_revision", "intended_previous_state", "intended_next_state", "authoritative_payload", "causation_id"], "canonical hash members", errors)
+    add(command_hash.get("hash_members") == expected_hash_members, "canonical hash members", errors)
     add(set(command_hash.get("excluded_members") or []) == {"committed_at_ms", "writer_generated_metadata", "committed_revision", "transition_id"}, "canonical hash exclusions", errors)
+
+    effect_binding = matrix.get("authoritative_effect_binding") or {}
+    expected_effect_binding = {
+        "model": "MODEL_A_HASH_ALL_REQUESTED_AUTHORITATIVE_EFFECTS",
+        "hash_bound_command_fields": ["authoritative_metadata_changes", "requested_child_effects", "requested_projection_intents"],
+        "record_effect_mapping": {
+            "authoritative_metadata_changes": "EXACT_HASH_BOUND_COMMAND_VALUE",
+            "child_effects": "EXACT_ACCEPTED_REQUESTED_CHILD_EFFECTS",
+            "durable_projection_intents": "EXACT_ACCEPTED_REQUESTED_PROJECTION_INTENTS",
+        },
+        "caller_or_writer_local_effect_override": "FORBIDDEN",
+        "same_operation_id_and_same_command_hash": {
+            "immutable_record_effects_must_match": True, "canonical_record_hash_must_match": True,
+        },
+    }
+    add(effect_binding == expected_effect_binding, "authoritative effect binding", errors)
 
     receipt = matrix.get("operation_receipt_authority") or {}
     add(receipt.get("key") == "oprcpt:v1:{canonical_aggregate_identity_sha256}:{operation_id_sha256}", "receipt key", errors)
@@ -146,10 +405,18 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
     add(set(receipt_values) == RECEIPT_FIELDS and all(receipt_values[field] == "REQUIRED" for field in RECEIPT_FIELDS), "receipt immutable value", errors)
     add(receipt.get("second_lifecycle_truth") is False, "receipt not second truth", errors)
 
-    add(matrix.get("authority_commit_order") == ["RESOLVE_OPERATION_RECEIPT", "COMPARE_CANONICAL_COMMAND_HASH", "COMPARE_EXPECTED_REVISION", "VALIDATE_STATE_TRANSITION", "COMMIT_STATE_REVISION_RECORD_RECEIPT_AND_INTENTS_ATOMICALLY"], "authority commit order", errors)
+    expected_commit_order = [
+        "RESOLVE_OPERATION_RECEIPT", "COMPARE_CANONICAL_COMMAND_HASH", "COMPARE_EXPECTED_REVISION",
+        "VALIDATE_STATE_TRANSITION", "COMMIT_STATE_REVISION_RECORD_RECEIPT_AND_INTENTS_ATOMICALLY",
+    ]
+    add(matrix.get("authority_commit_order") == expected_commit_order, "authority commit order", errors)
     idem = matrix.get("idempotency_and_concurrency") or {}
     same = idem.get("operation_receipt_exists_same_payload") or {}
-    add(same == {"result": "ALREADY_APPLIED", "return_existing_transition_id": "REQUIRED", "mutation": 0, "revision_increment": 0, "canonical_record_count": 0}, "same operation duplicate", errors)
+    add(same == {
+        "result": "ALREADY_APPLIED", "return_existing_transition_id": "REQUIRED", "mutation": 0,
+        "revision_increment": 0, "canonical_record_count": 0, "canonical_record_hash_match": "REQUIRED",
+        "immutable_record_effects_match": "REQUIRED",
+    }, "same operation duplicate", errors)
     different = idem.get("operation_receipt_exists_different_payload") or {}
     add(different.get("result") == "IDEMPOTENCY_CONFLICT" and different.get("mutation") == 0 and different.get("durable_conflict_record") == "REQUIRED" and different.get("reconciliation_candidate") == "REQUIRED", "idempotency conflict", errors)
     stale = idem.get("operation_receipt_missing_expected_revision_stale") or {}
@@ -159,71 +426,82 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
     add(idem.get("already_applied_proof") == "DURABLE_OPERATION_RECEIPT_ONLY", "already applied proof", errors)
 
     revision = matrix.get("revision_contract") or {}
-    add(revision.get("initial_revision") == 0 and revision.get("first_committed_transition_revision") == 1, "initial revision", errors)
-    add(revision.get("next_revision_rule") == "to_revision == from_revision + 1" and revision.get("monotonicity") == "STRICT_CONTIGUOUS", "revision contiguity", errors)
-    add(revision.get("gap") == revision.get("reuse") == revision.get("regression") == "FORBIDDEN", "revision guards", errors)
-    add(revision.get("expected_revision_required") is True, "expected revision required", errors)
-    add(revision.get("ordering_authority") == "AGGREGATE_REVISION" and revision.get("committed_at_ms_ordering_authority") is False, "revision ordering authority", errors)
-    add(revision.get("clock_regression_effect") == "NONE" and revision.get("same_millisecond_transitions") == "ALLOWED", "timestamp non-authority", errors)
+    add(revision.get("initial_revision") == 0 and revision.get("first_committed_transition_revision") == 1, "revision origin", errors)
+    add(revision.get("next_revision_rule") == "to_revision == from_revision + 1" and revision.get("monotonicity") == "STRICT_CONTIGUOUS", "revision sequence", errors)
+    add(revision.get("gap") == revision.get("reuse") == revision.get("regression") == "FORBIDDEN", "revision prohibitions", errors)
+    add(revision.get("expected_revision_required") is True and revision.get("ordering_authority") == "AGGREGATE_REVISION" and revision.get("committed_at_ms_ordering_authority") is False, "revision ordering authority", errors)
 
     creation = matrix.get("aggregate_creation_contract") or {}
-    add(creation.get("aggregate_not_exists_logical_current_revision") == 0 and creation.get("required_expected_revision") == 0 and creation.get("committed_revision") == 1, "creation revision", errors)
-    add(creation.get("previous_state") is None and creation.get("task_next_state") == ["pending", "ready"] and creation.get("run_next_state") == "pending", "creation state", errors)
-    add(creation.get("task_next_state_rule") == "READY_ONLY_IF_IMMUTABLE_EXPECTED_PARENT_SET_IS_EMPTY_OTHERWISE_PENDING", "task initial state rule", errors)
-    add(creation.get("canonical_record_count") == 1 and creation.get("operation_receipt_count") == 1, "creation cardinality", errors)
-    add((creation.get("duplicate_create_same_operation_same_payload") or {}).get("result") == "ALREADY_APPLIED", "duplicate create", errors)
-    add((creation.get("existing_aggregate_different_create_operation") or {}).get("result") == "AGGREGATE_ALREADY_EXISTS_CONFLICT", "existing aggregate conflict", errors)
-
-    classes = matrix.get("mutation_classification") or {}
-    expected_classes = {
-        "ACCEPTED_AUTHORITY_MUTATION": (1, 1), "COORDINATION_ONLY_MUTATION": (0, 0),
-        "PROJECTION_ONLY_MUTATION": (0, 0), "TRANSPORT_ONLY_MUTATION": (0, 0),
-        "REJECTED_OR_DUPLICATE": (0, 0), "UNSUPPORTED_LEGACY_OPERATION": (0, 0),
-    }
-    for name, (rev, records) in expected_classes.items():
-        row = classes.get(name) or {}
-        add(row.get("revision_increment") == rev and row.get("canonical_transition_record_count") == records, f"mutation class {name}", errors)
-    conflict = classes.get("DURABLE_CONFLICT_RECORD") or {}
-    add(conflict == {"aggregate_revision_increment": 0, "canonical_transition_record_count": 0, "separate_conflict_record_count": 1}, "durable conflict class", errors)
+    add(creation.get("aggregate_not_exists_logical_current_revision") == 0 and creation.get("required_expected_revision") == 0 and creation.get("committed_revision") == 1, "aggregate creation revisions", errors)
+    add(creation.get("canonical_record_count") == 1 and creation.get("operation_receipt_count") == 1, "aggregate creation cardinality", errors)
 
     record = matrix.get("canonical_transition_record") or {}
-    add(record.get("owner") == "AGGREGATE_AUTHORITY_COMMIT" and record.get("append_only") is True and record.get("immutable") is True and record.get("replay_source") is True, "canonical record authority", errors)
-    add(set(record.get("required_fields") or []) == RECORD_FIELDS, "canonical record fields", errors)
-    add(record.get("revision_rule") == "to_revision == from_revision + 1" and record.get("aggregate_revision_alias") == "to_revision", "record revision fields", errors)
-    add((record.get("create_or_admit_state_rule") or {}) == {"previous_state": None, "next_state": "REQUIRED"}, "create record state rule", errors)
-    add((record.get("normal_lifecycle_state_rule") or {}) == {"previous_state": "REQUIRED", "next_state": "REQUIRED"}, "normal record state rule", errors)
+    add(set(record.get("required_fields") or []) == RECORD_FIELDS, "record required fields", errors)
+    add(record.get("revision_rule") == "to_revision == from_revision + 1" and record.get("aggregate_revision_alias") == "to_revision", "record revision rule", errors)
+    expected_record_hash = {
+        "algorithm": "SHA256", "serialization": "RFC_8785_JCS",
+        "hash_scope": "ALL_IMMUTABLE_RECORD_FIELDS_EXCEPT_CANONICAL_RECORD_HASH",
+        "caller_supplied_hash_trusted": False,
+    }
+    add(record.get("canonical_record_hash") == expected_record_hash, "canonical record hash", errors)
+    add(record.get("append_only") is True and record.get("immutable") is True and record.get("owner") == "AGGREGATE_AUTHORITY_COMMIT", "record authority", errors)
     add(record.get("coordination_transport_projection_record") == "FORBIDDEN_UNLESS_ACCEPTED_AUTHORITY_MUTATION", "non-authority record guard", errors)
 
     storage = matrix.get("canonical_storage_authority") or {}
     store = storage.get("canonical_transition_store") or {}
     add(store.get("owner") == "AGGREGATE_AUTHORITY_COMMIT" and store.get("append_only") is True and store.get("immutable") is True and store.get("replay_source") is True, "canonical store authority", errors)
     add(store.get("physical_layout") == "DEFERRED_TO_SPRINT81", "physical layout deferral", errors)
-    add((storage.get("transition_uniqueness_index") or {}) == {"owner": "AGGREGATE_AUTHORITY_COMMIT", "key": "transition_id"}, "transition uniqueness index", errors)
+    expected_index = {
+        "owner": "AGGREGATE_AUTHORITY_COMMIT", "key": "transition_id",
+        "same_transition_id_same_record": "ALREADY_PRESENT",
+        "same_transition_id_different_record": "CANONICAL_RECORD_CORRUPTION_CONFLICT",
+        "different_record_mutation": 0, "different_record_durable_conflict_record": "REQUIRED",
+        "different_record_reconciliation_candidate": "REQUIRED",
+    }
+    add((storage.get("transition_uniqueness_index") or {}) == expected_index, "transition uniqueness index", errors)
+    expected_collision = {
+        "comparison_authority": "CANONICAL_RECORD_HASH",
+        "same_transition_id_same_record": {"result": "ALREADY_PRESENT", "mutation": 0},
+        "same_transition_id_different_record": {
+            "result": "CANONICAL_RECORD_CORRUPTION_CONFLICT", "mutation": 0,
+            "durable_conflict_record": "REQUIRED", "reconciliation_candidate": "REQUIRED",
+        },
+    }
+    add(storage.get("canonical_record_collision") == expected_collision, "canonical record collision", errors)
     add((storage.get("operation_receipt_index") or {}) == {"owner": "AGGREGATE_AUTHORITY_COMMIT", "key": "canonical_aggregate_identity + operation_id"}, "operation receipt index", errors)
     atomicity = storage.get("atomicity") or {}
     add(atomicity.get("state_revision_record_receipt") == "ONE_AUTHORITY_COMMIT" and atomicity.get("authoritative_metadata_and_projection_intents") == "SAME_AUTHORITY_COMMIT" and atomicity.get("projection_delivery") == "OUTSIDE_AUTHORITY_COMMIT", "authority atomicity", errors)
 
     operations = matrix.get("operation_matrix") or []
-    add({row.get("operation") for row in operations} == TAXONOMY and len(operations) == 15, "operation taxonomy", errors)
+    observed = {row.get("operation"): row for row in operations}
+    add(set(observed) == TAXONOMY and len(operations) == 15, "operation taxonomy", errors)
     add(all(set(row) == OP_FIELDS for row in operations), "operation row fields", errors)
-    for row in operations:
-        consumes = row.get("consumes_revision")
-        add(row.get("canonical_record_count_on_success") == (1 if consumes else 0), f'operation cardinality {row.get("operation")}', errors)
-        if consumes:
-            add(row.get("operation_receipt_required") is True and row.get("mutation_class") == "ACCEPTED_AUTHORITY_MUTATION", f'authority operation contract {row.get("operation")}', errors)
-        else:
-            add(row.get("operation_receipt_required") is False, f'non-authority receipt guard {row.get("operation")}', errors)
-    legacy = next((row for row in operations if row.get("operation") == "LEGACY_RUN_COMPLETE"), {})
-    add(legacy.get("decision_status") == "BLOCKED" and legacy.get("mutation_class") == "UNSUPPORTED_LEGACY_OPERATION" and legacy.get("duplicate_behavior") == "BLOCKED_UNTIL_MIGRATED_OR_EXPLICIT_COMPATIBILITY_CONTRACT", "legacy operation block", errors)
-    heartbeat = next((row for row in operations if row.get("operation") == "TASK_HEARTBEAT"), {})
-    add(heartbeat.get("mutation_class") == "COORDINATION_ONLY_MUTATION" and heartbeat.get("consumes_revision") is False, "heartbeat classification", errors)
+    add(observed == EXPECTED_OPERATION_CONTRACTS, "exact operation contract register", errors)
 
     mapping = matrix.get("frozen_operation_mapping") or {}
     add(set(mapping) == FROZEN_OPERATIONS and set(mapping.values()) <= TAXONOMY, "frozen operation mapping", errors)
     add({row.get("operation") for row in evidence.get("operations") or []} == set(mapping), "frozen mapping evidence parity", errors)
 
-    projection = matrix.get("projection_contract") or {}
-    add(projection == {"next_contiguous_revision": "APPLY", "duplicate_or_older_revision": "DUPLICATE_NOOP", "revision_gap": "FAIL_CLOSED_AND_REPLAY_REQUIRED", "ordering_authority": "AGGREGATE_REVISION", "replay_source": "CANONICAL_TRANSITION_STORE"}, "projection contract", errors)
+    expected_projection = {
+        "ordering_authority": "AGGREGATE_REVISION", "replay_source": "CANONICAL_TRANSITION_STORE",
+        "projection_application_receipt": {
+            "owner": "PROJECTION", "key": "canonical_aggregate_identity",
+            "value": {"applied_revision": "REQUIRED", "applied_transition_id": "REQUIRED", "applied_record_hash": "REQUIRED"},
+        },
+        "incoming_revision_equals_applied_revision": {
+            "same_transition_id_and_record_hash": {"result": "DUPLICATE_NOOP", "projection_mutation": 0},
+            "different_transition_id_or_record_hash": {
+                "result": "PROJECTION_CORRUPTION_CONFLICT", "projection_mutation": 0,
+                "durable_conflict_record": "REQUIRED", "reconciliation_candidate": "REQUIRED",
+            },
+        },
+        "incoming_revision_older_than_applied_revision": {"result": "OLDER_REVISION_NOOP", "projection_mutation": 0},
+        "incoming_revision_is_applied_revision_plus_one": {"result": "APPLY"},
+        "incoming_revision_greater_than_applied_revision_plus_one": {
+            "result": "GAP_FAIL_CLOSED_AND_REPLAY_REQUIRED", "projection_mutation": 0,
+        },
+    }
+    add(matrix.get("projection_contract") == expected_projection, "projection contract", errors)
 
     findings = matrix.get("finding_dispositions") or []
     add({row.get("finding_id") for row in findings} == FINDINGS, "finding set", errors)
@@ -231,7 +509,17 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
     add({row.get("path"): row.get("blob_sha") for row in matrix.get("source_bindings") or []} == SOURCE_BINDINGS, "source binding register", errors)
 
     contracts = matrix.get("verification_contracts") or {}
-    add(contracts.get("technical_unresolved_choice") == 0 and contracts.get("operation_taxonomy_exact_count") == 15, "verification completeness", errors)
+    expected_true = {
+        "canonical_aggregate_identity_decided", "canonical_command_hash_required", "operation_receipt_identity_decided",
+        "predecessor_acceptance_bindings_exact", "receipt_lookup_before_revision_compare",
+        "state_revision_record_receipt_one_commit", "strict_contiguous_revision", "transition_id_encoding_decided",
+        "authoritative_effect_hash_binding_exact", "same_hash_same_immutable_effects",
+        "canonical_record_collision_decided", "projection_same_revision_collision_decided",
+        "operation_row_semantics_mutation_tests_present", "authority_entry_preconditions_decided",
+        "canonical_hash_serialization_standard_exact", "manifest_governance_register_exactly_validated",
+    }
+    add(all(contracts.get(key) is True for key in expected_true), "verification exact flags", errors)
+    add(contracts.get("technical_unresolved_choice") == 0 and contracts.get("operation_taxonomy_exact_count") == 15 and contracts.get("operation_taxonomy_exact_rows_machine_verified") == 15, "verification completeness", errors)
     add(contracts.get("product_source_mutation") == 0 and contracts.get("implementation_claims") == 0, "scope verification contract", errors)
     return errors
 
@@ -243,6 +531,7 @@ def validate_manifest(root: Path, manifest: dict[str, Any]) -> list[str]:
     add(manifest.get("frozen_artifact_sha256") == ZIP_SHA and manifest.get("transition_cardinality_sha256") == EVIDENCE_SHA, "manifest evidence hashes", errors)
     add(manifest.get("bundle_index_algorithm") == BUNDLE_ALGORITHM, "manifest bundle algorithm", errors)
     add(manifest.get("product_source_mutation") == 0 and manifest.get("implementation_authorized") is False, "manifest scope flags", errors)
+    add(all(manifest.get(key) == value for key, value in MANIFEST_EXACT_REGISTER.items()), "manifest exact governance register", errors)
     entries = manifest.get("artifacts") or []
     expected = PATHS - {"docs/adr/sprint80/canonical_transition_revision_manifest.json"}
     add({row.get("path") for row in entries} == expected and len(entries) == 7, "manifest artifact paths", errors)

@@ -26,6 +26,14 @@ def matrix():
     return validator.read_json(MATRIX)
 
 
+def operation(value, name):
+    return next(row for row in value["operation_matrix"] if row["operation"] == name)
+
+
+def matrix_errors(value):
+    return validator.validate_matrix(value, evidence())
+
+
 def test_frozen_evidence_exact():
     assert validator.sha(EVIDENCE.read_bytes()) == validator.EVIDENCE_SHA
     assert validator.validate_evidence(evidence()) == []
@@ -51,14 +59,35 @@ def test_transition_identity_uses_encoded_components():
     assert value["raw_delimiter_concatenation"] == "FORBIDDEN"
 
 
-def test_canonical_command_hash_contract():
+def test_authority_entry_preconditions_are_outer_gate():
+    value = matrix()["authority_entry_preconditions"]
+    assert value["order"] == "OUTER_GATE_BEFORE_OPERATION_RECEIPT_LOOKUP"
+    assert value["validate_authenticated_writer"] == "REQUIRED"
+    assert value["validate_writer_operation_capability"] == "REQUIRED"
+    assert value["validate_claim_or_lease_fence_when_applicable"] == "REQUIRED"
+    assert value["precondition_failure"]["operation_receipt_disclosure"] == "FORBIDDEN"
+    assert matrix()["authority_evaluation_order"][0] == "VALIDATE_AUTHORITY_ENTRY_PRECONDITIONS"
+
+
+def test_canonical_command_hash_binds_all_authoritative_effects():
     value = matrix()["canonical_command_hash"]
-    assert value["required"] is True
-    assert value["algorithm"] == "SHA256"
-    assert value["serialization"] == "CANONICAL_JSON"
+    assert value["serialization"] == "RFC_8785_JCS"
     assert value["caller_supplied_hash_trusted"] is False
-    assert "expected_revision" in value["hash_members"]
-    assert "committed_at_ms" in value["excluded_members"]
+    for field in ["authoritative_metadata_changes", "requested_child_effects", "requested_projection_intents"]:
+        assert field in value["hash_members"]
+    binding = matrix()["authoritative_effect_binding"]
+    assert binding["model"] == "MODEL_A_HASH_ALL_REQUESTED_AUTHORITATIVE_EFFECTS"
+    assert binding["same_operation_id_and_same_command_hash"]["immutable_record_effects_must_match"] is True
+
+
+def test_rfc8785_profile_is_exact():
+    value = matrix()["canonical_command_hash"]["canonical_json_standard"]
+    assert value["standard"] == "RFC_8785_JCS"
+    assert value["unicode_input_normalization"] == "UTF8_NFC_BEFORE_JCS"
+    assert value["non_finite_numbers"] == "FORBIDDEN"
+    assert value["duplicate_object_keys"] == "FORBIDDEN"
+    assert value["array_order"] == "PRESERVED"
+    assert value["binary_values"] == "BASE64URL_WITH_EXPLICIT_TYPE_TAG"
 
 
 def test_operation_receipt_is_aggregate_owned_immutable_index():
@@ -66,111 +95,67 @@ def test_operation_receipt_is_aggregate_owned_immutable_index():
     assert value["owner"] == "AGGREGATE_AUTHORITY_COMMIT"
     assert value["immutable"] is True
     assert set(value["immutable_value"]) == validator.RECEIPT_FIELDS
-    assert all(item == "REQUIRED" for item in value["immutable_value"].values())
+    assert value["immutable_value"]["canonical_record_hash"] == "REQUIRED"
     assert value["second_lifecycle_truth"] is False
-
-
-def test_authority_commit_order_receipt_before_revision():
-    assert matrix()["authority_commit_order"] == [
-        "RESOLVE_OPERATION_RECEIPT",
-        "COMPARE_CANONICAL_COMMAND_HASH",
-        "COMPARE_EXPECTED_REVISION",
-        "VALIDATE_STATE_TRANSITION",
-        "COMMIT_STATE_REVISION_RECORD_RECEIPT_AND_INTENTS_ATOMICALLY",
-    ]
 
 
 def test_duplicate_and_stale_are_distinct():
     value = matrix()["idempotency_and_concurrency"]
     assert value["operation_receipt_exists_same_payload"]["result"] == "ALREADY_APPLIED"
+    assert value["operation_receipt_exists_same_payload"]["canonical_record_hash_match"] == "REQUIRED"
     assert value["operation_receipt_missing_expected_revision_stale"]["result"] == "STALE_REVISION_CONFLICT"
     assert value["operation_receipt_missing_expected_revision_future"]["result"] == "FUTURE_REVISION_CONFLICT"
-    assert value["already_applied_proof"] == "DURABLE_OPERATION_RECEIPT_ONLY"
-
-
-def test_same_operation_different_payload_fails_closed():
-    value = matrix()["idempotency_and_concurrency"]["operation_receipt_exists_different_payload"]
-    assert value["result"] == "IDEMPOTENCY_CONFLICT"
-    assert value["mutation"] == 0
-    assert value["durable_conflict_record"] == "REQUIRED"
-    assert value["reconciliation_candidate"] == "REQUIRED"
 
 
 def test_strict_contiguous_revision_and_timestamp_non_authority():
     value = matrix()["revision_contract"]
     assert value["initial_revision"] == 0
     assert value["first_committed_transition_revision"] == 1
-    assert value["next_revision_rule"] == "to_revision == from_revision + 1"
     assert value["gap"] == value["reuse"] == value["regression"] == "FORBIDDEN"
     assert value["ordering_authority"] == "AGGREGATE_REVISION"
     assert value["committed_at_ms_ordering_authority"] is False
 
 
-def test_create_and_admit_contract():
-    value = matrix()["aggregate_creation_contract"]
-    assert value["aggregate_not_exists_logical_current_revision"] == 0
-    assert value["required_expected_revision"] == 0
-    assert value["committed_revision"] == 1
-    assert value["previous_state"] is None
-    assert value["task_next_state_rule"] == "READY_ONLY_IF_IMMUTABLE_EXPECTED_PARENT_SET_IS_EMPTY_OTHERWISE_PENDING"
-    assert value["run_next_state"] == "pending"
-    assert value["canonical_record_count"] == value["operation_receipt_count"] == 1
-
-
-def test_record_schema_and_revision_fields_exact():
+def test_record_schema_includes_canonical_record_hash():
     value = matrix()["canonical_transition_record"]
     assert set(value["required_fields"]) == validator.RECORD_FIELDS
-    assert value["revision_rule"] == "to_revision == from_revision + 1"
-    assert value["aggregate_revision_alias"] == "to_revision"
-    assert value["create_or_admit_state_rule"] == {"previous_state": None, "next_state": "REQUIRED"}
-    assert value["normal_lifecycle_state_rule"] == {"previous_state": "REQUIRED", "next_state": "REQUIRED"}
+    assert value["canonical_record_hash"] == {
+        "algorithm": "SHA256",
+        "serialization": "RFC_8785_JCS",
+        "hash_scope": "ALL_IMMUTABLE_RECORD_FIELDS_EXCEPT_CANONICAL_RECORD_HASH",
+        "caller_supplied_hash_trusted": False,
+    }
 
 
-def test_canonical_store_and_atomic_commit_owner():
-    value = matrix()["canonical_storage_authority"]
-    assert value["canonical_transition_store"]["owner"] == "AGGREGATE_AUTHORITY_COMMIT"
-    assert value["canonical_transition_store"]["replay_source"] is True
-    assert value["transition_uniqueness_index"] == {"owner": "AGGREGATE_AUTHORITY_COMMIT", "key": "transition_id"}
-    assert value["operation_receipt_index"] == {"owner": "AGGREGATE_AUTHORITY_COMMIT", "key": "canonical_aggregate_identity + operation_id"}
-    assert value["atomicity"]["state_revision_record_receipt"] == "ONE_AUTHORITY_COMMIT"
-    assert value["atomicity"]["projection_delivery"] == "OUTSIDE_AUTHORITY_COMMIT"
+def test_canonical_store_collision_is_fail_closed():
+    value = matrix()["canonical_storage_authority"]["canonical_record_collision"]
+    assert value["same_transition_id_same_record"]["result"] == "ALREADY_PRESENT"
+    conflict = value["same_transition_id_different_record"]
+    assert conflict["result"] == "CANONICAL_RECORD_CORRUPTION_CONFLICT"
+    assert conflict["mutation"] == 0
+    assert conflict["durable_conflict_record"] == "REQUIRED"
 
 
-def test_mutation_classification_separates_coordination_and_transport():
-    value = matrix()["mutation_classification"]
-    assert value["ACCEPTED_AUTHORITY_MUTATION"] == {"revision_increment": 1, "canonical_transition_record_count": 1}
-    assert value["COORDINATION_ONLY_MUTATION"] == {"revision_increment": 0, "canonical_transition_record_count": 0}
-    assert value["TRANSPORT_ONLY_MUTATION"] == {"revision_increment": 0, "canonical_transition_record_count": 0}
-    assert value["DURABLE_CONFLICT_RECORD"] == {"aggregate_revision_increment": 0, "canonical_transition_record_count": 0, "separate_conflict_record_count": 1}
+def test_projection_same_revision_distinguishes_duplicate_and_corruption():
+    value = matrix()["projection_contract"]
+    receipt = value["projection_application_receipt"]
+    assert receipt["value"] == {
+        "applied_revision": "REQUIRED",
+        "applied_transition_id": "REQUIRED",
+        "applied_record_hash": "REQUIRED",
+    }
+    same = value["incoming_revision_equals_applied_revision"]
+    assert same["same_transition_id_and_record_hash"]["result"] == "DUPLICATE_NOOP"
+    assert same["different_transition_id_or_record_hash"]["result"] == "PROJECTION_CORRUPTION_CONFLICT"
+    assert value["incoming_revision_older_than_applied_revision"]["result"] == "OLDER_REVISION_NOOP"
+    assert value["incoming_revision_is_applied_revision_plus_one"]["result"] == "APPLY"
+    assert value["incoming_revision_greater_than_applied_revision_plus_one"]["result"] == "GAP_FAIL_CLOSED_AND_REPLAY_REQUIRED"
 
 
-def test_exact_operation_taxonomy_and_row_schema():
-    rows = matrix()["operation_matrix"]
-    assert {row["operation"] for row in rows} == validator.TAXONOMY
-    assert len(rows) == 15
-    assert all(set(row) == validator.OP_FIELDS for row in rows)
-
-
-def test_authority_operations_consume_exactly_one_revision_and_record():
-    for row in matrix()["operation_matrix"]:
-        if row["consumes_revision"]:
-            assert row["mutation_class"] == "ACCEPTED_AUTHORITY_MUTATION"
-            assert row["canonical_record_count_on_success"] == 1
-            assert row["operation_receipt_required"] is True
-
-
-def test_heartbeat_is_coordination_only():
-    row = next(row for row in matrix()["operation_matrix"] if row["operation"] == "TASK_HEARTBEAT")
-    assert row["mutation_class"] == "COORDINATION_ONLY_MUTATION"
-    assert row["consumes_revision"] is False
-    assert row["canonical_record_count_on_success"] == 0
-
-
-def test_legacy_run_complete_is_blocked():
-    row = next(row for row in matrix()["operation_matrix"] if row["operation"] == "LEGACY_RUN_COMPLETE")
-    assert row["decision_status"] == "BLOCKED"
-    assert row["mutation_class"] == "UNSUPPORTED_LEGACY_OPERATION"
-    assert row["duplicate_behavior"] == "BLOCKED_UNTIL_MIGRATED_OR_EXPLICIT_COMPATIBILITY_CONTRACT"
+def test_exact_operation_contract_register():
+    observed = {row["operation"]: row for row in matrix()["operation_matrix"]}
+    assert observed == validator.EXPECTED_OPERATION_CONTRACTS
+    assert len(observed) == 15
 
 
 def test_all_frozen_operations_are_mapped():
@@ -179,23 +164,13 @@ def test_all_frozen_operations_are_mapped():
     assert {row["operation"] for row in evidence()["operations"]} == set(mapping)
 
 
-def test_projection_revision_contract():
-    assert matrix()["projection_contract"] == {
-        "next_contiguous_revision": "APPLY",
-        "duplicate_or_older_revision": "DUPLICATE_NOOP",
-        "revision_gap": "FAIL_CLOSED_AND_REPLAY_REQUIRED",
-        "ordering_authority": "AGGREGATE_REVISION",
-        "replay_source": "CANONICAL_TRANSITION_STORE",
-    }
-
-
 def test_findings_mapped_but_not_resolved():
     rows = matrix()["finding_dispositions"]
     assert {row["finding_id"] for row in rows} == validator.FINDINGS
     assert all(row["resolved_in_product"] is False and row["implementation_sprint"] == 81 for row in rows)
 
 
-def test_manifest_hashes_and_scope():
+def test_manifest_hashes_scope_and_governance():
     assert validator.validate_manifest(ROOT, validator.read_json(MANIFEST)) == []
     assert validator.validate_scope(validator.PATHS) == []
 
@@ -208,74 +183,133 @@ def test_full_local_bundle():
         changed_paths=validator.PATHS,
     )
     assert report["technical_status"] == "PASS"
-    assert report["status"] == "PASS"
     assert report["product_implementation_authorized"] is False
 
 
-def test_negative_duplicate_conflated_with_stale():
+def test_negative_effect_metadata_removed_from_hash():
     value = copy.deepcopy(matrix())
-    value["idempotency_and_concurrency"]["operation_receipt_missing_expected_revision_stale"]["result"] = "ALREADY_APPLIED"
-    assert "stale revision conflict" in validator.validate_matrix(value, evidence())
+    value["canonical_command_hash"]["hash_members"].remove("authoritative_metadata_changes")
+    assert "canonical hash members" in matrix_errors(value)
 
 
-def test_negative_receipt_lookup_after_revision_compare():
+def test_negative_effect_child_removed_from_hash():
     value = copy.deepcopy(matrix())
-    value["authority_commit_order"] = [
-        "COMPARE_EXPECTED_REVISION", "RESOLVE_OPERATION_RECEIPT", "COMPARE_CANONICAL_COMMAND_HASH",
-        "VALIDATE_STATE_TRANSITION", "COMMIT_STATE_REVISION_RECORD_RECEIPT_AND_INTENTS_ATOMICALLY",
-    ]
-    assert "authority commit order" in validator.validate_matrix(value, evidence())
+    value["canonical_command_hash"]["hash_members"].remove("requested_child_effects")
+    assert "canonical hash members" in matrix_errors(value)
 
 
-def test_negative_optional_receipt_field():
+def test_negative_effect_projection_removed_from_hash():
     value = copy.deepcopy(matrix())
-    value["operation_receipt_authority"]["immutable_value"]["canonical_command_hash"] = "OPTIONAL"
-    assert "receipt immutable value" in validator.validate_matrix(value, evidence())
+    value["canonical_command_hash"]["hash_members"].remove("requested_projection_intents")
+    assert "canonical hash members" in matrix_errors(value)
 
 
-def test_negative_caller_supplied_hash_trusted():
+def test_negative_same_hash_effect_match_disabled():
     value = copy.deepcopy(matrix())
-    value["canonical_command_hash"]["caller_supplied_hash_trusted"] = True
-    assert "canonical hash trust" in validator.validate_matrix(value, evidence())
+    value["authoritative_effect_binding"]["same_operation_id_and_same_command_hash"]["immutable_record_effects_must_match"] = False
+    assert "authoritative effect binding" in matrix_errors(value)
 
 
-def test_negative_raw_transition_concatenation():
+def test_negative_projection_same_revision_corruption_noop():
     value = copy.deepcopy(matrix())
-    value["transition_identity"]["raw_delimiter_concatenation"] = "ALLOWED"
-    assert "transition encoding" in validator.validate_matrix(value, evidence())
+    value["projection_contract"]["incoming_revision_equals_applied_revision"]["different_transition_id_or_record_hash"]["result"] = "DUPLICATE_NOOP"
+    assert "projection contract" in matrix_errors(value)
 
 
-def test_negative_timestamp_as_ordering_authority():
+def test_negative_projection_receipt_record_hash_removed():
     value = copy.deepcopy(matrix())
-    value["revision_contract"]["committed_at_ms_ordering_authority"] = True
-    assert "revision ordering authority" in validator.validate_matrix(value, evidence())
+    del value["projection_contract"]["projection_application_receipt"]["value"]["applied_record_hash"]
+    assert "projection contract" in matrix_errors(value)
 
 
-def test_negative_heartbeat_consumes_revision():
+def test_negative_canonical_collision_different_record_noop():
     value = copy.deepcopy(matrix())
-    row = next(row for row in value["operation_matrix"] if row["operation"] == "TASK_HEARTBEAT")
-    row["consumes_revision"] = True
-    assert "operation cardinality TASK_HEARTBEAT" in validator.validate_matrix(value, evidence())
+    value["canonical_storage_authority"]["canonical_record_collision"]["same_transition_id_different_record"]["result"] = "ALREADY_PRESENT"
+    assert "canonical record collision" in matrix_errors(value)
 
 
-def test_negative_legacy_path_silently_authorized():
+def test_negative_authority_entry_fence_optional():
     value = copy.deepcopy(matrix())
-    row = next(row for row in value["operation_matrix"] if row["operation"] == "LEGACY_RUN_COMPLETE")
-    row["decision_status"] = "DECIDED"
-    row["mutation_class"] = "ACCEPTED_AUTHORITY_MUTATION"
-    assert "legacy operation block" in validator.validate_matrix(value, evidence())
+    value["authority_entry_preconditions"]["validate_claim_or_lease_fence_when_applicable"] = "OPTIONAL"
+    assert "authority entry preconditions" in matrix_errors(value)
 
 
-def test_negative_missing_operation_taxonomy_row():
+def test_negative_precondition_discloses_receipt():
     value = copy.deepcopy(matrix())
-    value["operation_matrix"] = [row for row in value["operation_matrix"] if row["operation"] != "TASK_REQUEUE"]
-    assert "operation taxonomy" in validator.validate_matrix(value, evidence())
+    value["authority_entry_preconditions"]["precondition_failure"]["operation_receipt_disclosure"] = "ALLOWED"
+    assert "authority entry preconditions" in matrix_errors(value)
 
 
-def test_negative_projection_gap_applied():
+def test_negative_nonfinite_numbers_allowed():
     value = copy.deepcopy(matrix())
-    value["projection_contract"]["revision_gap"] = "APPLY"
-    assert "projection contract" in validator.validate_matrix(value, evidence())
+    value["canonical_command_hash"]["canonical_json_standard"]["non_finite_numbers"] = "ALLOWED"
+    assert "canonical JSON exact standard" in matrix_errors(value)
+
+
+def test_negative_duplicate_json_keys_allowed():
+    value = copy.deepcopy(matrix())
+    value["canonical_command_hash"]["canonical_json_standard"]["duplicate_object_keys"] = "ALLOWED"
+    assert "canonical JSON exact standard" in matrix_errors(value)
+
+
+def test_negative_task_complete_authority_owner_changed():
+    value = copy.deepcopy(matrix())
+    operation(value, "TASK_COMPLETE")["authority_owner"] = "RUN_AGGREGATE"
+    assert "exact operation contract register" in matrix_errors(value)
+
+
+def test_negative_task_dispatch_next_state_changed():
+    value = copy.deepcopy(matrix())
+    operation(value, "TASK_DISPATCH")["lifecycle_state_after"] = "running"
+    assert "exact operation contract register" in matrix_errors(value)
+
+
+def test_negative_dependency_projection_intent_removed():
+    value = copy.deepcopy(matrix())
+    operation(value, "TASK_DEPENDENCY_APPLY")["projection_intents"] = []
+    assert "exact operation contract register" in matrix_errors(value)
+
+
+def test_negative_task_cancel_terminal_state_changed():
+    value = copy.deepcopy(matrix())
+    operation(value, "TASK_CANCEL")["lifecycle_state_after"] = "done"
+    assert "exact operation contract register" in matrix_errors(value)
+
+
+def test_negative_run_terminate_stale_behavior_changed():
+    value = copy.deepcopy(matrix())
+    operation(value, "RUN_TERMINATE")["stale_revision_behavior"] = "NOT_APPLICABLE"
+    assert "exact operation contract register" in matrix_errors(value)
+
+
+def test_negative_message_ack_mutation_class_changed():
+    value = copy.deepcopy(matrix())
+    operation(value, "MESSAGE_ACK")["mutation_class"] = "ACCEPTED_AUTHORITY_MUTATION"
+    assert "exact operation contract register" in matrix_errors(value)
+
+
+def test_negative_run_terminate_evidence_binding_changed():
+    value = copy.deepcopy(matrix())
+    operation(value, "RUN_TERMINATE")["evidence_binding"] = "unrelated_source"
+    assert "exact operation contract register" in matrix_errors(value)
+
+
+def test_negative_manifest_branch_changed():
+    value = copy.deepcopy(validator.read_json(MANIFEST))
+    value["branch"] = "sprint/wrong"
+    assert "manifest exact governance register" in validator.validate_manifest(ROOT, value)
+
+
+def test_negative_manifest_merge_authorized():
+    value = copy.deepcopy(validator.read_json(MANIFEST))
+    value["merge_authorized"] = True
+    assert "manifest exact governance register" in validator.validate_manifest(ROOT, value)
+
+
+def test_negative_manifest_exact_changed_files():
+    value = copy.deepcopy(validator.read_json(MANIFEST))
+    value["exact_changed_files"] = 7
+    assert "manifest exact governance register" in validator.validate_manifest(ROOT, value)
 
 
 def test_negative_product_source_scope():

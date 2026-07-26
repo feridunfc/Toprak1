@@ -23,7 +23,49 @@
     ],
     "task_next_state_rule": "READY_ONLY_IF_IMMUTABLE_EXPECTED_PARENT_SET_IS_EMPTY_OTHERWISE_PENDING"
   },
+  "authoritative_effect_binding": {
+    "caller_or_writer_local_effect_override": "FORBIDDEN",
+    "hash_bound_command_fields": [
+      "authoritative_metadata_changes",
+      "requested_child_effects",
+      "requested_projection_intents"
+    ],
+    "model": "MODEL_A_HASH_ALL_REQUESTED_AUTHORITATIVE_EFFECTS",
+    "record_effect_mapping": {
+      "authoritative_metadata_changes": "EXACT_HASH_BOUND_COMMAND_VALUE",
+      "child_effects": "EXACT_ACCEPTED_REQUESTED_CHILD_EFFECTS",
+      "durable_projection_intents": "EXACT_ACCEPTED_REQUESTED_PROJECTION_INTENTS"
+    },
+    "same_operation_id_and_same_command_hash": {
+      "canonical_record_hash_must_match": true,
+      "immutable_record_effects_must_match": true
+    }
+  },
   "authority_commit_order": [
+    "RESOLVE_OPERATION_RECEIPT",
+    "COMPARE_CANONICAL_COMMAND_HASH",
+    "COMPARE_EXPECTED_REVISION",
+    "VALIDATE_STATE_TRANSITION",
+    "COMMIT_STATE_REVISION_RECORD_RECEIPT_AND_INTENTS_ATOMICALLY"
+  ],
+  "authority_entry_preconditions": {
+    "accepted_predecessor_binding": "ADR-080C1_RUNTIME_TRUTH_AUTHORITY_AND_ADR-080C2_AGGREGATE_BOUNDARY",
+    "order": "OUTER_GATE_BEFORE_OPERATION_RECEIPT_LOOKUP",
+    "precondition_failure": {
+      "aggregate_mutation": 0,
+      "canonical_record_count": 0,
+      "durable_conflict_record": "AS_REQUIRED_BY_SECURITY_AUDIT_POLICY",
+      "operation_receipt_disclosure": "FORBIDDEN",
+      "result": "AUTHORITY_ENTRY_REJECTED",
+      "revision_increment": 0
+    },
+    "validate_authenticated_writer": "REQUIRED",
+    "validate_claim_or_lease_fence_when_applicable": "REQUIRED",
+    "validate_target_aggregate_identity": "REQUIRED",
+    "validate_writer_operation_capability": "REQUIRED"
+  },
+  "authority_evaluation_order": [
+    "VALIDATE_AUTHORITY_ENTRY_PRECONDITIONS",
     "RESOLVE_OPERATION_RECEIPT",
     "COMPARE_CANONICAL_COMMAND_HASH",
     "COMPARE_EXPECTED_REVISION",
@@ -41,6 +83,17 @@
   "canonical_command_hash": {
     "algorithm": "SHA256",
     "caller_supplied_hash_trusted": false,
+    "canonical_json_standard": {
+      "array_order": "PRESERVED",
+      "binary_values": "BASE64URL_WITH_EXPLICIT_TYPE_TAG",
+      "duplicate_object_keys": "FORBIDDEN",
+      "integer_float_encoding": "RFC_8785_ECMASCRIPT_NUMBER_SERIALIZATION",
+      "negative_zero": "RFC_8785_NORMALIZATION",
+      "non_finite_numbers": "FORBIDDEN",
+      "standard": "RFC_8785_JCS",
+      "timestamp_representation": "INTEGER_MILLISECONDS_UTC",
+      "unicode_input_normalization": "UTF8_NFC_BEFORE_JCS"
+    },
     "excluded_members": [
       "committed_at_ms",
       "writer_generated_metadata",
@@ -56,6 +109,9 @@
       "intended_previous_state",
       "intended_next_state",
       "authoritative_payload",
+      "authoritative_metadata_changes",
+      "requested_child_effects",
+      "requested_projection_intents",
       "causation_id"
     ],
     "input_encoding": "UTF_8",
@@ -63,13 +119,27 @@
     "object_key_order": "LEXICOGRAPHIC",
     "omitted_optional_fields": "FORBIDDEN_USE_EXPLICIT_NULL",
     "required": true,
-    "serialization": "CANONICAL_JSON"
+    "serialization": "RFC_8785_JCS",
+    "serialization_profile": "CANONICAL_JSON_RFC_8785_JCS_WITH_UTF8_NFC_INPUT"
   },
   "canonical_storage_authority": {
     "atomicity": {
       "authoritative_metadata_and_projection_intents": "SAME_AUTHORITY_COMMIT",
       "projection_delivery": "OUTSIDE_AUTHORITY_COMMIT",
       "state_revision_record_receipt": "ONE_AUTHORITY_COMMIT"
+    },
+    "canonical_record_collision": {
+      "comparison_authority": "CANONICAL_RECORD_HASH",
+      "same_transition_id_different_record": {
+        "durable_conflict_record": "REQUIRED",
+        "mutation": 0,
+        "reconciliation_candidate": "REQUIRED",
+        "result": "CANONICAL_RECORD_CORRUPTION_CONFLICT"
+      },
+      "same_transition_id_same_record": {
+        "mutation": 0,
+        "result": "ALREADY_PRESENT"
+      }
     },
     "canonical_transition_store": {
       "append_only": true,
@@ -83,13 +153,24 @@
       "owner": "AGGREGATE_AUTHORITY_COMMIT"
     },
     "transition_uniqueness_index": {
+      "different_record_durable_conflict_record": "REQUIRED",
+      "different_record_mutation": 0,
+      "different_record_reconciliation_candidate": "REQUIRED",
       "key": "transition_id",
-      "owner": "AGGREGATE_AUTHORITY_COMMIT"
+      "owner": "AGGREGATE_AUTHORITY_COMMIT",
+      "same_transition_id_different_record": "CANONICAL_RECORD_CORRUPTION_CONFLICT",
+      "same_transition_id_same_record": "ALREADY_PRESENT"
     }
   },
   "canonical_transition_record": {
     "aggregate_revision_alias": "to_revision",
     "append_only": true,
+    "canonical_record_hash": {
+      "algorithm": "SHA256",
+      "caller_supplied_hash_trusted": false,
+      "hash_scope": "ALL_IMMUTABLE_RECORD_FIELDS_EXCEPT_CANONICAL_RECORD_HASH",
+      "serialization": "RFC_8785_JCS"
+    },
     "coordination_transport_projection_record": "FORBIDDEN_UNLESS_ACCEPTED_AUTHORITY_MUTATION",
     "create_or_admit_state_rule": {
       "next_state": "REQUIRED",
@@ -113,6 +194,7 @@
       "operation_type",
       "operation_id",
       "canonical_command_hash",
+      "canonical_record_hash",
       "previous_state",
       "next_state",
       "authoritative_metadata_changes",
@@ -131,7 +213,7 @@
     }
   },
   "decision_id": "ADR-080C3",
-  "decision_status": "TECHNICAL_RECOMMENDATION_READY_FOR_INDEPENDENT_REVIEW",
+  "decision_status": "CORRECTED_TECHNICAL_RECOMMENDATION_READY_FOR_FINAL_REVIEW",
   "evidence": {
     "aggregate_revision_evidence_count": 0,
     "artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
@@ -178,6 +260,8 @@
     },
     "operation_receipt_exists_same_payload": {
       "canonical_record_count": 0,
+      "canonical_record_hash_match": "REQUIRED",
+      "immutable_record_effects_match": "REQUIRED",
       "mutation": 0,
       "result": "ALREADY_APPLIED",
       "return_existing_transition_id": "REQUIRED",
@@ -527,6 +611,7 @@
     "immutable_value": {
       "aggregate_revision": "REQUIRED",
       "canonical_command_hash": "REQUIRED",
+      "canonical_record_hash": "REQUIRED",
       "committed_at_ms": "REQUIRED",
       "operation_id": "REQUIRED",
       "operation_type": "REQUIRED",
@@ -553,11 +638,40 @@
   },
   "product_implementation_authorized": false,
   "projection_contract": {
-    "duplicate_or_older_revision": "DUPLICATE_NOOP",
-    "next_contiguous_revision": "APPLY",
+    "incoming_revision_equals_applied_revision": {
+      "different_transition_id_or_record_hash": {
+        "durable_conflict_record": "REQUIRED",
+        "projection_mutation": 0,
+        "reconciliation_candidate": "REQUIRED",
+        "result": "PROJECTION_CORRUPTION_CONFLICT"
+      },
+      "same_transition_id_and_record_hash": {
+        "projection_mutation": 0,
+        "result": "DUPLICATE_NOOP"
+      }
+    },
+    "incoming_revision_greater_than_applied_revision_plus_one": {
+      "projection_mutation": 0,
+      "result": "GAP_FAIL_CLOSED_AND_REPLAY_REQUIRED"
+    },
+    "incoming_revision_is_applied_revision_plus_one": {
+      "result": "APPLY"
+    },
+    "incoming_revision_older_than_applied_revision": {
+      "projection_mutation": 0,
+      "result": "OLDER_REVISION_NOOP"
+    },
     "ordering_authority": "AGGREGATE_REVISION",
-    "replay_source": "CANONICAL_TRANSITION_STORE",
-    "revision_gap": "FAIL_CLOSED_AND_REPLAY_REQUIRED"
+    "projection_application_receipt": {
+      "key": "canonical_aggregate_identity",
+      "owner": "PROJECTION",
+      "value": {
+        "applied_record_hash": "REQUIRED",
+        "applied_revision": "REQUIRED",
+        "applied_transition_id": "REQUIRED"
+      }
+    },
+    "replay_source": "CANONICAL_TRANSITION_STORE"
   },
   "revision_contract": {
     "clock_regression_effect": "NONE",
@@ -608,17 +722,26 @@
     "uniqueness_scope": "GLOBAL"
   },
   "verification_contracts": {
+    "authoritative_effect_hash_binding_exact": true,
+    "authority_entry_preconditions_decided": true,
     "canonical_aggregate_identity_decided": true,
     "canonical_command_hash_required": true,
+    "canonical_hash_serialization_standard_exact": true,
+    "canonical_record_collision_decided": true,
     "finding_count": 2,
     "findings_resolved_in_product": 0,
     "frozen_operations_mapped": 9,
     "implementation_claims": 0,
+    "manifest_governance_register_exactly_validated": true,
     "operation_receipt_identity_decided": true,
+    "operation_row_semantics_mutation_tests_present": true,
     "operation_taxonomy_exact_count": 15,
+    "operation_taxonomy_exact_rows_machine_verified": 15,
     "predecessor_acceptance_bindings_exact": true,
     "product_source_mutation": 0,
+    "projection_same_revision_collision_decided": true,
     "receipt_lookup_before_revision_compare": true,
+    "same_hash_same_immutable_effects": true,
     "state_revision_record_receipt_one_commit": true,
     "strict_contiguous_revision": true,
     "technical_unresolved_choice": 0,

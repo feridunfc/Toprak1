@@ -17,8 +17,16 @@ status_snapshot_date: 2026-07-26
   human_acceptance_comment_id: 5083381947
 
 80C3:
-  status: TECHNICAL_RECOMMENDATION_READY_FOR_INDEPENDENT_REVIEW
+  status: CORRECTED_TECHNICAL_RECOMMENDATION_READY_FOR_FINAL_REVIEW
   decision_scope: CANONICAL_TRANSITION_AND_MONOTONIC_AGGREGATE_REVISION
+  correction_scope:
+    - AUTHORITATIVE_EFFECT_HASH_BINDING
+    - CANONICAL_RECORD_COLLISION
+    - PROJECTION_SAME_REVISION_CONTRADICTION
+    - EXACT_OPERATION_CONTRACT_REGISTER
+    - AUTHORIZATION_AND_FENCING_PRECONDITIONS
+    - RFC_8785_JCS_SERIALIZATION
+    - MANIFEST_GOVERNANCE_EXACT_VALIDATION
   human_architecture_acceptance: PENDING
   merge_authorized: false
 
@@ -31,8 +39,8 @@ production_ready_claim_authorized: false
 
 ## Document-hygiene precedence
 
-Earlier PR descriptions and pre-acceptance ADR snapshots may contain `NOT_READY` or `merge_authorized: false`. Those statements were correct when written. Later exact-head human acceptance records and merge commits are the governing records.
+Earlier PR descriptions, verification comments and ADR snapshots remain historical records. The latest exact-head technical verification record governs technical review status but cannot create human acceptance or merge authorization.
 
-For current status reporting, Sprint 80C.1 and Sprint 80C.2 are `ACCEPTED_MERGED_COMPLETE`. Sprint 80C.3 is a complete technical recommendation package awaiting independent review and separate exact-head human acceptance.
+Sprint 80C.1 and Sprint 80C.2 remain `ACCEPTED_MERGED_COMPLETE`. Sprint 80C.3 is a corrected technical recommendation awaiting independent final review and a separate exact-head human decision.
 
-This update does not rewrite historical records and does not authorize product implementation.
+This update does not authorize product implementation.

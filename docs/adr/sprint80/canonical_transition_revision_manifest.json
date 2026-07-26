@@ -7,13 +7,13 @@
     },
     {
       "path": "docs/adr/sprint80/ADR-080C3-canonical-transition-revision.md",
-      "sha256": "0c503e74737b3c07d3edd94b3289941d248cebb5705c0a7559912ded3c3adf51",
-      "size_bytes": 9735
+      "sha256": "4033c02b7dbf0c924f2a7c11c06a29e0fe51870870ffc22e7bf9edbbd77ff290",
+      "size_bytes": 12378
     },
     {
       "path": "docs/adr/sprint80/STATUS_UPDATE_80C2_80C3.md",
-      "sha256": "4778cf2f43d14f60b630ac22910f994aa977f8c9056124fb69d9a020791f97c0",
-      "size_bytes": 1536
+      "sha256": "75d9c12a2967cdfdf46527a9bef392f16ff8c6864ef80ba8231233202b17a25b",
+      "size_bytes": 1765
     },
     {
       "path": "docs/adr/sprint80/evidence/transition_cardinality.run93.json",
@@ -22,25 +22,25 @@
     },
     {
       "path": "docs/adr/sprint80/canonical_transition_revision_matrix.json",
-      "sha256": "bb9e3c045fecf83e605e59c5c49bdcb54bccd5f3ce4e614aaef00d781d2012b5",
-      "size_bytes": 22829
+      "sha256": "836ce0aa58f7b3213b44efe447aef92d7ed0023716c2cbc6d18e0c5c5e5a1077",
+      "size_bytes": 27829
     },
     {
       "path": "scripts/sprint80c/validate_canonical_transition_revision.py",
-      "sha256": "2508ac850b5d1c1cb416ee4b16bb567300c26b415ff50c5c84dfa34b7682dd91",
-      "size_bytes": 24384
+      "sha256": "463cd74afdc3893c22ab98b4dccd51a965752f1904a90872771b83527b164bde",
+      "size_bytes": 41295
     },
     {
       "path": "tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py",
-      "sha256": "8894fe669a9f12e30dfee37ed61103bb3e4c500b67ed092ae2fd3874af998207",
-      "size_bytes": 12717
+      "sha256": "802245c4fed7ab0c15470d117a8bcbfe1ae65bfcda3ef2ad0eaee5a13fbf2c62",
+      "size_bytes": 13776
     }
   ],
   "base_branch": "baseline/local-import",
   "base_head": "956c3247d5ceaaa0697547a31950918cce38fcd9",
   "branch": "sprint/80c3-canonical-transition-revision",
   "bundle_index_algorithm": "sorted_utf8_lines:path\\0size_bytes\\0sha256\\n",
-  "bundle_index_sha256": "9c740707b0e108b0d5b4c65932a95e44631e49e4dd31d850ac703ee98dc4a60c",
+  "bundle_index_sha256": "2ca40e50fd9f9ef26c89882e9b5bcafe15132ebd739a22fb251308d1b3b671b7",
   "decision_id": "ADR-080C3",
   "exact_changed_files": 8,
   "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",

@@ -1,6 +1,6 @@
 # ADR-080C.3 — Canonical Transition and Monotonic Aggregate Revision
 
-- Status: **CORRECTED TECHNICAL RECOMMENDATION — READY FOR INDEPENDENT REVIEW**
+- Status: **CORRECTED TECHNICAL RECOMMENDATION — READY FOR FINAL INDEPENDENT REVIEW**
 - Sprint: 80C.3
 - Branch: `sprint/80c3-canonical-transition-revision`
 - Base: `baseline/local-import@956c3247d5ceaaa0697547a31950918cce38fcd9`
@@ -24,9 +24,9 @@
   merge_commit: 956c3247d5ceaaa0697547a31950918cce38fcd9
 ```
 
-80C.3 consumes the accepted task/run truth owners, independent task aggregate model, parent/child revision ownership and process-manager coordination boundary. It does not reopen them.
+80C.3 consumes the accepted runtime truth owner, task/run aggregate boundary, child-owned revision and logical-edge coordination decisions. It does not reopen them.
 
-## 2. Immutable evidence
+## 2. Frozen evidence
 
 ```yaml
 source_head: 5734ac60704f8546b8ce67e766e042ff2ce4c412
@@ -37,39 +37,61 @@ canonical_transition_record_count: 0
 aggregate_revision_evidence_count: 0
 ```
 
-The evidence distinguishes lifecycle mutation, coordination fences, liveness timestamps, retry counters, projections, transport and audit. None of the observed records satisfies the canonical authority schema and transaction-coupling contract.
+The current product exposes no verified canonical transition record and no verified aggregate revision evidence. This ADR assigns the architecture; Sprint 81 owns implementation.
 
-## 3. Canonical aggregate identity and transition identity
+## 3. Canonical aggregate and transition identity
 
 ```yaml
 canonical_aggregate_identity:
   task: "task:{run_id}:{task_id}"
   run: "run:{run_id}"
-  raw_task_id_as_identity: FORBIDDEN
+  component_normalization: UTF8_NFC_EXACT_CASE_PRESERVED_FOR_IDS
+  tenant_identity_role: AUTHORITATIVE_METADATA_NOT_AGGREGATE_IDENTITY
 
 transition_id:
   format: "ctr:v1:{canonical_aggregate_identity_sha256}:{aggregate_revision}:{operation_id_sha256}"
-  uniqueness_scope: GLOBAL
-  aggregate_type: NORMALIZED_LOWERCASE_ENUM
   component_encoding: SHA256_OF_LENGTH_PREFIXED_UTF8_COMPONENT
   raw_delimiter_concatenation: FORBIDDEN
+  uniqueness_scope: GLOBAL
 ```
 
-Task identity preserves the accepted 80C.2 `run_id + task_id` boundary. Tenant identity is authoritative metadata, not a replacement aggregate identity. Physical key layout is deferred to Sprint 81; logical identity is not.
+Task identity preserves `run_id + task_id`. Raw task IDs and unescaped delimiter concatenation are forbidden.
 
-## 4. Canonical command hash
+## 4. Authority entry preconditions
 
-Every operation is normalized by the authority layer before idempotency comparison.
+Authorization and fencing form an outer gate before operation receipt lookup. Correct `expected_revision` is not writer authority.
+
+```yaml
+authority_entry_preconditions:
+  order: OUTER_GATE_BEFORE_OPERATION_RECEIPT_LOOKUP
+  validate_authenticated_writer: REQUIRED
+  validate_writer_operation_capability: REQUIRED
+  validate_claim_or_lease_fence_when_applicable: REQUIRED
+  validate_target_aggregate_identity: REQUIRED
+  accepted_predecessor_binding: ADR-080C1_RUNTIME_TRUTH_AUTHORITY_AND_ADR-080C2_AGGREGATE_BOUNDARY
+
+precondition_failure:
+  result: AUTHORITY_ENTRY_REJECTED
+  operation_receipt_disclosure: FORBIDDEN
+  aggregate_mutation: 0
+  revision_increment: 0
+  canonical_record_count: 0
+  durable_conflict_record: AS_REQUIRED_BY_SECURITY_AUDIT_POLICY
+```
+
+Only after this gate succeeds may the idempotency/CAS sequence run.
+
+## 5. Canonical command hash and authoritative-effect binding
+
+80C.3 selects **Model A**: every requested authoritative effect is part of the canonical command hash.
 
 ```yaml
 canonical_command_hash:
   algorithm: SHA256
-  input_encoding: UTF_8
-  serialization: CANONICAL_JSON
-  object_key_order: LEXICOGRAPHIC
-  insignificant_whitespace: REMOVED
-  omitted_optional_fields: FORBIDDEN_USE_EXPLICIT_NULL
+  serialization: RFC_8785_JCS
+  serialization_profile: CANONICAL_JSON_RFC_8785_JCS_WITH_UTF8_NFC_INPUT
   caller_supplied_hash_trusted: false
+  omitted_optional_fields: FORBIDDEN_USE_EXPLICIT_NULL
   hash_members:
     - aggregate_type
     - canonical_aggregate_identity
@@ -79,6 +101,9 @@ canonical_command_hash:
     - intended_previous_state
     - intended_next_state
     - authoritative_payload
+    - authoritative_metadata_changes
+    - requested_child_effects
+    - requested_projection_intents
     - causation_id
   excluded_members:
     - committed_at_ms
@@ -87,7 +112,40 @@ canonical_command_hash:
     - transition_id
 ```
 
-## 5. Operation receipt authority
+Exact serialization profile:
+
+```yaml
+canonical_json_standard:
+  standard: RFC_8785_JCS
+  unicode_input_normalization: UTF8_NFC_BEFORE_JCS
+  integer_float_encoding: RFC_8785_ECMASCRIPT_NUMBER_SERIALIZATION
+  negative_zero: RFC_8785_NORMALIZATION
+  non_finite_numbers: FORBIDDEN
+  duplicate_object_keys: FORBIDDEN
+  array_order: PRESERVED
+  binary_values: BASE64URL_WITH_EXPLICIT_TYPE_TAG
+  timestamp_representation: INTEGER_MILLISECONDS_UTC
+```
+
+Authoritative effects are bound as follows:
+
+```yaml
+authoritative_effect_binding:
+  model: MODEL_A_HASH_ALL_REQUESTED_AUTHORITATIVE_EFFECTS
+  caller_or_writer_local_effect_override: FORBIDDEN
+  record_effect_mapping:
+    authoritative_metadata_changes: EXACT_HASH_BOUND_COMMAND_VALUE
+    child_effects: EXACT_ACCEPTED_REQUESTED_CHILD_EFFECTS
+    durable_projection_intents: EXACT_ACCEPTED_REQUESTED_PROJECTION_INTENTS
+
+same_operation_id_and_same_command_hash:
+  immutable_record_effects_must_match: true
+  canonical_record_hash_must_match: true
+```
+
+The authority layer may reject an invalid requested effect, but it may not silently replace hash-bound metadata, child effects or projection intents with writer-local values.
+
+## 6. Operation receipt and mandatory evaluation order
 
 ```yaml
 operation_receipt_authority:
@@ -97,52 +155,49 @@ operation_receipt_authority:
   immutable_value:
     operation_id: REQUIRED
     canonical_command_hash: REQUIRED
+    canonical_record_hash: REQUIRED
     transition_id: REQUIRED
     aggregate_revision: REQUIRED
     operation_type: REQUIRED
     committed_at_ms: REQUIRED
 ```
 
-The receipt is not a second lifecycle truth. It is the immutable idempotency index written by the same authority commit as state, revision and canonical record.
-
-## 6. Mandatory authority evaluation order
+The receipt is an immutable idempotency index, not a second lifecycle truth.
 
 ```yaml
-authority_commit_order:
-  1: RESOLVE_OPERATION_RECEIPT
-  2: COMPARE_CANONICAL_COMMAND_HASH
-  3: COMPARE_EXPECTED_REVISION
-  4: VALIDATE_STATE_TRANSITION
-  5: COMMIT_STATE_REVISION_RECORD_RECEIPT_AND_INTENTS_ATOMICALLY
+authority_evaluation_order:
+  1: VALIDATE_AUTHORITY_ENTRY_PRECONDITIONS
+  2: RESOLVE_OPERATION_RECEIPT
+  3: COMPARE_CANONICAL_COMMAND_HASH
+  4: COMPARE_EXPECTED_REVISION
+  5: VALIDATE_STATE_TRANSITION
+  6: COMMIT_STATE_REVISION_RECORD_RECEIPT_AND_INTENTS_ATOMICALLY
 ```
 
 Exact outcomes:
 
 ```yaml
-operation_receipt_exists_same_payload:
+same_operation_same_command_and_record:
   result: ALREADY_APPLIED
   return_existing_transition_id: REQUIRED
   mutation: 0
-  revision_increment: 0
-  canonical_record_count: 0
-operation_receipt_exists_different_payload:
+same_operation_different_command:
   result: IDEMPOTENCY_CONFLICT
   mutation: 0
   durable_conflict_record: REQUIRED
   reconciliation_candidate: REQUIRED
-operation_receipt_missing_expected_revision_stale:
+receipt_missing_stale_revision:
   result: STALE_REVISION_CONFLICT
   mutation: 0
-  canonical_record_count: 0
-operation_receipt_missing_expected_revision_future:
+receipt_missing_future_revision:
   result: FUTURE_REVISION_CONFLICT
   mutation: 0
   reconciliation_candidate: REQUIRED
 ```
 
-`ALREADY_APPLIED` may be returned only when the durable operation receipt proves the same operation and canonical payload.
+`ALREADY_APPLIED` is legal only when the durable receipt proves the same command hash and canonical record hash.
 
-## 7. Revision contract and aggregate creation
+## 7. Revision and aggregate creation
 
 ```yaml
 revision_owner: AGGREGATE
@@ -160,9 +215,11 @@ clock_regression_effect: NONE
 same_millisecond_transitions: ALLOWED
 ```
 
-For a missing aggregate, logical current revision is `0`. `TASK_ADMIT` and `RUN_CREATE` require expected revision `0`, commit revision `1`, write one record and one receipt. Task initial state is `ready` only when its immutable expected-parent set is empty; otherwise it is `pending`. Run initial state is `pending`. An existing aggregate with a different create operation is `AGGREGATE_ALREADY_EXISTS_CONFLICT`.
+For a missing aggregate, logical revision is `0`. `TASK_ADMIT` and `RUN_CREATE` require expected revision `0`, commit revision `1`, and write one record plus one receipt.
 
-## 8. CanonicalTransitionRecord schema
+## 8. CanonicalTransitionRecord and record hash
+
+Required immutable fields include:
 
 ```yaml
 required_fields:
@@ -176,6 +233,7 @@ required_fields:
   - operation_type
   - operation_id
   - canonical_command_hash
+  - canonical_record_hash
   - previous_state
   - next_state
   - authoritative_metadata_changes
@@ -185,13 +243,19 @@ required_fields:
   - writer_id
   - committed_at_ms
   - durable_projection_intents
-revision_rule: to_revision == from_revision + 1
-aggregate_revision_alias: to_revision
 ```
 
-Create/admit records require `previous_state: null` and a non-null next state. Normal lifecycle records require both states. Coordination, projection and transport-only actions must not create a canonical transition record unless they also perform an accepted authority mutation.
+```yaml
+canonical_record_hash:
+  algorithm: SHA256
+  serialization: RFC_8785_JCS
+  hash_scope: ALL_IMMUTABLE_RECORD_FIELDS_EXCEPT_CANONICAL_RECORD_HASH
+  caller_supplied_hash_trusted: false
+```
 
-## 9. Canonical storage authority and atomic commit
+The record hash is the comparison authority for canonical store collisions and projection application receipts.
+
+## 9. Canonical storage collision and atomicity
 
 ```yaml
 canonical_transition_store:
@@ -200,21 +264,69 @@ canonical_transition_store:
   immutable: true
   replay_source: true
   physical_layout: DEFERRED_TO_SPRINT81
-transition_uniqueness_index:
-  owner: AGGREGATE_AUTHORITY_COMMIT
-  key: transition_id
-operation_receipt_index:
-  owner: AGGREGATE_AUTHORITY_COMMIT
-  key: canonical_aggregate_identity + operation_id
+
+same_transition_id_same_record:
+  result: ALREADY_PRESENT
+  mutation: 0
+
+same_transition_id_different_record:
+  result: CANONICAL_RECORD_CORRUPTION_CONFLICT
+  mutation: 0
+  durable_conflict_record: REQUIRED
+  reconciliation_candidate: REQUIRED
+```
+
+```yaml
 atomicity:
   state_revision_record_receipt: ONE_AUTHORITY_COMMIT
   authoritative_metadata_and_projection_intents: SAME_AUTHORITY_COMMIT
   projection_delivery: OUTSIDE_AUTHORITY_COMMIT
 ```
 
-A merely schema-shaped event is not canonical authority. Uniqueness, receipt, state, revision and record coupling must all be enforced by the aggregate authority commit.
+State, revision, canonical record, operation receipt and durable delivery intents are one authority commit. Projection delivery is outside that commit and is replayable.
 
-## 10. Mutation classification
+## 10. Projection application receipt and contradiction handling
+
+Each projection maintains an application receipt:
+
+```yaml
+projection_application_receipt:
+  owner: PROJECTION
+  key: canonical_aggregate_identity
+  value:
+    applied_revision: REQUIRED
+    applied_transition_id: REQUIRED
+    applied_record_hash: REQUIRED
+```
+
+Exact behavior:
+
+```yaml
+incoming_revision == applied_revision:
+  same_transition_id_and_record_hash:
+    result: DUPLICATE_NOOP
+    projection_mutation: 0
+  different_transition_id_or_record_hash:
+    result: PROJECTION_CORRUPTION_CONFLICT
+    projection_mutation: 0
+    durable_conflict_record: REQUIRED
+    reconciliation_candidate: REQUIRED
+
+incoming_revision < applied_revision:
+  result: OLDER_REVISION_NOOP
+  projection_mutation: 0
+
+incoming_revision == applied_revision + 1:
+  result: APPLY
+
+incoming_revision > applied_revision + 1:
+  result: GAP_FAIL_CLOSED_AND_REPLAY_REQUIRED
+  projection_mutation: 0
+```
+
+Same revision is not sufficient proof of duplicate delivery. Transition ID and record hash must both match.
+
+## 11. Mutation classes
 
 ```yaml
 accepted_authority_mutation:
@@ -238,11 +350,9 @@ durable_conflict_record:
   separate_conflict_record_count: 1
 ```
 
-Claim epochs, heartbeat times, lease TTLs and retry counters do not become aggregate revisions merely because they are monotonic or fenced.
+## 12. Exact operation taxonomy
 
-## 11. Exact operation taxonomy
-
-The machine-readable matrix decides fifteen operations:
+The matrix contains exactly fifteen operation contracts:
 
 ```text
 TASK_ADMIT
@@ -262,19 +372,7 @@ MESSAGE_APPEND
 MESSAGE_ACK
 ```
 
-Each row declares authority owner, before/after state, mutation class, revision consumption, record count, receipt requirement, duplicate/stale behavior, projection intents and evidence binding. `LEGACY_RUN_COMPLETE` is blocked until migration or an explicit compatibility contract; it is not silently promoted into the new authority model.
-
-## 12. Projection application
-
-```yaml
-incoming_revision == applied_revision + 1: APPLY
-incoming_revision <= applied_revision: DUPLICATE_NOOP
-incoming_revision > applied_revision + 1: FAIL_CLOSED_AND_REPLAY_REQUIRED
-ordering_authority: AGGREGATE_REVISION
-replay_source: CANONICAL_TRANSITION_STORE
-```
-
-Projection success is outside the authority commit. Lost delivery is replayed from canonical records.
+The validator contains an independent `EXPECTED_OPERATION_CONTRACTS` register and requires exact equality for every row. Tests mutate authority owner, lifecycle state, projection intents, stale behavior, evidence binding and mutation class to prove semantic drift fails closed. `LEGACY_RUN_COMPLETE` remains blocked until migration or an explicit compatibility contract.
 
 ## 13. Findings and implementation ownership
 
@@ -289,10 +387,24 @@ no_aggregate_revision_evidence:
   implementation_sprint: 81
 ```
 
-## 14. Governance
+## 14. Executable verification and governance
+
+The package validator must enforce:
 
 ```yaml
-architecture_contract_complete: TECHNICAL_RECOMMENDATION
+authoritative_effect_hash_binding: EXACT
+canonical_record_collision: EXACT
+projection_same_revision_collision: EXACT
+operation_taxonomy_exact_rows_machine_verified: 15
+authority_entry_preconditions: EXACT
+canonical_hash_serialization_standard: RFC_8785_JCS
+manifest_governance_register: EXACT
+exact_changed_files: 8
+product_source_mutation: 0
+```
+
+```yaml
+architecture_contract_complete: CORRECTED_TECHNICAL_RECOMMENDATION
 independent_review: REQUIRED
 human_architecture_acceptance: PENDING
 merge_authorized: false
