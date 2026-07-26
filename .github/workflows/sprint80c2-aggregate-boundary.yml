@@ -65,7 +65,7 @@ jobs:
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
-            tail -n 40 /tmp/harden80c2.log > .harden80c2-error.txt
+            tail -n 60 /tmp/harden80c2.log > .harden80c2-error.txt
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add .harden80c2-error.txt
@@ -147,9 +147,23 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install pytest
-          python -m pytest tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py -q
-          python scripts/sprint80c/validate_aggregate_boundary.py --repo-root .
-          git diff --check
+          set +e
+          python -m pytest tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py -q > /tmp/final-validation.log 2>&1
+          pytest_status=$?
+          python scripts/sprint80c/validate_aggregate_boundary.py --repo-root . >> /tmp/final-validation.log 2>&1
+          validator_status=$?
+          git diff --check >> /tmp/final-validation.log 2>&1
+          diff_status=$?
+          set -e
+          if [ "$pytest_status" -ne 0 ] || [ "$validator_status" -ne 0 ] || [ "$diff_status" -ne 0 ]; then
+            tail -n 100 /tmp/final-validation.log > .harden80c2-error.txt
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add .harden80c2-error.txt
+            git commit -m 'chore(sprint80c): capture final validation failure'
+            git push origin HEAD:sprint/80c2-aggregate-boundary
+            exit 1
+          fi
       - name: Commit exact correction
         shell: bash
         run: |
