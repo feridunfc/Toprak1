@@ -1,0 +1,44 @@
+name: Sprint 80C.3 Canonical Transition Revision
+
+on:
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint80c3-canonical-transition-revision.yml
+      - docs/adr/sprint80/ADR-080C3-canonical-transition-revision.md
+      - docs/adr/sprint80/STATUS_UPDATE_80C2_80C3.md
+      - docs/adr/sprint80/evidence/transition_cardinality.run93.json
+      - docs/adr/sprint80/canonical_transition_revision_matrix.json
+      - docs/adr/sprint80/canonical_transition_revision_manifest.json
+      - scripts/sprint80c/validate_canonical_transition_revision.py
+      - tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-transition-revision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependency
+        run: python -m pip install pytest
+      - name: Run Sprint 80C.3 package tests
+        run: python -m pytest tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py -q
+      - name: Validate package, source bindings and scope
+        run: >-
+          python scripts/sprint80c/validate_canonical_transition_revision.py
+          --repo-root .
+          --verify-source-bindings
+          --verify-git-scope
+      - name: Check patch whitespace
+        run: git diff --check 956c3247d5ceaaa0697547a31950918cce38fcd9...HEAD
