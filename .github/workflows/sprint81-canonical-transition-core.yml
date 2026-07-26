@@ -40,13 +40,12 @@ jobs:
           sha256sum -c /tmp/receipt-first.sha256
       - name: Install hfa-core with test dependencies
         run: python -m pip install -e 'hfa-core[dev]'
-      - name: Verify correction
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
-          python -m compileall -q hfa-core/src/hfa/authority
-          git diff --check
+      - name: Run 77 authority-core tests
+        run: python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
+      - name: Compile authority package
+        run: python -m compileall -q hfa-core/src/hfa/authority
+      - name: Check correction whitespace
+        run: git diff --check
       - name: Commit verified correction
         shell: bash
         run: |
