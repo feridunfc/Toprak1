@@ -42,8 +42,6 @@ jobs:
           sed -i 's/^          //' /tmp/expected.sha256
           sha256sum -c /tmp/expected.sha256
       - name: Validate reconstructed package
-        env:
-          SPRINT80_RUN93_ZIP: /tmp/sprint80-run93.zip
         shell: bash
         run: |
           set -euo pipefail
