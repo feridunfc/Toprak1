@@ -24,13 +24,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: sprint/80c2-aggregate-boundary
-          fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install test dependency
-        run: python -m pip install pytest
+          fetch-depth: 1
+          show-progress: false
       - name: Execute staged exact patch
         shell: bash
         run: |
@@ -46,7 +41,19 @@ jobs:
           Path('/tmp/harden80c2.py').write_text(script, encoding='utf-8')
           PY
           sed -i 's/if count != 1:/if count < 1:/' /tmp/harden80c2.py
-          python /tmp/harden80c2.py
+          set +e
+          python /tmp/harden80c2.py > /tmp/harden80c2.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            tail -n 40 /tmp/harden80c2.log > .harden80c2-error.txt
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add .harden80c2-error.txt
+            git commit -m 'chore(sprint80c): capture hardener failure'
+            git push origin HEAD:sprint/80c2-aggregate-boundary
+            exit "$status"
+          fi
       - name: Restore final seven-file package
         shell: bash
         run: |
@@ -98,6 +105,7 @@ jobs:
           EOF
           sed -i 's/^          //' .github/workflows/sprint80c2-aggregate-boundary.yml
           rm .github/workflows/temp-harden-80c2.yml
+          rm -f .harden80c2-error.txt
           python - <<'PY'
           import hashlib, json
           from pathlib import Path
@@ -119,6 +127,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python -m pip install pytest
           python -m pytest tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py -q
           python scripts/sprint80c/validate_aggregate_boundary.py --repo-root .
           git diff --check
@@ -130,6 +139,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .github/workflows/sprint80c2-aggregate-boundary.yml
           git add -A .github/workflows/temp-harden-80c2.yml
+          git add -A .harden80c2-error.txt
           git add docs/adr/sprint80/ADR-080C2-aggregate-boundary.md
           git add docs/adr/sprint80/aggregate_boundary_matrix.json
           git add docs/adr/sprint80/aggregate_boundary_manifest.json
