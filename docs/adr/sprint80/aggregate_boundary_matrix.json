@@ -1,0 +1,424 @@
+{
+  "alternatives_rejected": [
+    {
+      "name": "ONE_DAG_OR_RUN_AGGREGATE",
+      "reason": "would replace task-scoped lifecycle ownership, serialize unrelated task transitions, and require broad key and revision migration",
+      "status": "TECHNICALLY_REJECTED_FINAL_GOVERNANCE_DEPENDS_ON_ADR_080C1_ACCEPTANCE"
+    },
+    {
+      "name": "PARENT_COMPLETION_DIRECTLY_MUTATES_CHILD_KEYS",
+      "reason": "violates child revision ownership",
+      "status": "REJECTED"
+    },
+    {
+      "name": "REMAINING_COUNTER_AND_READY_MARKER_AS_AUTHORITY",
+      "reason": "frozen evidence proves fail-open underflow and fail-closed stranding",
+      "status": "REJECTED"
+    },
+    {
+      "name": "DISTRIBUTED_TRANSACTION_ACROSS_PARENT_AND_ALL_CHILD_TASKS",
+      "reason": "adds global coordination without improving replay and idempotency",
+      "status": "REJECTED"
+    }
+  ],
+  "base": {
+    "branch": "baseline/local-import",
+    "head": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6"
+  },
+  "canonical_child_effect_contract": {
+    "duplicate_edge_receipt_produces_record": false,
+    "duplicate_edge_receipt_produces_revision": false,
+    "every_new_valid_edge_receipt_increments_child_revision": true,
+    "every_new_valid_edge_receipt_produces_exactly_one_canonical_transition_record": true,
+    "failed_edge_produces_revision_and_record": true,
+    "final_satisfied_edge_record_includes_pending_to_ready_effect": true,
+    "parent_completion_record_contains": "DURABLE_FANOUT_INTENT_NOT_COMMITTED_CHILD_STATE_EFFECTS"
+  },
+  "decision_id": "ADR-080C2",
+  "decision_status": "CORRECTED_TECHNICAL_RECOMMENDATION_PREDECESSOR_ACCEPTED_EXECUTABLE_VERIFICATION_HARDENED",
+  "dependencies": [
+    "ADR-080C1 post-merge human architecture acceptance VERIFIED by comment 5083135387",
+    "ADR-080C3 canonical transition and monotonic revision contract",
+    "ADR-080C4 durable authority and reconstruction contract",
+    "ADR-080C5 event-state atomicity and outbox contract",
+    "ADR-080C6 stable writer identity and operation allowlist"
+  ],
+  "dependency_policy_contract": {
+    "default_policy": "ALL_REQUIRED_PARENTS_MUST_SUCCEED",
+    "failed_edge": {
+      "canonical_transition_record": "EXACTLY_ONE",
+      "child_disposition": "blocked_by_failure",
+      "child_revision_increment": 1,
+      "process_manager_retry": "STOP_AFTER_RECEIPT",
+      "ready_projection_intent": 0
+    },
+    "satisfied_edge": {
+      "canonical_transition_record": "EXACTLY_ONE",
+      "child_revision_increment": 1,
+      "ready_projection_intent": "ONE_IF_CHILD_BECOMES_READY",
+      "ready_when": "ALL_EXPECTED_EDGES_HAVE_DEPENDENCY_SATISFIED_RECEIPTS_AND_CHILD_IS_PENDING"
+    },
+    "unknown_dependency_policy": {
+      "child_mutation": 0,
+      "durable_conflict_record": "REQUIRED",
+      "reconciliation_candidate": "REQUIRED",
+      "result": "FAIL_CLOSED"
+    }
+  },
+  "edge_identity_contract": {
+    "duplicate_same_edge_command_id": {
+      "canonical_record_count": 0,
+      "child_revision_increment": 0,
+      "result": "ALREADY_APPLIED",
+      "retry": "STOP"
+    },
+    "edge_command_id_format": "{parent_transition_id}:{child_task_id}:{edge_outcome}:{graph_revision_or_topology_hash}",
+    "logical_edge_id_format": "{run_id}:{parent_task_id}:{child_task_id}:{graph_revision_or_topology_hash}",
+    "process_manager_identity": "dependency-fanout:{parent_transition_id}",
+    "process_manager_identity_role": "COORDINATION_INSTANCE_ONLY_NOT_COMMAND_IDEMPOTENCY_AUTHORITY",
+    "receipt_key_authority": "edge_command_id",
+    "sole_command_idempotency_authority": "edge_command_id"
+  },
+  "edge_receipt_contract": {
+    "allowed_outcomes": [
+      "DEPENDENCY_SATISFIED",
+      "DEPENDENCY_FAILED"
+    ],
+    "authority": "IDEMPOTENT_APPLIED_EDGE_RECEIPTS_WITH_OUTCOME",
+    "ready_emitted": "NON_AUTHORITATIVE_PROJECTION_RECEIPT",
+    "remaining_deps": "DERIVED_PROJECTION_NOT_AUTHORITY",
+    "required_fields": [
+      "edge_command_id",
+      "logical_edge_id",
+      "parent_transition_id",
+      "parent_task_id",
+      "child_task_id",
+      "outcome",
+      "graph_identity",
+      "graph_revision_or_topology_hash",
+      "applied_child_revision"
+    ]
+  },
+  "fanout_intent_contract": {
+    "child_edge_set_digest": "REQUIRED",
+    "child_edge_set_digest_algorithm": "CANONICAL_SORTED_CHILD_EDGE_IDENTITIES_SHA256",
+    "graph_identity": "REQUIRED",
+    "graph_revision_or_topology_hash": "REQUIRED",
+    "parent_transition_id": "REQUIRED"
+  },
+  "finding_dispositions": [
+    {
+      "decision_status": "ARCHITECTURE_DECISION_ASSIGNED",
+      "finding_id": "missing_remaining_counter_unlocks_fail_open",
+      "implementation_sprint": 84,
+      "resolved_in_product": false,
+      "verification_contract": "missing or malformed dependency topology produces zero child mutation and one durable reconciliation candidate"
+    },
+    {
+      "decision_status": "ARCHITECTURE_DECISION_ASSIGNED",
+      "finding_id": "ready_marker_strands_pending_child",
+      "implementation_sprint": 84,
+      "resolved_in_product": false,
+      "verification_contract": "ready marker cannot authorize or suppress child state and queue projection is replayable"
+    }
+  ],
+  "graph_topology_authority": {
+    "active_run_topology_mutation": "FORBIDDEN_UNLESS_SEPARATE_ACCEPTED_GRAPH_REVISION_PROTOCOL",
+    "expected_parent_edge_set_mutability": "IMMUTABLE_AFTER_CHILD_ADMISSION",
+    "graph_identity_format": "run:{run_id}:graph",
+    "graph_revision_or_topology_hash": "REQUIRED_IMMUTABLE_SNAPSHOT_IDENTIFIER",
+    "missing_graph_identity": "FAIL_CLOSED",
+    "missing_topology_revision_or_hash": "FAIL_CLOSED",
+    "owner": "CHILD_TASK_AGGREGATE_FOR_EXPECTED_PARENT_EDGE_SET"
+  },
+  "human_architecture_acceptance": "NOT_READY",
+  "immutable_evidence": {
+    "aggregate_boundary_sha256": "ac5ab01455a3e8acb6bc0043167849e398df393819f5b4cdf14e9770dea9f478",
+    "artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+    "global_result": "CROSS_TASK_MUTATION_WITHOUT_CHILD_AUTHORITY_RECORD",
+    "observation_count": 8,
+    "source_branch": "sprint/80b-executable-reconciliation",
+    "source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412"
+  },
+  "logical_edge_resolution_authority": {
+    "atomicity": "RESOLUTION_RECEIPT_CHILD_EFFECT_REVISION_AND_RECORD_ONE_CHILD_AGGREGATE_COMMIT",
+    "key": "logical_edge_id",
+    "owner": "CHILD_TASK_AGGREGATE",
+    "value": {
+      "accepted_edge_command_id": "REQUIRED",
+      "accepted_outcome": "REQUIRED",
+      "accepted_parent_transition_id": "REQUIRED",
+      "applied_child_revision": "REQUIRED",
+      "graph_identity": "REQUIRED",
+      "graph_revision_or_topology_hash": "REQUIRED"
+    },
+    "when_logical_edge_resolution_absent": {
+      "atomic_commit": [
+        "logical_edge_resolution",
+        "outcome_aware_edge_receipt",
+        "child_state_effect",
+        "child_revision",
+        "one_canonical_transition_record"
+      ],
+      "validate_topology": "REQUIRED"
+    },
+    "when_logical_edge_resolved_by_different_command": {
+      "child_mutation": 0,
+      "durable_conflict_record": "REQUIRED",
+      "reconciliation_candidate": "REQUIRED",
+      "result": "CONTRADICTION",
+      "retry": "STOP"
+    },
+    "when_same_edge_command_id_exists": {
+      "canonical_record_count": 0,
+      "child_mutation": 0,
+      "result": "ALREADY_APPLIED",
+      "retry": "STOP",
+      "revision_increment": 0
+    }
+  },
+  "migration_constraints": {
+    "dual_write_authority": false,
+    "phase_1": "SHADOW_PROCESS_MANAGER_ZERO_PRODUCT_WRITES",
+    "phase_2": "CHILD_ADMISSION_TOPOLOGY_AUTHORITY_AND_COMMAND_RECEIPTS_BEHIND_SINGLE_WRITER_GATE",
+    "phase_3": "DIRECT_PARENT_TO_CHILD_WRITES_DISABLED_BEFORE_PROCESS_MANAGER_AUTHORITY",
+    "rollback_after_cutover": "RECONCILIATION_REQUIRED_NEVER_REENABLE_BLIND_COUNTER_DECREMENT",
+    "rollback_before_first_child_revision": "LEGACY_PATH_ALLOWED_ONLY_BEFORE_ANY_NEW_CHILD_REVISION"
+  },
+  "physical_identity_strategy": {
+    "collision_rule": "EXISTING_TASK_ID_WITH_DIFFERENT_RUN_ID_REJECT_ADMISSION",
+    "existing_key_examples": [
+      "hfa:dag:task:<task_id>:state",
+      "hfa:dag:task:<task_id>:meta",
+      "hfa:dag:task:<task_id>:output"
+    ],
+    "future_rekey_requires": "SEPARATE_ACCEPTED_MIGRATION_PROTOCOL_WITH_COMPATIBILITY_READS_WRITER_CUTOVER_RECONCILIATION_AND_ROLLBACK",
+    "logical_identity": "run_id_plus_task_id",
+    "physical_key_layout": "EXISTING_TASK_ID_KEYS_TEMPORARILY_RETAINED",
+    "physical_rekey_in_80C2": "NOT_SELECTED",
+    "required_invariant": "TASK_ID_GLOBALLY_UNIQUE_ACROSS_ALL_RUNS"
+  },
+  "predecessor_governance": {
+    "acceptance_comment_id": 5083135387,
+    "acceptance_type": "POST_MERGE_HUMAN_ARCHITECTURE_ACCEPTANCE",
+    "accepted_head_candidate": "9ad9503badd72afb0a935dbb8c02e828ea02d3e2",
+    "decision_id": "ADR-080C1",
+    "human_architecture_acceptance": "ACCEPT",
+    "merge_commit": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6",
+    "run_lifecycle_truth_owner_candidate": "RUN_STATE_AUTHORITY",
+    "status": "VERIFIED",
+    "task_lifecycle_truth_owner_candidate": "TASK_STATE_AUTHORITY",
+    "accepted_head": "9ad9503badd72afb0a935dbb8c02e828ea02d3e2"
+  },
+  "process_manager_contract": {
+    "direct_redis_child_key_mutation": false,
+    "fanout_unit": "ONE_COMMAND_PER_PARENT_CHILD_EDGE",
+    "input": "PARENT_CANONICAL_TRANSITION_OR_ATOMIC_OUTBOX_ENTRY",
+    "replay": "REBUILD_PENDING_COMMANDS_FROM_PARENT_FANOUT_INTENT_AND_CHILD_RECEIPTS_AND_COORDINATION_DISPOSITIONS",
+    "retry": "UNTIL_EDGE_RECEIPT_OR_DURABLE_TERMINAL_DISPOSITION",
+    "retry_termination_records": [
+      "OUTCOME_AWARE_EDGE_RECEIPT",
+      "DURABLE_TERMINAL_DISPOSITION",
+      "DURABLE_CONFLICT_RECORD"
+    ],
+    "task_truth_authority": false
+  },
+  "product_implementation_authorized": false,
+  "ready_projection_contract": {
+    "authority": "CHILD_STATE_AND_CHILD_REVISION",
+    "legacy_marker_conflict": "FAIL_CLOSED_AND_EXPLICIT_RECONCILIATION_BEFORE_MIGRATION_CUTOVER",
+    "marker_can_authorize_or_suppress_state_transition": false,
+    "missing_queue_projection": "REPLAY_FROM_CANONICAL_READY_TRANSITION",
+    "ready_emitted_marker_role": "NON_AUTHORITATIVE_PROJECTION_RECEIPT_BOUND_TO_READY_TRANSITION_ID"
+  },
+  "repair_and_replay": {
+    "count_set_mismatch": "REJECT_ADMISSION_OR_RECONCILIATION_REQUIRED",
+    "lost_fanout_delivery": "REPLAY_FROM_DURABLE_PARENT_TRANSITION_OR_OUTBOX",
+    "lost_ready_projection": "REPLAY_FROM_CHILD_READY_TRANSITION",
+    "marker_state_conflict": "EXPLICIT_RECONCILIATION",
+    "missing_expected_parent_set": "FAIL_CLOSED",
+    "missing_remaining_counter": "COUNTER_IS_NOT_AUTHORITY_NO_DECREMENT_OR_CLAMP_ALLOWED",
+    "orphan_edge_receipt": "REJECT_UNLESS_PARENT_TRANSITION_GRAPH_EDGE_AND_TOPOLOGY_HASH_VALIDATE"
+  },
+  "schema_version": 3,
+  "selected_model": {
+    "child_revision_owner": "CHILD_TASK_AGGREGATE",
+    "delivery_semantics": "AT_LEAST_ONCE_EDGE_COMMAND_DELIVERY_IDEMPOTENT_EXACTLY_ONCE_CHILD_EFFECT",
+    "direct_parent_to_child_authority_mutation": "FORBIDDEN",
+    "distributed_transaction_across_tasks": false,
+    "logical_task_aggregate_identity": "task:{run_id}:{task_id}",
+    "name": "INDEPENDENT_TASK_AGGREGATES_WITH_DURABLE_DEPENDENCY_PROCESS_MANAGER",
+    "parent_revision_owner": "PARENT_TASK_AGGREGATE",
+    "process_manager_role": "DURABLE_COORDINATION_ONLY_NOT_TASK_TRUTH_AUTHORITY"
+  },
+  "source_bindings": [
+    {
+      "blob_sha": "ebc15272498fafbe115c164df4075257c090d539",
+      "path": "docs/adr/sprint80/ADR-080C-decision-package.md",
+      "purpose": "aggregate-boundary decision requirement"
+    },
+    {
+      "blob_sha": "659f77af1c8a99cf63626318cb050ac711352b74",
+      "path": "docs/adr/sprint80/ADR-080C1-runtime-truth-authority.md",
+      "purpose": "merged predecessor with verified post-merge human acceptance comment 5083135387"
+    },
+    {
+      "blob_sha": "1d519c10f952907d4ac7a73e0854cff913a61eb6",
+      "path": "scripts/sprint80/aggregate_boundary.py",
+      "purpose": "frozen evidence model"
+    },
+    {
+      "blob_sha": "7462e70146923711937eacf801af7cee778ae0eb",
+      "path": "tests/diagnostics/sprint80/test_80_07_aggregate_boundary.py",
+      "purpose": "real Redis boundary observations"
+    },
+    {
+      "blob_sha": "4a07352e33424e32332c916acdfd29e02b3eb71b",
+      "path": "tests/diagnostics/sprint80/test_80_04_transition_cardinality.py",
+      "purpose": "absence of canonical revision evidence"
+    },
+    {
+      "blob_sha": "8ee2b51cd94642f56d5e38680419a2e3988b26a9",
+      "path": "hfa-core/src/hfa/lua/task_complete.lua",
+      "purpose": "current direct cross-task mutation"
+    },
+    {
+      "blob_sha": "e5bd30953f4c7c3258e589d240113295f8bccadc",
+      "path": "hfa-core/src/hfa/lua/task_admit.lua",
+      "purpose": "current counter and marker admission"
+    },
+    {
+      "blob_sha": "cd657e4b37975c3cf3080a221222c6f8caf56fec",
+      "path": "hfa-core/src/hfa/dag/schema.py",
+      "purpose": "logical versus physical key topology"
+    }
+  ],
+  "terminal_state_command_disposition": {
+    "blocked_by_failure": {
+      "different_edge_canonical_transition_record_count": 0,
+      "different_edge_child_mutation": 0,
+      "different_edge_child_revision_increment": 0,
+      "different_edge_command": "TERMINAL_CHILD_ALREADY_BLOCKED",
+      "disposition_identity": "edge_command_id",
+      "disposition_owner": "DEPENDENCY_PROCESS_MANAGER_COORDINATION_STATE",
+      "durable_disposition_record": "REQUIRED",
+      "retry": "STOP",
+      "same_command": "ALREADY_APPLIED"
+    },
+    "dead_lettered": {
+      "child_mutation": 0,
+      "durable_disposition_record": "REQUIRED",
+      "missing_authority_evidence": "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION",
+      "required_authority_evidence": [
+        "terminal_transition_id",
+        "child_state_authority_revision"
+      ],
+      "retry": "STOP",
+      "unsatisfied_edge_command": "TERMINAL_CHILD_NOOP"
+    },
+    "done": {
+      "child_mutation": 0,
+      "durable_conflict_record": "REQUIRED",
+      "reconciliation_candidate": "REQUIRED",
+      "retry": "STOP",
+      "unsatisfied_edge_command": "CONTRADICTION"
+    },
+    "failed": {
+      "child_mutation": 0,
+      "durable_conflict_record": "REQUIRED",
+      "reconciliation_candidate": "REQUIRED",
+      "retry": "STOP",
+      "unsatisfied_edge_command": "CONTRADICTION"
+    },
+    "skipped": {
+      "child_mutation": 0,
+      "durable_disposition_record": "REQUIRED",
+      "missing_authority_evidence": "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION",
+      "required_authority_evidence": [
+        "terminal_transition_id",
+        "child_state_authority_revision"
+      ],
+      "retry": "STOP",
+      "unsatisfied_edge_command": "TERMINAL_CHILD_NOOP"
+    }
+  },
+  "title": "Aggregate Boundary and Parent-Child Coordination",
+  "transaction_boundaries": {
+    "child_admission": {
+      "atomic_commit_members": [
+        "child_identity",
+        "child_initial_state",
+        "expected_parent_edge_set",
+        "dependency_policy",
+        "graph_identity",
+        "graph_revision_or_topology_hash",
+        "child_initial_revision",
+        "one_canonical_admission_record"
+      ],
+      "authority_scope": "ONE_CHILD_TASK_AGGREGATE",
+      "count_set_mismatch": "REJECT_ADMISSION_OR_RECONCILIATION_REQUIRED",
+      "dependency_count_authority": false,
+      "dependency_count_rule": "MUST_EQUAL_CARDINALITY_OF_EXPECTED_PARENT_EDGE_SET",
+      "expected_parent_edge_set_mutability": "IMMUTABLE_AFTER_ADMISSION",
+      "expected_parent_edge_set_owner": "CHILD_TASK_AGGREGATE",
+      "missing_expected_parent_set": "FAIL_CLOSED"
+    },
+    "child_dependency_application": {
+      "atomic_commit_members": [
+        "logical_edge_resolution",
+        "outcome_aware_edge_receipt",
+        "child_dependency_state",
+        "child_state_if_changed",
+        "child_revision",
+        "one_canonical_transition_record",
+        "ready_projection_intent_if_ready"
+      ],
+      "authority_scope": "ONE_CHILD_TASK_AGGREGATE",
+      "parent_authority_keys_mutated": 0,
+      "sibling_authority_keys_mutated": 0
+    },
+    "parent_completion": {
+      "atomic_commit_members": [
+        "parent_state",
+        "parent_meta",
+        "parent_output",
+        "parent_revision",
+        "one_canonical_transition_record",
+        "durable_dependency_fanout_intent"
+      ],
+      "authority_scope": "ONE_PARENT_TASK_AGGREGATE",
+      "child_authority_keys_mutated": 0,
+      "sibling_authority_keys_mutated": 0
+    }
+  },
+  "verification_contracts": {
+    "admission_commit_boundary_decided": true,
+    "atomic_boundaries_decided": true,
+    "blocked_child_late_edge_disposition_decided": true,
+    "canonical_command_identity_count": 1,
+    "dependency_count_authority": 0,
+    "different_outcome_double_application_possible": false,
+    "direct_cross_task_authority_mutation": 0,
+    "expected_edge_set_immutable": true,
+    "failed_outcome_decided": true,
+    "finding_count": 2,
+    "findings_resolved_in_product": 0,
+    "graph_identity_required": true,
+    "implementation_claims": 0,
+    "logical_edge_resolution_authority_decided": true,
+    "logical_identity_decided": true,
+    "physical_key_strategy_decided": true,
+    "predecessor_acceptance_record_present": true,
+    "predecessor_human_acceptance_verified": true,
+    "process_manager_retry_termination_decided": true,
+    "product_source_mutation": 0,
+    "revision_owners_decided": true,
+    "same_logical_edge_conflict_check_atomic": true,
+    "satisfied_outcome_decided": true,
+    "selected_model_decided": true,
+    "technical_unresolved_choice": 0,
+    "terminal_state_vocabulary_mapping_complete": true,
+    "topology_authority_owner_decided": true,
+    "topology_revision_or_hash_required": true
+  }
+}

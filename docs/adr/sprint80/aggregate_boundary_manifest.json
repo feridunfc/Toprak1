@@ -1,0 +1,53 @@
+{
+  "aggregate_evidence_sha256": "ac5ab01455a3e8acb6bc0043167849e398df393819f5b4cdf14e9770dea9f478",
+  "artifacts": [
+    {
+      "path": ".github/workflows/sprint80c2-aggregate-boundary.yml",
+      "sha256": "ac0957adcf0ca19b7cbc2a77c8c0f82d4702eed1403bfc8604bbd2a879dd7f5e",
+      "size_bytes": 1483
+    },
+    {
+      "path": "docs/adr/sprint80/ADR-080C2-aggregate-boundary.md",
+      "sha256": "bbf468d348b29f3a37d1982057bdd74c05f25c80c26710cff98f5851096d2709",
+      "size_bytes": 10805
+    },
+    {
+      "path": "docs/adr/sprint80/evidence/aggregate_boundary.run93.json",
+      "sha256": "ac5ab01455a3e8acb6bc0043167849e398df393819f5b4cdf14e9770dea9f478",
+      "size_bytes": 8887
+    },
+    {
+      "path": "docs/adr/sprint80/aggregate_boundary_matrix.json",
+      "sha256": "5cbdae45b80a53798e6741ed9157797df8be96efa3abd8c37daebd72ab182bfb",
+      "size_bytes": 17711
+    },
+    {
+      "path": "scripts/sprint80c/validate_aggregate_boundary.py",
+      "sha256": "c020bb47a928b6e7974bb3dd582f2b78230d5fb83e22eec31e1556dddd62af9a",
+      "size_bytes": 20472
+    },
+    {
+      "path": "tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py",
+      "sha256": "5b807e3f8f7dd7537ad3a481b6de235bf97e45c29544a0ad82c9779ea6a26c20",
+      "size_bytes": 13113
+    }
+  ],
+  "base_branch": "baseline/local-import",
+  "base_head": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6",
+  "branch": "sprint/80c2-aggregate-boundary",
+  "bundle_index_algorithm": "sorted_utf8_lines:path\\0size_bytes\\0sha256\\n",
+  "bundle_index_sha256": "a06bd8bb4f5b1fd16add53ab688049a2285aa648fcff37875d8573adf821ea4a",
+  "decision_id": "ADR-080C2",
+  "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+  "frozen_source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+  "human_architecture_acceptance": "NOT_READY",
+  "implementation_authorized": false,
+  "predecessor_acceptance_record_present": true,
+  "predecessor_human_acceptance": "ACCEPT",
+  "product_source_mutation": 0,
+  "schema_version": 3,
+  "predecessor_acceptance_verified": true,
+  "predecessor_acceptance_comment_id": 5083135387,
+  "predecessor_accepted_head": "9ad9503badd72afb0a935dbb8c02e828ea02d3e2",
+  "predecessor_merge_commit": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6"
+}

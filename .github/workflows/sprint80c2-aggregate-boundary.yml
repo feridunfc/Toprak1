@@ -1,0 +1,43 @@
+name: Sprint 80C.2 Aggregate Boundary
+
+on:
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint80c2-aggregate-boundary.yml
+      - docs/adr/sprint80/ADR-080C2-aggregate-boundary.md
+      - docs/adr/sprint80/evidence/aggregate_boundary.run93.json
+      - docs/adr/sprint80/aggregate_boundary_manifest.json
+      - docs/adr/sprint80/aggregate_boundary_matrix.json
+      - scripts/sprint80c/validate_aggregate_boundary.py
+      - tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py
+
+permissions:
+  contents: read
+
+jobs:
+  aggregate-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependency
+        run: python -m pip install pytest
+      - name: Run Sprint 80C.2 package tests
+        run: python -m pytest tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py -q
+      - name: Validate Sprint 80C.2 package and source bindings
+        run: >-
+          python scripts/sprint80c/validate_aggregate_boundary.py
+          --repo-root .
+          --verify-source-bindings
+          --verify-git-scope
+      - name: Check patch whitespace
+        run: git diff --check 9d7c7a6ad52a8a546a708dda048f28d4e23befc6...HEAD
