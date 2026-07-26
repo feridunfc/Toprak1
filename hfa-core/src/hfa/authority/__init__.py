@@ -1,5 +1,4 @@
 """Aggregate authority primitives."""
-
 from .canonical_transition import (
     OPERATION_CONTRACTS,
     AggregateType,
@@ -9,6 +8,7 @@ from .canonical_transition import (
     AuthorityDecision,
     AuthorityDecisionCode,
     AuthorityEntryContext,
+    AuthorityEvaluation,
     CanonicalAggregateIdentity,
     CanonicalStoreDecision,
     CanonicalTransitionRecord,
@@ -23,7 +23,9 @@ from .canonical_transition import (
     canonical_json_sha256,
     classify_canonical_store_write,
     evaluate_authority_command,
+    evaluate_authority_commit,
     evaluate_projection_application,
+    validate_canonical_transition_record,
     validate_operation_contract,
 )
 
@@ -36,6 +38,7 @@ __all__ = [
     "AuthorityDecision",
     "AuthorityDecisionCode",
     "AuthorityEntryContext",
+    "AuthorityEvaluation",
     "CanonicalAggregateIdentity",
     "CanonicalStoreDecision",
     "CanonicalTransitionRecord",
@@ -50,6 +53,8 @@ __all__ = [
     "canonical_json_sha256",
     "classify_canonical_store_write",
     "evaluate_authority_command",
+    "evaluate_authority_commit",
     "evaluate_projection_application",
+    "validate_canonical_transition_record",
     "validate_operation_contract",
 ]

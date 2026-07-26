@@ -3,80 +3,104 @@
 ## Status
 
 ```yaml
-sprint: 81.1
-implementation_authorization: EXPLICIT_USER_COMMAND_START
-base_branch: baseline/local-import
+implementation_slice: 81.1
 base_head: 75b7010f3dde2ee07aa123398eac903b5c6b0cd4
-branch: sprint/81-1-canonical-transition-core
-status: IMPLEMENTATION_IN_PROGRESS
-product_source_mutation: true
+scope: PERSISTENCE_INDEPENDENT_AUTHORITY_CORE
 redis_lua_mutation: false
 runtime_cutover: false
 production_ready_claim: false
+independent_implementation_review: REQUIRED
+human_merge_decision: REQUIRED
 ```
 
-Sprint 80C.1, 80C.2 and 80C.3 are accepted and merged. This slice begins the
-separately authorized Sprint 81 implementation without silently converting the
-legacy Redis/Lua paths.
+## Implemented boundary
 
-## Goal
+Sprint 81.1 implements the pure authority core accepted by ADR-080C.3:
 
-Implement the persistence-independent authority core required by ADR-080C.3:
+- collision-safe task/run aggregate identity;
+- RFC 8785 JCS command and record hashing with NFC input normalization;
+- exact fifteen-operation contract registry;
+- authentication, capability, target-identity and optional fence outer gate;
+- receipt-first idempotency before revision comparison;
+- strict contiguous aggregate revision CAS;
+- immutable canonical transition record and operation receipt;
+- one-revision, one-record and one-receipt commit plan;
+- canonical-store and projection collision classification.
 
-- canonical task/run aggregate identity and collision-safe component hashing;
-- RFC 8785 JCS command and record hashing after UTF-8 NFC input normalization;
-- exact fifteen-operation registry and operation-specific state contracts;
-- authority-entry authentication, capability, target-identity and fence gate;
-- receipt lookup before revision comparison;
-- duplicate, idempotency-conflict, stale, future and corruption outcomes;
-- strict contiguous aggregate revision planning;
-- immutable canonical transition record and operation receipt generation;
-- one-record/one-receipt/one-revision authority commit plan;
-- canonical-store collision and projection application classification.
+## Final review hardening
 
-## Exact scope
+The correction closes the independent review's five P0 findings and type-hardening requirement.
 
-```text
-.github/workflows/sprint81-canonical-transition-core.yml
-docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
-hfa-core/pyproject.toml
-hfa-core/src/hfa/authority/__init__.py
-hfa-core/src/hfa/authority/canonical_transition.py
-hfa-core/tests/authority/test_canonical_transition.py
+```yaml
+authority_provenance:
+  public_commit_entrypoint: evaluate_authority_commit
+  caller_constructed_ACCEPTED_decision: FORBIDDEN
+  caller_constructed_commit_plan: FORBIDDEN
+  authorized_writer_source: AuthorityEntryContext.authenticated_writer_id
+
+canonical_store:
+  candidate_semantic_validation_before_empty_insert: REQUIRED
+  invalid_candidate: CANONICAL_RECORD_CORRUPTION_CONFLICT
+
+receipt_duplicate_proof:
+  hash_only_probe: FORBIDDEN
+  actual_canonical_record: REQUIRED
+  record_hash_and_semantics: VERIFIED
+  receipt_record_command_identity: FULL_MATCH
+
+canonical_record:
+  direct_unvalidated_constructor: FORBIDDEN
+  validator: validate_canonical_transition_record
+  validator_used_by_factory: true
+  validator_used_by_store: true
+  validator_used_by_receipt_probe: true
+  validator_used_by_projection: true
+
+canonical_command_hash:
+  aggregate_identity_binding:
+    - structured_aggregate_identity
+    - canonical_aggregate_identity_sha256
+
+primitive_validation:
+  revision_and_timestamp: EXACT_INT_NOT_BOOL_NONNEGATIVE_JCS_SAFE
+  fence_fields: EXACT_BOOL
+  aggregate_type: EXACT_ENUM
 ```
+
+## Single authority entrypoint
+
+`evaluate_authority_commit(...)` performs the complete sequence:
+
+1. validate the outer authority gate;
+2. resolve and verify a durable receipt plus its actual canonical record;
+3. distinguish duplicate, idempotency conflict and corruption;
+4. compare expected and current aggregate revision;
+5. validate the operation-specific state and projection-intent contract;
+6. create the immutable record, receipt and commit plan internally.
+
+`AuthorityDecision` remains an informational result. It cannot be caller-constructed and is never accepted as input to create a commit plan. `AuthorityCommitPlan.create(...)` does not exist.
 
 ## Deliberate exclusions
 
-This slice does **not**:
+This slice does not:
 
-- modify `task_admit.lua`, `task_complete.lua` or any other runtime Lua script;
-- select the physical Redis canonical-store layout;
-- deploy an aggregate authority commit script;
-- migrate existing task/run keys or synthesize historical revisions;
-- change scheduler, worker, process-manager or transport behavior;
-- enable runtime cutover or make a production-readiness claim.
+- modify any Redis/Lua script;
+- select a physical canonical-store key layout;
+- synthesize historical revisions;
+- change scheduler, worker, process-manager or transport runtime behavior;
+- authorize migration, runtime cutover or production readiness.
 
-Those changes require later bounded Sprint 81 slices after this core is reviewed.
-
-## Contract notes
-
-`rfc8785==0.1.4` is pinned because command and record hashes are authority
-identities. Caller-owned nested payloads are normalized and deeply frozen at
-command construction so later caller mutation cannot change a command hash.
-
-The pure evaluator returns mutation cardinalities but performs no persistence.
-`AuthorityCommitPlan` is the handoff contract for a later Redis/Lua atomic
-implementation; it binds exactly one revision increment, one canonical record
-and one immutable operation receipt.
-
-## Exit criteria
+## Focused verification
 
 ```yaml
-exact_operation_contracts: 15
-canonical_core_tests: PASS
+focused_tests: 60_PASSED
 compileall: PASS
-package_specific_CI: PASS_REQUIRED
-authority_gate: PASS_REQUIRED
-independent_code_review: REQUIRED
-human_merge_decision: REQUIRED
+required_negative_cases:
+  - forged_ACCEPTED_decision
+  - empty_store_invalid_candidate
+  - fake_matching_receipt_hash
+  - semantically_invalid_self_hashed_record
+  - delimiter_collision_command_hash
+  - bool_negative_and_unsafe_revision
+  - non_boolean_fence_fields
 ```
