@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "decision_id": "ADR-080C3",
+  "decision_status": "TECHNICAL_RECOMMENDATION_INDEPENDENT_REVIEW_REQUIRED",
+  "base_head": "956c3247d5ceaaa0697547a31950918cce38fcd9",
+  "predecessors": {
+    "ADR-080C1": {
+      "status": "ACCEPTED_MERGED_COMPLETE",
+      "acceptance_comment_id": 5083135387,
+      "merge_commit": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6"
+    },
+    "ADR-080C2": {
+      "status": "ACCEPTED_MERGED_COMPLETE",
+      "acceptance_comment_id": 5083381947,
+      "merge_commit": "956c3247d5ceaaa0697547a31950918cce38fcd9"
+    }
+  },
+  "evidence": {
+    "source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+    "artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+    "transition_cardinality_sha256": "40325ea57afab4d1c4c31e009de7f7eba4c369e025bf6ccaa73d9a52432f35cb",
+    "operation_count": 9,
+    "canonical_transition_record_count": 0,
+    "aggregate_revision_evidence_count": 0
+  },
+  "transition_identity": {
+    "format": "{aggregate_type}:{aggregate_id}:{next_revision}:{operation_id}",
+    "uniqueness_scope": "GLOBAL",
+    "operation_id_role": "STABLE_IDEMPOTENCY_IDENTITY"
+  },
+  "revision_contract": {
+    "initial_revision": 0,
+    "first_committed_transition_revision": 1,
+    "next_revision_rule": "previous_revision + 1",
+    "monotonicity": "STRICT_CONTIGUOUS",
+    "gap": "FORBIDDEN",
+    "reuse": "FORBIDDEN",
+    "regression": "FORBIDDEN",
+    "expected_revision_required": true
+  },
+  "record_required_fields": [
+    "schema_version",
+    "transition_id",
+    "aggregate_type",
+    "aggregate_id",
+    "aggregate_revision",
+    "operation_type",
+    "operation_id",
+    "previous_state",
+    "next_state",
+    "child_effects",
+    "causation_id",
+    "correlation_id",
+    "writer_id",
+    "committed_at_ms",
+    "metadata"
+  ],
+  "commit_cardinality": {
+    "successful_lifecycle_mutation": {
+      "revision_increment": 1,
+      "canonical_record_count": 1
+    },
+    "rejected_duplicate_or_stale": {
+      "revision_increment": 0,
+      "canonical_record_count": 0
+    }
+  },
+  "duplicate_contract": {
+    "same_operation_same_payload": "ALREADY_APPLIED_RETURN_EXISTING_TRANSITION",
+    "same_operation_different_payload": "IDEMPOTENCY_CONFLICT_FAIL_CLOSED",
+    "same_transition_different_record": "CORRUPTION_CONFLICT_FAIL_CLOSED"
+  },
+  "projection_contract": {
+    "next_contiguous_revision": "APPLY",
+    "duplicate_or_older_revision": "DUPLICATE_NOOP",
+    "revision_gap": "FAIL_CLOSED_AND_REPLAY_REQUIRED"
+  },
+  "finding_dispositions": [
+    {
+      "finding_id": "no_verified_canonical_transition_record",
+      "resolved_in_product": false,
+      "implementation_sprint": 81
+    },
+    {
+      "finding_id": "no_aggregate_revision_evidence",
+      "resolved_in_product": false,
+      "implementation_sprint": 81
+    }
+  ],
+  "human_architecture_acceptance": "PENDING",
+  "merge_authorized": false,
+  "product_implementation_authorized": false,
+  "sprint81_implementation_authorized": false
+}
