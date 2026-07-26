@@ -1,0 +1,83 @@
+name: Temporary 80C.3 Final Correction Assembler
+
+on:
+  push:
+    branches:
+      - sprint/80c3-canonical-transition-revision
+    paths:
+      - .github/workflows/temp-correct-80c3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  correct:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout correction branch
+        uses: actions/checkout@v4
+        with:
+          ref: sprint/80c3-canonical-transition-revision
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependency
+        run: python -m pip install pytest
+      - name: Reconstruct and verify correction package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/80c3/chunk_* | tr -d '\n' | base64 -d > /tmp/80c3-correction.tar.gz
+          echo '605ba45d70d7177eace0fa83d525a0c162ee4ebe99de3387cf53068756c7fbd0  /tmp/80c3-correction.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/80c3-correction.tar.gz -C .
+          cat > /tmp/expected.sha256 <<'EOF'
+          4033c02b7dbf0c924f2a7c11c06a29e0fe51870870ffc22e7bf9edbbd77ff290  docs/adr/sprint80/ADR-080C3-canonical-transition-revision.md
+          75d9c12a2967cdfdf46527a9bef392f16ff8c6864ef80ba8231233202b17a25b  docs/adr/sprint80/STATUS_UPDATE_80C2_80C3.md
+          379e4a28e0e4546b2a8e7de93f1dc0b5379341fb6ae70cf6e5004813cc8c92f0  docs/adr/sprint80/canonical_transition_revision_manifest.json
+          836ce0aa58f7b3213b44efe447aef92d7ed0023716c2cbc6d18e0c5c5e5a1077  docs/adr/sprint80/canonical_transition_revision_matrix.json
+          463cd74afdc3893c22ab98b4dccd51a965752f1904a90872771b83527b164bde  scripts/sprint80c/validate_canonical_transition_revision.py
+          802245c4fed7ab0c15470d117a8bcbfe1ae65bfcda3ef2ad0eaee5a13fbf2c62  tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py
+          EOF
+          sed -i 's/^          //' /tmp/expected.sha256
+          sha256sum -c /tmp/expected.sha256
+      - name: Run corrected package tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py -q
+      - name: Validate corrected package and source bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/sprint80c/validate_canonical_transition_revision.py \
+            --repo-root . \
+            --verify-source-bindings \
+            --changed-path .github/workflows/sprint80c3-canonical-transition-revision.yml \
+            --changed-path docs/adr/sprint80/ADR-080C3-canonical-transition-revision.md \
+            --changed-path docs/adr/sprint80/STATUS_UPDATE_80C2_80C3.md \
+            --changed-path docs/adr/sprint80/evidence/transition_cardinality.run93.json \
+            --changed-path docs/adr/sprint80/canonical_transition_revision_matrix.json \
+            --changed-path docs/adr/sprint80/canonical_transition_revision_manifest.json \
+            --changed-path scripts/sprint80c/validate_canonical_transition_revision.py \
+            --changed-path tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py
+          git diff --check
+      - name: Commit corrected package and remove staging files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -rf .tmp/80c3
+          git rm .github/workflows/temp-correct-80c3.yml
+          git add docs/adr/sprint80/ADR-080C3-canonical-transition-revision.md
+          git add docs/adr/sprint80/STATUS_UPDATE_80C2_80C3.md
+          git add docs/adr/sprint80/canonical_transition_revision_manifest.json
+          git add docs/adr/sprint80/canonical_transition_revision_matrix.json
+          git add scripts/sprint80c/validate_canonical_transition_revision.py
+          git add tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py
+          git add -A .tmp/80c3
+          git diff --cached --check
+          git commit -m 'docs(sprint80c): correct final architecture authority contracts'
+          git push origin HEAD:sprint/80c3-canonical-transition-revision
