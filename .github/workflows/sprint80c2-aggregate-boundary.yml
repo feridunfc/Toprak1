@@ -51,7 +51,10 @@ jobs:
           replacement = """terminal_loop = validator.index('    for state in ("dead_lettered", "skipped"):')
           retry_marker = '            and disposition.get("retry") == "STOP",'
           retry_position = validator.index(retry_marker, terminal_loop)
-          missing_guard = '            and disposition.get("missing_authority_evidence")\n            == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"\n'
+          missing_guard = (
+              '            and disposition.get("missing_authority_evidence")' + chr(10)
+              + '            == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"' + chr(10)
+          )
           validator = validator[:retry_position] + missing_guard + validator[retry_position:]
           """
           source = source[:block_start] + replacement + source[block_end + 1:]
