@@ -1,0 +1,681 @@
+{
+  "aggregate_revision_evidence": [],
+  "aggregate_revision_evidence_count": 0,
+  "audit_base_commit": "2eca85b2d9b115ad4588641b020e98efdd570a2d",
+  "canonical_schema_candidate_matches": [],
+  "canonical_schema_matches": [],
+  "canonical_transition_record_count": 0,
+  "operation_count": 9,
+  "operations": [
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "hfa:dag:run:s80-card-main-run:tasks",
+        "hfa:dag:task:s80-card-main:meta",
+        "hfa:dag:task:s80-card-main:ready_emitted",
+        "hfa:dag:task:s80-card-main:remaining_deps",
+        "hfa:dag:task:s80-card-main:state",
+        "hfa:dag:tenant:s80-card-main-tenant:ready",
+        "hfa:dag:tenants:active"
+      ],
+      "coordination_mutation": 3,
+      "execution_lifecycle_mutation": 1,
+      "notes": [],
+      "operation": "task_admit",
+      "projection_mutation": 3,
+      "records": [],
+      "revision_fields_observed": [],
+      "revision_semantics": [],
+      "revision_values_after": [],
+      "revision_values_before": [],
+      "state_after": "ready",
+      "state_before": "",
+      "transaction_boundary": "single_redis_lua_call",
+      "transport_ack": 0,
+      "transport_append": 0
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "hfa:dag:task:s80-card-main:meta",
+        "hfa:dag:task:s80-card-main:state",
+        "hfa:dag:tenant:s80-card-main-tenant:ready",
+        "hfa:dag:tenant:s80-card-main-tenant:scheduled",
+        "s80:card:stream:control",
+        "s80:card:stream:shard:0"
+      ],
+      "coordination_mutation": 2,
+      "execution_lifecycle_mutation": 1,
+      "notes": [],
+      "operation": "task_dispatch",
+      "projection_mutation": 1,
+      "records": [
+        {
+          "canonical_authority_contract_match": false,
+          "canonical_schema_candidate_match": false,
+          "canonical_schema_match": false,
+          "event_type": "TaskScheduled",
+          "fields": [
+            "agent_type",
+            "event_type",
+            "policy",
+            "region",
+            "run_id",
+            "scheduled_at",
+            "scheduler_epoch",
+            "shard",
+            "task_id",
+            "tenant_id",
+            "trace_parent",
+            "trace_state",
+            "worker_group"
+          ],
+          "primary_class": "RuntimeTransitionNotification",
+          "source": "control_stream",
+          "source_key": "s80:card:stream:control",
+          "transaction_coupled": false,
+          "verified_canonical_transition_record": false
+        },
+        {
+          "canonical_authority_contract_match": false,
+          "canonical_schema_candidate_match": false,
+          "canonical_schema_match": false,
+          "event_type": "TaskRequested",
+          "fields": [
+            "agent_type",
+            "event_type",
+            "payload_json",
+            "priority",
+            "requested_at",
+            "run_id",
+            "scheduler_epoch",
+            "shard",
+            "task_id",
+            "tenant_id",
+            "trace_parent",
+            "trace_state",
+            "worker_group"
+          ],
+          "primary_class": "TransportMessage",
+          "source": "shard_stream",
+          "source_key": "s80:card:stream:shard:0",
+          "transaction_coupled": false,
+          "verified_canonical_transition_record": false
+        }
+      ],
+      "revision_fields_observed": [
+        "scheduler_epoch"
+      ],
+      "revision_semantics": [
+        [
+          "scheduler_epoch",
+          "coordination_fence"
+        ]
+      ],
+      "revision_values_after": [
+        [
+          "scheduler_epoch",
+          "80"
+        ]
+      ],
+      "revision_values_before": [
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "state_after": "scheduled",
+      "state_before": "ready",
+      "transaction_boundary": "single_redis_lua_call",
+      "transport_ack": 0,
+      "transport_append": 1
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "hfa:dag:task:s80-card-main:meta",
+        "hfa:dag:task:s80-card-main:state",
+        "hfa:dag:tenant:s80-card-main-tenant:running",
+        "hfa:dag:tenant:s80-card-main-tenant:scheduled"
+      ],
+      "coordination_mutation": 2,
+      "execution_lifecycle_mutation": 1,
+      "notes": [],
+      "operation": "task_claim",
+      "projection_mutation": 1,
+      "records": [],
+      "revision_fields_observed": [
+        "claim_epoch",
+        "last_heartbeat_at_ms",
+        "scheduler_epoch"
+      ],
+      "revision_semantics": [
+        [
+          "claim_epoch",
+          "coordination_fence"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "liveness_timestamp"
+        ],
+        [
+          "scheduler_epoch",
+          "coordination_fence"
+        ]
+      ],
+      "revision_values_after": [
+        [
+          "claim_epoch",
+          "1"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "3000"
+        ],
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "revision_values_before": [
+        [
+          "claim_epoch",
+          ""
+        ],
+        [
+          "last_heartbeat_at_ms",
+          ""
+        ],
+        [
+          "scheduler_epoch",
+          "80"
+        ]
+      ],
+      "state_after": "running",
+      "state_before": "scheduled",
+      "transaction_boundary": "single_redis_lua_call",
+      "transport_ack": 0,
+      "transport_append": 0
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "hfa:dag:task:s80-card-main:meta",
+        "hfa:dag:tenant:s80-card-main-tenant:running"
+      ],
+      "coordination_mutation": 1,
+      "execution_lifecycle_mutation": 0,
+      "notes": [
+        "heartbeat is coordination/liveness, not a lifecycle transition"
+      ],
+      "operation": "task_heartbeat",
+      "projection_mutation": 1,
+      "records": [],
+      "revision_fields_observed": [
+        "claim_epoch",
+        "heartbeat_at_ms",
+        "last_heartbeat_at_ms",
+        "scheduler_epoch"
+      ],
+      "revision_semantics": [
+        [
+          "claim_epoch",
+          "coordination_fence"
+        ],
+        [
+          "heartbeat_at_ms",
+          "liveness_timestamp"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "liveness_timestamp"
+        ],
+        [
+          "scheduler_epoch",
+          "coordination_fence"
+        ]
+      ],
+      "revision_values_after": [
+        [
+          "claim_epoch",
+          "1"
+        ],
+        [
+          "heartbeat_at_ms",
+          "4000"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "4000"
+        ],
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "revision_values_before": [
+        [
+          "claim_epoch",
+          "1"
+        ],
+        [
+          "heartbeat_at_ms",
+          ""
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "3000"
+        ],
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "state_after": "running",
+      "state_before": "running",
+      "transaction_boundary": "single_redis_lua_call",
+      "transport_ack": 0,
+      "transport_append": 0
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "hfa:dag:task:s80-card-main:meta",
+        "hfa:dag:task:s80-card-main:output",
+        "hfa:dag:task:s80-card-main:state",
+        "hfa:dag:tenant:s80-card-main-tenant:running"
+      ],
+      "coordination_mutation": 1,
+      "execution_lifecycle_mutation": 1,
+      "notes": [],
+      "operation": "task_complete",
+      "projection_mutation": 2,
+      "records": [],
+      "revision_fields_observed": [
+        "claim_epoch",
+        "heartbeat_at_ms",
+        "last_heartbeat_at_ms",
+        "scheduler_epoch"
+      ],
+      "revision_semantics": [
+        [
+          "claim_epoch",
+          "coordination_fence"
+        ],
+        [
+          "heartbeat_at_ms",
+          "liveness_timestamp"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "liveness_timestamp"
+        ],
+        [
+          "scheduler_epoch",
+          "coordination_fence"
+        ]
+      ],
+      "revision_values_after": [
+        [
+          "claim_epoch",
+          "1"
+        ],
+        [
+          "heartbeat_at_ms",
+          "4000"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "4000"
+        ],
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "revision_values_before": [
+        [
+          "claim_epoch",
+          "1"
+        ],
+        [
+          "heartbeat_at_ms",
+          "4000"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "4000"
+        ],
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "state_after": "done",
+      "state_before": "running",
+      "transaction_boundary": "single_redis_lua_call",
+      "transport_ack": 0,
+      "transport_append": 0
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "hfa:dag:task:s80-card-requeue:meta",
+        "hfa:dag:task:s80-card-requeue:state",
+        "hfa:dag:tenant:s80-card-requeue-tenant:ready",
+        "hfa:dag:tenant:s80-card-requeue-tenant:running",
+        "s80:card:stream:completion"
+      ],
+      "coordination_mutation": 2,
+      "execution_lifecycle_mutation": 1,
+      "notes": [],
+      "operation": "task_requeue",
+      "projection_mutation": 1,
+      "records": [
+        {
+          "canonical_authority_contract_match": false,
+          "canonical_schema_candidate_match": false,
+          "canonical_schema_match": false,
+          "event_type": "TaskRequeued",
+          "fields": [
+            "at_ms",
+            "event_type",
+            "reason_code",
+            "requeue_count",
+            "task_id",
+            "tenant_id"
+          ],
+          "primary_class": "RuntimeTransitionNotification",
+          "source": "completion_stream",
+          "source_key": "s80:card:stream:completion",
+          "transaction_coupled": false,
+          "verified_canonical_transition_record": false
+        }
+      ],
+      "revision_fields_observed": [
+        "claim_epoch",
+        "last_heartbeat_at_ms",
+        "requeue_count",
+        "scheduler_epoch"
+      ],
+      "revision_semantics": [
+        [
+          "claim_epoch",
+          "coordination_fence"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "liveness_timestamp"
+        ],
+        [
+          "requeue_count",
+          "retry_counter"
+        ],
+        [
+          "scheduler_epoch",
+          "coordination_fence"
+        ]
+      ],
+      "revision_values_after": [
+        [
+          "claim_epoch",
+          "1"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "0"
+        ],
+        [
+          "requeue_count",
+          "1"
+        ],
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "revision_values_before": [
+        [
+          "claim_epoch",
+          "1"
+        ],
+        [
+          "last_heartbeat_at_ms",
+          "3000"
+        ],
+        [
+          "requeue_count",
+          ""
+        ],
+        [
+          "scheduler_epoch",
+          ""
+        ]
+      ],
+      "state_after": "ready",
+      "state_before": "running",
+      "transaction_boundary": "single_redis_lua_call",
+      "transport_ack": 0,
+      "transport_append": 0
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "hfa:cp:running",
+        "hfa:run:claim:s80-card-legacy-run",
+        "hfa:run:meta:s80-card-legacy-run",
+        "hfa:run:result:s80-card-legacy-run",
+        "hfa:run:state:s80-card-legacy-run",
+        "hfa:stream:results"
+      ],
+      "coordination_mutation": 2,
+      "execution_lifecycle_mutation": 1,
+      "notes": [
+        "legacy path attempts terminal transition twice",
+        "only one observed state value change is committed"
+      ],
+      "operation": "legacy_run_completion_sequence",
+      "projection_mutation": 2,
+      "records": [
+        {
+          "canonical_authority_contract_match": false,
+          "canonical_schema_candidate_match": false,
+          "canonical_schema_match": false,
+          "event_type": "RunCompleted",
+          "fields": [
+            "event_type",
+            "run_id",
+            "tenant_id",
+            "worker_id"
+          ],
+          "primary_class": "EffectResultMessage",
+          "source": "result_stream",
+          "source_key": "hfa:stream:results",
+          "transaction_coupled": false,
+          "verified_canonical_transition_record": false
+        }
+      ],
+      "revision_fields_observed": [],
+      "revision_semantics": [],
+      "revision_values_after": [],
+      "revision_values_before": [],
+      "state_after": "done",
+      "state_before": "running",
+      "transaction_boundary": "multi_command_compatibility_path",
+      "transport_ack": 0,
+      "transport_append": 0
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 0,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [],
+      "coordination_mutation": 1,
+      "execution_lifecycle_mutation": 0,
+      "notes": [
+        "ack_policy=ack_explicit_task_run_terminal_evidence",
+        "terminal state and metadata are read-only during classification"
+      ],
+      "operation": "worker_terminal_duplicate_ack",
+      "projection_mutation": 0,
+      "records": [],
+      "revision_fields_observed": [],
+      "revision_semantics": [],
+      "revision_values_after": [],
+      "revision_values_before": [],
+      "state_after": "done",
+      "state_before": "done",
+      "transaction_boundary": "read_classification_plus_transport_ack",
+      "transport_ack": 1,
+      "transport_append": 0
+    },
+    {
+      "aggregate_revision_candidate": 0,
+      "aggregate_revision_evidence": [],
+      "aggregate_revision_evidence_count": 0,
+      "audit_append": 2,
+      "canonical_transition_record_count": 0,
+      "changed_keys": [
+        "s80:operator-cleanup:runtime",
+        "hfa:control:audit:terminal_duplicate_cleanup"
+      ],
+      "coordination_mutation": 1,
+      "execution_lifecycle_mutation": 0,
+      "notes": [
+        "operator command writes audit intent before XACK",
+        "operator command writes audit outcome after XACK",
+        "task state and task metadata remain unchanged"
+      ],
+      "operation": "operator_terminal_duplicate_cleanup_command",
+      "projection_mutation": 0,
+      "records": [
+        {
+          "canonical_authority_contract_match": false,
+          "canonical_schema_candidate_match": false,
+          "canonical_schema_match": false,
+          "event_type": "terminal_duplicate_cleanup_command",
+          "fields": [
+            "ack_allowed",
+            "ack_count",
+            "ack_executed",
+            "ack_policy",
+            "audit_status",
+            "cleanup_candidate",
+            "cleanup_executed",
+            "command_attempt_id",
+            "dry_run",
+            "event_phase",
+            "event_type",
+            "evidence_reason",
+            "evidence_status",
+            "execute_requested",
+            "group",
+            "metadata_denial_reason_present",
+            "metadata_mutation_type",
+            "operator_reason_length",
+            "operator_reason_present",
+            "pending_message_id",
+            "production_ready_claim",
+            "run_id",
+            "status",
+            "stream",
+            "task_id"
+          ],
+          "primary_class": "AuditEvent",
+          "source": "terminal_duplicate_cleanup_audit",
+          "source_key": "hfa:control:audit:terminal_duplicate_cleanup",
+          "transaction_coupled": false,
+          "verified_canonical_transition_record": false
+        },
+        {
+          "canonical_authority_contract_match": false,
+          "canonical_schema_candidate_match": false,
+          "canonical_schema_match": false,
+          "event_type": "terminal_duplicate_cleanup_command",
+          "fields": [
+            "ack_allowed",
+            "ack_count",
+            "ack_executed",
+            "ack_policy",
+            "audit_status",
+            "cleanup_candidate",
+            "cleanup_executed",
+            "command_attempt_id",
+            "dry_run",
+            "event_phase",
+            "event_type",
+            "evidence_reason",
+            "evidence_status",
+            "execute_requested",
+            "group",
+            "metadata_denial_reason_present",
+            "metadata_mutation_type",
+            "operator_reason_length",
+            "operator_reason_present",
+            "pending_message_id",
+            "production_ready_claim",
+            "run_id",
+            "status",
+            "stream",
+            "task_id"
+          ],
+          "primary_class": "AuditEvent",
+          "source": "terminal_duplicate_cleanup_audit",
+          "source_key": "hfa:control:audit:terminal_duplicate_cleanup",
+          "transaction_coupled": false,
+          "verified_canonical_transition_record": false
+        }
+      ],
+      "revision_fields_observed": [],
+      "revision_semantics": [],
+      "revision_values_after": [],
+      "revision_values_before": [],
+      "state_after": "done",
+      "state_before": "done",
+      "transaction_boundary": "multi_command_audit_intent_evidence_recheck_xack_audit_outcome",
+      "transport_ack": 1,
+      "transport_append": 0
+    }
+  ],
+  "record_class_counts": {
+    "AuditEvent": 2,
+    "CanonicalTransitionRecord": 0,
+    "EffectResultMessage": 1,
+    "EvidenceArtifact": 0,
+    "RuntimeTransitionNotification": 2,
+    "TransportMessage": 1,
+    "Unknown": 0
+  },
+  "schema_version": 2,
+  "verified_canonical_transition_records": []
+}

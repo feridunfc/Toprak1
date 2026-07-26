@@ -1,0 +1,54 @@
+{
+  "artifacts": [
+    {
+      "path": ".github/workflows/sprint80c3-canonical-transition-revision.yml",
+      "sha256": "128608ad58d87f795fd3294c285b782d31ec3f8a67f3ec4abfde483f24b51982",
+      "size_bytes": 1644
+    },
+    {
+      "path": "docs/adr/sprint80/ADR-080C3-canonical-transition-revision.md",
+      "sha256": "4033c02b7dbf0c924f2a7c11c06a29e0fe51870870ffc22e7bf9edbbd77ff290",
+      "size_bytes": 12378
+    },
+    {
+      "path": "docs/adr/sprint80/STATUS_UPDATE_80C2_80C3.md",
+      "sha256": "75d9c12a2967cdfdf46527a9bef392f16ff8c6864ef80ba8231233202b17a25b",
+      "size_bytes": 1765
+    },
+    {
+      "path": "docs/adr/sprint80/evidence/transition_cardinality.run93.json",
+      "sha256": "40325ea57afab4d1c4c31e009de7f7eba4c369e025bf6ccaa73d9a52432f35cb",
+      "size_bytes": 18927
+    },
+    {
+      "path": "docs/adr/sprint80/canonical_transition_revision_matrix.json",
+      "sha256": "836ce0aa58f7b3213b44efe447aef92d7ed0023716c2cbc6d18e0c5c5e5a1077",
+      "size_bytes": 27829
+    },
+    {
+      "path": "scripts/sprint80c/validate_canonical_transition_revision.py",
+      "sha256": "463cd74afdc3893c22ab98b4dccd51a965752f1904a90872771b83527b164bde",
+      "size_bytes": 41295
+    },
+    {
+      "path": "tests/diagnostics/sprint80c/test_80c3_canonical_transition_revision.py",
+      "sha256": "802245c4fed7ab0c15470d117a8bcbfe1ae65bfcda3ef2ad0eaee5a13fbf2c62",
+      "size_bytes": 13776
+    }
+  ],
+  "base_branch": "baseline/local-import",
+  "base_head": "956c3247d5ceaaa0697547a31950918cce38fcd9",
+  "branch": "sprint/80c3-canonical-transition-revision",
+  "bundle_index_algorithm": "sorted_utf8_lines:path\\0size_bytes\\0sha256\\n",
+  "bundle_index_sha256": "2ca40e50fd9f9ef26c89882e9b5bcafe15132ebd739a22fb251308d1b3b671b7",
+  "decision_id": "ADR-080C3",
+  "exact_changed_files": 8,
+  "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+  "frozen_source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+  "human_architecture_acceptance": "PENDING",
+  "implementation_authorized": false,
+  "merge_authorized": false,
+  "product_source_mutation": 0,
+  "schema_version": 2,
+  "transition_cardinality_sha256": "40325ea57afab4d1c4c31e009de7f7eba4c369e025bf6ccaa73d9a52432f35cb"
+}
