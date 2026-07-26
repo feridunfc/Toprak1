@@ -41,6 +41,23 @@ jobs:
           Path('/tmp/harden80c2.py').write_text(script, encoding='utf-8')
           PY
           sed -i 's/if count != 1:/if count < 1:/' /tmp/harden80c2.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('/tmp/harden80c2.py')
+          source = path.read_text(encoding='utf-8')
+          label = '"validator terminal missing authority"'
+          label_position = source.index(label)
+          block_start = source.rfind('validator = replace_once(', 0, label_position)
+          block_end = source.index('\nvalidator = replace_once(', label_position)
+          replacement = '''needle = '            == {"terminal_transition_id", "child_state_authority_revision"}\n            and disposition.get("retry") == "STOP",'
+          terminal_replacement = '            == {"terminal_transition_id", "child_state_authority_revision"}\n            and disposition.get("missing_authority_evidence")\n            == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"\n            and disposition.get("retry") == "STOP",'
+          if needle not in validator:
+              raise RuntimeError("validator terminal missing authority: needle absent")
+          validator = validator.replace(needle, terminal_replacement, 1)
+          '''
+          source = source[:block_start] + replacement + source[block_end + 1:]
+          path.write_text(source, encoding='utf-8')
+          PY
           set +e
           python /tmp/harden80c2.py > /tmp/harden80c2.log 2>&1
           status=$?
