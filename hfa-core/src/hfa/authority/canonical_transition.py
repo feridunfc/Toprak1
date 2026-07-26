@@ -546,17 +546,22 @@ def validate_operation_contract(command: AuthorityCommand) -> OperationContract:
             f"{command.intended_next_state!r}"
         )
     observed_intents = _projection_kinds(command.requested_projection_intents)
-    allowed_intents = (
-        contract.required_projection_intents
-        | contract.conditional_projection_intents
+    active_conditional_intents = frozenset(
+        intent
+        for intent in contract.conditional_projection_intents
+        if intent == "READY_QUEUE_IF_READY"
+        and command.intended_next_state == "ready"
     )
+    allowed_intents = contract.required_projection_intents | active_conditional_intents
     unexpected = observed_intents - allowed_intents
     if unexpected:
         raise AuthorityContractError(
             f"undeclared projection intent for {command.operation_type.value}: "
             f"{sorted(unexpected)}"
         )
-    missing = contract.required_projection_intents - observed_intents
+    missing = (
+        contract.required_projection_intents | active_conditional_intents
+    ) - observed_intents
     if missing:
         raise AuthorityContractError(
             f"missing required projection intents for {command.operation_type.value}: "
@@ -626,6 +631,10 @@ class AuthorityDecision:
     durable_conflict_record_count: int = 0
     reconciliation_candidate: bool = False
     existing_transition_id: str | None = None
+    accepted_command_hash: str | None = None
+    accepted_aggregate_identity_sha256: str | None = None
+    accepted_operation_id: str | None = None
+    authorized_writer_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -747,7 +756,6 @@ class AuthorityCommitPlan:
         decision: AuthorityDecision,
         command: AuthorityCommand,
         *,
-        writer_id: str,
         committed_at_ms: int,
         correlation_id: str | None = None,
     ) -> "AuthorityCommitPlan":
@@ -759,9 +767,18 @@ class AuthorityCommitPlan:
             or decision.aggregate_mutation != 1
         ):
             raise AuthorityContractError("accepted decision has invalid mutation cardinality")
+        if (
+            decision.accepted_command_hash != command.canonical_command_hash
+            or decision.accepted_aggregate_identity_sha256
+            != command.aggregate_identity.sha256
+            or decision.accepted_operation_id != command.operation_id
+        ):
+            raise AuthorityContractError("accepted decision is not bound to command")
+        if decision.authorized_writer_id is None:
+            raise AuthorityContractError("accepted decision has no authorized writer")
         record = CanonicalTransitionRecord.create(
             command,
-            writer_id=writer_id,
+            writer_id=decision.authorized_writer_id,
             committed_at_ms=committed_at_ms,
             correlation_id=correlation_id,
         )
@@ -808,9 +825,26 @@ def evaluate_authority_command(
 
     if receipt_probe is not None:
         receipt = receipt_probe.receipt
-        if receipt.operation_id != command.operation_id:
-            raise AuthorityContractError(
-                "receipt probe operation_id does not match command"
+        expected_revision = command.expected_revision + 1
+        expected_transition_id = (
+            f"ctr:v1:{command.aggregate_identity.sha256}:"
+            f"{expected_revision}:{command.operation_id_sha256}"
+        )
+        receipt_identity_valid = (
+            receipt.operation_id == command.operation_id
+            and receipt.operation_type == command.operation_type.value
+            and receipt.aggregate_revision == expected_revision
+            and receipt.transition_id == expected_transition_id
+            and isinstance(receipt.committed_at_ms, int)
+            and not isinstance(receipt.committed_at_ms, bool)
+            and receipt.committed_at_ms >= 0
+        )
+        if not receipt_identity_valid:
+            return AuthorityDecision(
+                code=AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT,
+                receipt_disclosed=True,
+                durable_conflict_record_count=1,
+                reconciliation_candidate=True,
             )
         if receipt.canonical_command_hash != command.canonical_command_hash:
             return AuthorityDecision(
@@ -858,6 +892,10 @@ def evaluate_authority_command(
         aggregate_mutation=1,
         revision_increment=1,
         canonical_record_count=1,
+        accepted_command_hash=command.canonical_command_hash,
+        accepted_aggregate_identity_sha256=command.aggregate_identity.sha256,
+        accepted_operation_id=command.operation_id,
+        authorized_writer_id=context.authenticated_writer_id,
     )
 
 

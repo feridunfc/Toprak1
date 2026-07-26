@@ -176,7 +176,7 @@ def test_explicit_null_and_empty_object_hash_differ() -> None:
     [
         ("authoritative_metadata_changes", {"tenant_id": "other"}),
         ("requested_child_effects", [{"child": "x"}]),
-        ("requested_projection_intents", []),
+        ("requested_projection_intents", [{"kind": "READY_QUEUE_IF_READY", "task_id": "other"}]),
     ],
 )
 def test_authoritative_effects_are_hash_bound(field: str, value) -> None:
@@ -245,6 +245,19 @@ def test_required_projection_intents_are_enforced() -> None:
 def test_undeclared_projection_intent_is_rejected() -> None:
     with pytest.raises(AuthorityContractError, match="undeclared projection intent"):
         command(requested_projection_intents=[{"kind": "NOT_ALLOWED"}])
+
+
+def test_ready_transition_requires_conditional_projection_intent() -> None:
+    with pytest.raises(AuthorityContractError, match="missing required"):
+        command(requested_projection_intents=[])
+
+
+def test_non_ready_transition_rejects_ready_queue_intent() -> None:
+    with pytest.raises(AuthorityContractError, match="undeclared projection intent"):
+        command(
+            intended_next_state="pending",
+            requested_projection_intents=[{"kind": "READY_QUEUE_IF_READY"}],
+        )
 
 
 def test_outer_gate_rejects_before_receipt_disclosure() -> None:
@@ -346,6 +359,31 @@ def test_receipt_store_hash_mismatch_is_corruption_conflict() -> None:
         receipt_probe=ReceiptProbe(committed.to_receipt(), "0" * 64),
     )
     assert decision.code is AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("operation_type", "TASK_COMPLETE"),
+        ("aggregate_revision", 2),
+        ("transition_id", "ctr:v1:corrupt:1:corrupt"),
+        ("committed_at_ms", -1),
+    ],
+)
+def test_receipt_identity_mismatch_is_corruption_conflict(field, value) -> None:
+    cmd = command()
+    committed = record(cmd)
+    receipt = replace(committed.to_receipt(), **{field: value})
+    decision = evaluate_authority_command(
+        context=context(cmd),
+        command=cmd,
+        current_revision=1,
+        current_state="ready",
+        receipt_probe=ReceiptProbe(receipt, committed.canonical_record_hash),
+    )
+    assert decision.code is AuthorityDecisionCode.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert decision.durable_conflict_record_count == 1
+    assert decision.reconciliation_candidate is True
 
 
 def test_stale_create_is_aggregate_exists_conflict() -> None:
@@ -480,7 +518,6 @@ def test_commit_plan_binds_one_record_receipt_and_revision() -> None:
     plan = AuthorityCommitPlan.create(
         decision,
         cmd,
-        writer_id="scheduler-1",
         committed_at_ms=1_700_000_000_000,
         correlation_id="corr-1",
     )
@@ -490,6 +527,26 @@ def test_commit_plan_binds_one_record_receipt_and_revision() -> None:
     assert plan.canonical_record_count == 1
     assert plan.operation_receipt_count == 1
     assert plan.operation_receipt.transition_id == plan.canonical_record.transition_id
+
+
+def test_commit_plan_uses_authorized_writer_from_decision() -> None:
+    cmd = command()
+    decision = evaluate_authority_command(
+        context=context(cmd, authenticated_writer_id="authorized-writer"),
+        command=cmd,
+        current_revision=0,
+        current_state=None,
+    )
+    plan = AuthorityCommitPlan.create(decision, cmd, committed_at_ms=1)
+    assert plan.canonical_record.writer_id == "authorized-writer"
+
+
+def test_accepted_decision_cannot_be_reused_for_another_command() -> None:
+    original = command()
+    decision = accepted_decision(original)
+    changed = command(authoritative_payload={"payload": 2})
+    with pytest.raises(AuthorityContractError, match="not bound to command"):
+        AuthorityCommitPlan.create(decision, changed, committed_at_ms=1)
 
 
 def test_rejected_decision_cannot_create_commit_plan() -> None:
@@ -504,7 +561,6 @@ def test_rejected_decision_cannot_create_commit_plan() -> None:
         AuthorityCommitPlan.create(
             rejected,
             cmd,
-            writer_id="scheduler-1",
             committed_at_ms=1,
         )
 
