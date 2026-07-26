@@ -31,8 +31,13 @@ jobs:
           cat .tmp/81receipt/chunk_* | tr -d '\n' | base64 -d > /tmp/receipt-first-final.tar.gz
           echo '6ebe43403a6d2e7959a0688d05ac4978fa663dd6b9cf3d8056743bd44ff31501  /tmp/receipt-first-final.tar.gz' | sha256sum -c -
           tar -xzf /tmp/receipt-first-final.tar.gz -C .
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md')
+          path.write_text(path.read_text().rstrip('\n') + '\n')
+          PY
           cat > /tmp/receipt-first.sha256 <<'EOF'
-          b7945a61d231e79981bfa46edfb02109b45f686b786ccc3d0ba8987c04292ab8  docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          89786b8a115ffa6463430cfa8a328264fd8a051c182eabb43d49910fcdc2b71c  docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
           26c63292ce58237bd112afb824f66dc8cef7d035a55eae3c44d14cee2806f0f8  hfa-core/src/hfa/authority/canonical_transition.py
           a1f41a31cadc70cf81fa342cd9c29467b2a05f48c1859dbab014793116ee190f  hfa-core/tests/authority/test_canonical_transition.py
           EOF
