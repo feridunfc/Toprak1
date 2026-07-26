@@ -1,0 +1,38 @@
+name: Sprint 81.1 Canonical Transition Core
+
+on:
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint81-canonical-transition-core.yml
+      - docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+      - hfa-core/pyproject.toml
+      - hfa-core/src/hfa/authority/__init__.py
+      - hfa-core/src/hfa/authority/canonical_transition.py
+      - hfa-core/tests/authority/test_canonical_transition.py
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-transition-core:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install hfa-core with test dependencies
+        run: python -m pip install -e 'hfa-core[dev]'
+      - name: Run Sprint 81.1 authority-core tests
+        run: python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
+      - name: Compile authority package
+        run: python -m compileall -q hfa-core/src/hfa/authority
+      - name: Check patch whitespace
+        run: git diff --check 75b7010f3dde2ee07aa123398eac903b5c6b0cd4...HEAD
