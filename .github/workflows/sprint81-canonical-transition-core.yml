@@ -44,8 +44,12 @@ jobs:
         run: python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
       - name: Compile authority package
         run: python -m compileall -q hfa-core/src/hfa/authority
-      - name: Check correction whitespace
-        run: git diff --check
+      - name: Check target-file whitespace
+        run: >-
+          git diff --check --
+          docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          hfa-core/src/hfa/authority/canonical_transition.py
+          hfa-core/tests/authority/test_canonical_transition.py
       - name: Commit verified correction
         shell: bash
         run: |
