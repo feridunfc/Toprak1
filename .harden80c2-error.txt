@@ -1,4 +1,4 @@
-  File "/tmp/harden80c2.py", line 146
-    needle = '            == {"terminal_transition_id", "child_state_authority_revision"}
-             ^
-SyntaxError: unterminated string literal (detected at line 146)
+Traceback (most recent call last):
+  File "/tmp/harden80c2.py", line 153, in <module>
+    raise RuntimeError("validator terminal missing authority: needle absent")
+RuntimeError: validator terminal missing authority: needle absent
