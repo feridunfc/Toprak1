@@ -1,30 +1,54 @@
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_full_bundle_is_technical_pass_with_governance_blocker FAILED [ 56%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_missing_logical_edge_authority PASSED [ 58%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_logical_edge_authority_wrong_owner PASSED [ 61%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_split_logical_edge_commit PASSED [ 64%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_opposite_outcome_not_contradiction PASSED [ 66%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_blocked_child_different_edge_applies_receipt PASSED [ 69%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_terminal_vocabulary_incomplete PASSED [ 71%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_dead_lettered_without_authority_evidence PASSED [ 74%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_skipped_without_authority_evidence PASSED [ 76%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_optional_logical_edge_resolution_field PASSED [ 79%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_done_retry_continues PASSED [ 82%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_failed_conflict_record_removed PASSED [ 84%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_missing_terminal_evidence_silent_noop_dead_lettered PASSED [ 87%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_missing_terminal_evidence_silent_noop_skipped PASSED [ 89%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_manifest_immutable_base_head PASSED [ 92%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_manifest_predecessor_comment_id PASSED [ 94%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_product_source_scope PASSED [ 97%]
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_negative_evidence_mutation PASSED [100%]
 
-==================================== ERRORS ====================================
-_ ERROR collecting tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py _
-../../../.local/lib/python3.12/site-packages/_pytest/python.py:508: in importtestmodule
-    mod = import_path(
-../../../.local/lib/python3.12/site-packages/_pytest/pathlib.py:572: in import_path
-    mod = _import_module_using_spec(module_name, path, insert_modules=True)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-../../../.local/lib/python3.12/site-packages/_pytest/pathlib.py:716: in _import_module_using_spec
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-../../../.local/lib/python3.12/site-packages/_pytest/assertion/rewrite.py:188: in exec_module
-    exec(co, module.__dict__)
-tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py:12: in <module>
-    spec.loader.exec_module(validator)
-<frozen importlib._bootstrap_external>:991: in exec_module
-    ???
-<frozen importlib._bootstrap_external>:1129: in get_code
-    ???
-<frozen importlib._bootstrap_external>:1059: in source_to_code
-    ???
-<frozen importlib._bootstrap>:488: in _call_with_frames_removed
-    ???
-E     File "/home/runner/work/Toprak1/Toprak1/scripts/sprint80c/validate_aggregate_boundary.py", line 309
-E       add_error(path.stat().st_size == row["size_bytes"], f'size {row["path"]}', errors)
-E                                                                                         ^
-E   IndentationError: unindent does not match any outer indentation level
+=================================== FAILURES ===================================
+_____________________ test_manifest_hashes_and_exact_scope _____________________
+
+    def test_manifest_hashes_and_exact_scope():
+>       assert validator.validate_manifest(ROOT, validator.readj(MANIFEST)) == []
+E       AssertionError: assert ['manifest im...ble register'] == []
+E         
+E         Left contains one more item: 'manifest immutable register'
+E         
+E         Full diff:
+E         - []
+E         + [
+E         +     'manifest immutable register',
+E         + ]
+
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py:194: AssertionError
+__________ test_full_bundle_is_technical_pass_with_governance_blocker __________
+
+    def test_full_bundle_is_technical_pass_with_governance_blocker():
+        zip_value = os.getenv("SPRINT80_RUN93_ZIP")
+        report = validator.validate_bundle(
+            ROOT,
+            evidence_zip=Path(zip_value) if zip_value else None,
+            changed_paths=validator.PATHS,
+        )
+>       assert report["technical_status"] == "PASS"
+E       AssertionError: assert 'FAIL' == 'PASS'
+E         
+E         - PASS
+E         + FAIL
+
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py:205: AssertionError
 =============================== warnings summary ===============================
 ../../../.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1464
   /home/runner/.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1464: PytestConfigWarning: Unknown config option: asyncio_default_fixture_loop_scope
@@ -38,10 +62,39 @@ E   IndentationError: unindent does not match any outer indentation level
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-ERROR tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py
-!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
-========================= 2 warnings, 1 error in 0.17s =========================
-  File "/home/runner/work/Toprak1/Toprak1/scripts/sprint80c/validate_aggregate_boundary.py", line 309
-    add_error(path.stat().st_size == row["size_bytes"], f'size {row["path"]}', errors)
-                                                                                      ^
-IndentationError: unindent does not match any outer indentation level
+FAILED tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_manifest_hashes_and_exact_scope - AssertionError: assert ['manifest im...ble register'] == []
+  
+  Left contains one more item: 'manifest immutable register'
+  
+  Full diff:
+  - []
+  + [
+  +     'manifest immutable register',
+  + ]
+FAILED tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py::test_full_bundle_is_technical_pass_with_governance_blocker - AssertionError: assert 'FAIL' == 'PASS'
+  
+  - PASS
+  + FAIL
+=================== 2 failed, 37 passed, 2 warnings in 0.06s ===================
+{
+  "aggregate_evidence_sha256": "ac5ab01455a3e8acb6bc0043167849e398df393819f5b4cdf14e9770dea9f478",
+  "base_head": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6",
+  "changed_path_count": 7,
+  "errors": [
+    "manifest immutable register"
+  ],
+  "finding_count": 2,
+  "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
+  "frozen_source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+  "governance_blockers": [],
+  "governance_status": "PASS",
+  "historical_frozen_zip_verification": "NOT_RUN",
+  "human_architecture_acceptance": "PENDING",
+  "implementation_authorized": false,
+  "observation_count": 8,
+  "predecessor_human_acceptance": "ACCEPT",
+  "product_source_mutation": 0,
+  "schema_version": 3,
+  "status": "FAIL",
+  "technical_status": "FAIL"
+}
