@@ -73,6 +73,53 @@ jobs:
             git push origin HEAD:sprint/80c2-aggregate-boundary
             exit "$status"
           fi
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/sprint80c/validate_aggregate_boundary.py')
+          source = path.read_text(encoding='utf-8')
+          start = source.index('def validate_manifest(')
+          end = source.index('def validate_scope(', start)
+          lines = [
+              'def validate_manifest(root: Path, manifest: dict[str, Any]) -> list[str]:',
+              '    errors: list[str] = []',
+              '    add_error(manifest.get("schema_version") == 3 and manifest.get("decision_id") == "ADR-080C2", "manifest identity", errors)',
+              '    add_error(',
+              '        manifest.get("base_head") == BASE',
+              '        and manifest.get("frozen_source_head") == SOURCE',
+              '        and manifest.get("frozen_artifact_sha256") == ZIP_SHA',
+              '        and manifest.get("aggregate_evidence_sha256") == EVIDENCE_SHA',
+              '        and manifest.get("bundle_index_algorithm") == "sorted_utf8_lines:path\\0size_bytes\\0sha256\\n"',
+              '        and manifest.get("product_source_mutation") == 0',
+              '        and manifest.get("implementation_authorized") is False,',
+              '        "manifest immutable register",',
+              '        errors,',
+              '    )',
+              '    add_error(',
+              '        manifest.get("predecessor_acceptance_record_present") is True',
+              '        and manifest.get("predecessor_acceptance_verified") is True',
+              '        and manifest.get("predecessor_human_acceptance") == "ACCEPT"',
+              '        and manifest.get("predecessor_acceptance_comment_id") == 5083135387',
+              '        and manifest.get("predecessor_accepted_head") == "9ad9503badd72afb0a935dbb8c02e828ea02d3e2"',
+              '        and manifest.get("predecessor_merge_commit") == BASE,',
+              '        "manifest predecessor acceptance",',
+              '        errors,',
+              '    )',
+              '    entries = manifest.get("artifacts", [])',
+              '    expected = PATHS - {"docs/adr/sprint80/aggregate_boundary_manifest.json"}',
+              '    add_error({row.get("path") for row in entries} == expected and len(entries) == 6, "manifest paths", errors)',
+              '    for row in entries:',
+              '        artifact_path = root / row["path"]',
+              '        add_error(artifact_path.exists(), f\'missing {row["path"]}\', errors)',
+              '        if artifact_path.exists():',
+              '            add_error(artifact_path.stat().st_size == row["size_bytes"], f\'size {row["path"]}\', errors)',
+              '            add_error(sha(artifact_path.read_bytes()) == row["sha256"], f\'hash {row["path"]}\', errors)',
+              '    add_error(manifest.get("bundle_index_sha256") == sha(bundle_index(entries)), "bundle index", errors)',
+              '    return errors',
+              '',
+              '',
+          ]
+          path.write_text(source[:start] + '\n'.join(lines) + source[end:], encoding='utf-8')
+          PY
       - name: Restore final seven-file package
         shell: bash
         run: |
