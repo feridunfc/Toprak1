@@ -1,4 +1,47 @@
-  File "/tmp/harden80c2.py", line 149
-    missing_guard = '            and disposition.get("missing_authority_evidence")
-                    ^
-SyntaxError: unterminated string literal (detected at line 149)
+
+==================================== ERRORS ====================================
+_ ERROR collecting tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py _
+../../../.local/lib/python3.12/site-packages/_pytest/python.py:508: in importtestmodule
+    mod = import_path(
+../../../.local/lib/python3.12/site-packages/_pytest/pathlib.py:572: in import_path
+    mod = _import_module_using_spec(module_name, path, insert_modules=True)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/lib/python3.12/site-packages/_pytest/pathlib.py:716: in _import_module_using_spec
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../../../.local/lib/python3.12/site-packages/_pytest/assertion/rewrite.py:188: in exec_module
+    exec(co, module.__dict__)
+tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py:12: in <module>
+    spec.loader.exec_module(validator)
+<frozen importlib._bootstrap_external>:991: in exec_module
+    ???
+<frozen importlib._bootstrap_external>:1129: in get_code
+    ???
+<frozen importlib._bootstrap_external>:1059: in source_to_code
+    ???
+<frozen importlib._bootstrap>:488: in _call_with_frames_removed
+    ???
+E     File "/home/runner/work/Toprak1/Toprak1/scripts/sprint80c/validate_aggregate_boundary.py", line 309
+E       add_error(path.stat().st_size == row["size_bytes"], f'size {row["path"]}', errors)
+E                                                                                         ^
+E   IndentationError: unindent does not match any outer indentation level
+=============================== warnings summary ===============================
+../../../.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1464
+  /home/runner/.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1464: PytestConfigWarning: Unknown config option: asyncio_default_fixture_loop_scope
+  
+    self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
+
+../../../.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1464
+  /home/runner/.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1464: PytestConfigWarning: Unknown config option: asyncio_mode
+  
+    self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+ERROR tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+========================= 2 warnings, 1 error in 0.17s =========================
+  File "/home/runner/work/Toprak1/Toprak1/scripts/sprint80c/validate_aggregate_boundary.py", line 309
+    add_error(path.stat().st_size == row["size_bytes"], f'size {row["path"]}', errors)
+                                                                                      ^
+IndentationError: unindent does not match any outer indentation level
