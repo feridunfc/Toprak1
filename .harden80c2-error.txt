@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/tmp/harden80c2.py", line 146, in <module>
+    validator = replace_once(
+                ^^^^^^^^^^^^^
+  File "/tmp/harden80c2.py", line 31, in replace_once
+    raise RuntimeError(f"{label}: expected one occurrence, found {count}")
+RuntimeError: validator terminal missing authority: expected one occurrence, found 0
