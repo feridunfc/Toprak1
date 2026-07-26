@@ -1,0 +1,61 @@
+name: Temporary PR104 Final Correction
+
+on:
+  push:
+    branches:
+      - sprint/81-1-canonical-transition-core
+    paths:
+      - .github/workflows/temp-pr104-final-correction.yml
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: sprint/81-1-canonical-transition-core
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct exact correction package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/pr104-final/chunk_* | tr -d '\n' | base64 -d > /tmp/pr104-final.tar.gz
+          echo 'a2f3ccd1fd6ada143a6f86fdece4f2ab59460e206c0e8cebeae4d54caae09d31  /tmp/pr104-final.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/pr104-final.tar.gz -C .
+          cat > /tmp/expected.sha256 <<'EOF'
+          996b119a2e7bf36005c77707f40eb127f51c591526f0c7e232c0543cf1ad7a9c  docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          c57695cd594e779ae217ad7c5382b3c1dfe1434b8fd5d6e02766eaf908dc6ffa  hfa-core/src/hfa/authority/__init__.py
+          bc9dc1e944be946282f211eaf839122465f3577a663c0a5201afab2abc679bee  hfa-core/src/hfa/authority/canonical_transition.py
+          5d1f65791d081186567683c0f4bef7df0f094e203713c7f26f298a9f6ad987a2  hfa-core/tests/authority/test_canonical_transition.py
+          EOF
+          sed -i 's/^          //' /tmp/expected.sha256
+          sha256sum -c /tmp/expected.sha256
+      - name: Install hfa-core test dependencies
+        run: python -m pip install -e './hfa-core[test]'
+      - name: Run corrected authority-core tests
+        run: python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
+      - name: Compile corrected package
+        run: python -m compileall -q hfa-core/src/hfa/authority
+      - name: Commit corrected package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .tmp/pr104-final
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          git add hfa-core/src/hfa/authority/__init__.py
+          git add hfa-core/src/hfa/authority/canonical_transition.py
+          git add hfa-core/tests/authority/test_canonical_transition.py
+          git add -A .tmp/pr104-final
+          git diff --cached --check
+          git commit -m 'fix(sprint81): preserve receipt order and trust boundaries'
+          git push origin HEAD:sprint/81-1-canonical-transition-core
