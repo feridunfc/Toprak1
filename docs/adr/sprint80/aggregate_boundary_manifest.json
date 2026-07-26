@@ -8,8 +8,8 @@
     },
     {
       "path": "docs/adr/sprint80/ADR-080C2-aggregate-boundary.md",
-      "sha256": "7b8712a8b27fed42dd3285aba34fe083d0ae9328fb58357b49b59a2edd35b8e5",
-      "size_bytes": 9281
+      "sha256": "fdd0eee5d1428ad983afe15f9eef00df7b940565d842877c35e5cafb0a1a3806",
+      "size_bytes": 11933
     },
     {
       "path": "docs/adr/sprint80/evidence/aggregate_boundary.run93.json",
@@ -18,29 +18,32 @@
     },
     {
       "path": "docs/adr/sprint80/aggregate_boundary_matrix.json",
-      "sha256": "606d091d4e60c389a549cf3556793e1c725cfbc2c4fab48c78e51c770164e264",
-      "size_bytes": 9980
+      "sha256": "f1fb0efc01067b2fe9366a67bdb28d9cb15e39e817596cceb2888f241402f9fb",
+      "size_bytes": 13672
     },
     {
       "path": "scripts/sprint80c/validate_aggregate_boundary.py",
-      "sha256": "d97ce599a3d5011105ce37c41d1d4435894ed3eb7907094d636342024653ecc6",
-      "size_bytes": 18374
+      "sha256": "deb529042f958effac8c91b7d355f19ac109f359badb44a9ddbdb53c56e094ce",
+      "size_bytes": 12222
     },
     {
       "path": "tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py",
-      "sha256": "cf0933aeb492d414e70b071c834afb1f0c7133793e371e5fcdb7074a39eeee7b",
-      "size_bytes": 6204
+      "sha256": "4e4bd19ecc073da4b88358e0d55452fee21da425f488aee0b0193dfec2bae93e",
+      "size_bytes": 6533
     }
   ],
   "base_branch": "baseline/local-import",
   "base_head": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6",
   "branch": "sprint/80c2-aggregate-boundary",
   "bundle_index_algorithm": "sorted_utf8_lines:path\\0size_bytes\\0sha256\\n",
-  "bundle_index_sha256": "2101032e7bf2621028ae7e1b4795c642f2d07d32940f7f4d0287aeb8156fc861",
+  "bundle_index_sha256": "c978a2682829109776b316bfa2c221b503756a755fcb3f337b6acf5dc00cfea7",
   "decision_id": "ADR-080C2",
   "frozen_artifact_sha256": "7b4e85209658619d400faebe3ee637580cbbebbb231c43531360ef3a79241588",
   "frozen_source_head": "5734ac60704f8546b8ce67e766e042ff2ce4c412",
+  "human_architecture_acceptance": "NOT_READY",
   "implementation_authorized": false,
+  "predecessor_acceptance_record_present": false,
+  "predecessor_human_acceptance": "PENDING",
   "product_source_mutation": 0,
-  "schema_version": 1
+  "schema_version": 2
 }
