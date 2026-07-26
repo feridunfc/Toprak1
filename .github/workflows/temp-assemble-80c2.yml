@@ -1,0 +1,68 @@
+name: Temporary 80C.2 Exact Assembler
+
+on:
+  push:
+    branches:
+      - sprint/80c2-aggregate-boundary
+    paths:
+      - .github/workflows/temp-assemble-80c2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: sprint/80c2-aggregate-boundary
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependency
+        run: python -m pip install pytest
+      - name: Reconstruct exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/80c2/chunk_* | tr -d '\n' | base64 -d > /tmp/80c2-final-five.tar.gz
+          echo '3aaa5e0bbd4ec4165ebe745c8bf69fd502fd4972e529e2906c1c2f19d9710e47  /tmp/80c2-final-five.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/80c2-final-five.tar.gz -C .
+          cat > /tmp/expected.sha256 <<'EOF'
+          0ce167b963d1d9655f207632190bd342f97d90f9cad3254b7a15edddccd3159f  docs/adr/sprint80/ADR-080C2-aggregate-boundary.md
+          f736bd08ee96179b72aa50aaa63583a7bec1afb8d4829b26bcd9bb1ef30cf6db  docs/adr/sprint80/aggregate_boundary_matrix.json
+          ad4cba9ade7b7e8ae079b097db432b17e98c7df4f13c116ee74327b7e56a951d  docs/adr/sprint80/aggregate_boundary_manifest.json
+          e9cf7ff24b7d52cbea3d0f73c1234328492c46dacf0aeb95dc81710ddc070059  scripts/sprint80c/validate_aggregate_boundary.py
+          b76353088678ed6e9e04700ee4920b7b0bb50244e06e2adc363bd23b33a00d56  tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py
+          EOF
+          sed -i 's/^          //' /tmp/expected.sha256
+          sha256sum -c /tmp/expected.sha256
+      - name: Validate reconstructed package
+        env:
+          SPRINT80_RUN93_ZIP: /tmp/sprint80-run93.zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py -q
+          python scripts/sprint80c/validate_aggregate_boundary.py --repo-root .
+          git diff --check
+      - name: Commit exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .tmp/80c2
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/adr/sprint80/ADR-080C2-aggregate-boundary.md
+          git add docs/adr/sprint80/aggregate_boundary_matrix.json
+          git add docs/adr/sprint80/aggregate_boundary_manifest.json
+          git add scripts/sprint80c/validate_aggregate_boundary.py
+          git add tests/diagnostics/sprint80c/test_80c2_aggregate_boundary.py
+          git add -A .tmp/80c2
+          git diff --cached --check
+          git commit -m 'docs(sprint80c): finalize operation-level edge contracts'
+          git push origin HEAD:sprint/80c2-aggregate-boundary
