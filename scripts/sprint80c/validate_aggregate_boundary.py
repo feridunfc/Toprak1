@@ -86,7 +86,7 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
     errors: list[str] = []
     add_error(matrix.get("schema_version") == 3 and matrix.get("decision_id") == "ADR-080C2", "matrix identity", errors)
     add_error(
-        matrix.get("decision_status") == "CORRECTED_TECHNICAL_RECOMMENDATION_PREDECESSOR_ACCEPTANCE_PENDING",
+        matrix.get("decision_status") == "CORRECTED_TECHNICAL_RECOMMENDATION_PREDECESSOR_ACCEPTED_EXECUTABLE_VERIFICATION_HARDENED",
         "decision status",
         errors,
     )
@@ -96,9 +96,12 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
     add_error(predecessor.get("accepted_head_candidate") == "9ad9503badd72afb0a935dbb8c02e828ea02d3e2", "predecessor head", errors)
     add_error(predecessor.get("merge_commit") == BASE, "predecessor merge", errors)
     add_error(
-        predecessor.get("acceptance_comment_id") is None
-        and predecessor.get("human_architecture_acceptance") == "PENDING",
-        "predecessor must remain pending without record",
+        predecessor.get("accepted_head") == "9ad9503badd72afb0a935dbb8c02e828ea02d3e2"
+        and predecessor.get("acceptance_comment_id") == 5083135387
+        and predecessor.get("acceptance_type") == "POST_MERGE_HUMAN_ARCHITECTURE_ACCEPTANCE"
+        and predecessor.get("human_architecture_acceptance") == "ACCEPT"
+        and predecessor.get("status") == "VERIFIED",
+        "predecessor acceptance record",
         errors,
     )
 
@@ -152,7 +155,13 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
         "accepted_edge_command_id", "accepted_parent_transition_id", "accepted_outcome",
         "graph_identity", "graph_revision_or_topology_hash", "applied_child_revision",
     }
-    add_error(set((resolution.get("value") or {}).keys()) == required_resolution_fields, "logical-edge resolution value", errors)
+    resolution_value = resolution.get("value") or {}
+    add_error(
+        set(resolution_value) == required_resolution_fields
+        and all(resolution_value.get(key) == "REQUIRED" for key in required_resolution_fields),
+        "logical-edge resolution value",
+        errors,
+    )
     absent = resolution.get("when_logical_edge_resolution_absent", {})
     add_error(absent.get("validate_topology") == "REQUIRED", "logical-edge topology validation", errors)
     add_error(
@@ -199,8 +208,17 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
 
     terminal = matrix.get("terminal_state_command_disposition", {})
     add_error(set(terminal) == TERMINAL_STATES, "terminal vocabulary coverage", errors)
-    add_error(terminal.get("done", {}).get("unsatisfied_edge_command") == "CONTRADICTION", "done disposition", errors)
-    add_error(terminal.get("failed", {}).get("unsatisfied_edge_command") == "CONTRADICTION", "failed disposition", errors)
+    for state in ("done", "failed"):
+        disposition = terminal.get(state, {})
+        add_error(
+  disposition.get("unsatisfied_edge_command") == "CONTRADICTION"
+  and disposition.get("child_mutation") == 0
+  and disposition.get("durable_conflict_record") == "REQUIRED"
+  and disposition.get("reconciliation_candidate") == "REQUIRED"
+  and disposition.get("retry") == "STOP",
+  f"{state} disposition",
+  errors,
+        )
     blocked = terminal.get("blocked_by_failure", {})
     add_error(
         blocked.get("same_command") == "ALREADY_APPLIED"
@@ -223,6 +241,8 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
             and disposition.get("durable_disposition_record") == "REQUIRED"
             and set(disposition.get("required_authority_evidence", []))
             == {"terminal_transition_id", "child_state_authority_revision"}
+            and disposition.get("missing_authority_evidence")
+            == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"
             and disposition.get("retry") == "STOP",
             f"{state} disposition",
             errors,
@@ -240,8 +260,8 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
     add_error(contracts.get("terminal_state_vocabulary_mapping_complete") is True, "terminal mapping flag", errors)
     add_error(contracts.get("technical_unresolved_choice") == 0, "technical unresolved choice", errors)
     add_error(
-        contracts.get("predecessor_human_acceptance_verified") is False
-        and contracts.get("predecessor_acceptance_record_present") is False,
+        contracts.get("predecessor_human_acceptance_verified") is True
+        and contracts.get("predecessor_acceptance_record_present") is True,
         "governance truth",
         errors,
     )
@@ -257,21 +277,42 @@ def validate_matrix(matrix: dict[str, Any], evidence: dict[str, Any]) -> list[st
 
 def validate_manifest(root: Path, manifest: dict[str, Any]) -> list[str]:
     errors: list[str] = []
+    expected_bundle_index_algorithm = (
+        "sorted_utf8_lines:path" + chr(92) + "0size_bytes" + chr(92) + "0sha256" + chr(92) + "n"
+    )
     add_error(manifest.get("schema_version") == 3 and manifest.get("decision_id") == "ADR-080C2", "manifest identity", errors)
+    add_error(
+        manifest.get("base_head") == BASE
+        and manifest.get("frozen_source_head") == SOURCE
+        and manifest.get("frozen_artifact_sha256") == ZIP_SHA
+        and manifest.get("aggregate_evidence_sha256") == EVIDENCE_SHA
+        and manifest.get("bundle_index_algorithm") == expected_bundle_index_algorithm
+        and manifest.get("product_source_mutation") == 0
+        and manifest.get("implementation_authorized") is False,
+        "manifest immutable register",
+        errors,
+    )
+    add_error(
+        manifest.get("predecessor_acceptance_record_present") is True
+        and manifest.get("predecessor_acceptance_verified") is True
+        and manifest.get("predecessor_human_acceptance") == "ACCEPT"
+        and manifest.get("predecessor_acceptance_comment_id") == 5083135387
+        and manifest.get("predecessor_accepted_head") == "9ad9503badd72afb0a935dbb8c02e828ea02d3e2"
+        and manifest.get("predecessor_merge_commit") == BASE,
+        "manifest predecessor acceptance",
+        errors,
+    )
     entries = manifest.get("artifacts", [])
     expected = PATHS - {"docs/adr/sprint80/aggregate_boundary_manifest.json"}
     add_error({row.get("path") for row in entries} == expected and len(entries) == 6, "manifest paths", errors)
     for row in entries:
-        path = root / row["path"]
-        add_error(path.exists(), f'missing {row["path"]}', errors)
-        if path.exists():
-            add_error(path.stat().st_size == row["size_bytes"], f'size {row["path"]}', errors)
-            add_error(sha(path.read_bytes()) == row["sha256"], f'hash {row["path"]}', errors)
+        artifact_path = root / row["path"]
+        add_error(artifact_path.exists(), f'missing {row["path"]}', errors)
+        if artifact_path.exists():
+            add_error(artifact_path.stat().st_size == row["size_bytes"], f'size {row["path"]}', errors)
+            add_error(sha(artifact_path.read_bytes()) == row["sha256"], f'hash {row["path"]}', errors)
     add_error(manifest.get("bundle_index_sha256") == sha(bundle_index(entries)), "bundle index", errors)
-    add_error(manifest.get("predecessor_human_acceptance") == "PENDING", "manifest predecessor truth", errors)
-    add_error(manifest.get("implementation_authorized") is False, "manifest implementation flag", errors)
     return errors
-
 
 def validate_scope(paths: Iterable[str]) -> list[str]:
     observed = {str(path).replace("\\", "/") for path in paths}

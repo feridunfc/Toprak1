@@ -35,9 +35,9 @@
     "parent_completion_record_contains": "DURABLE_FANOUT_INTENT_NOT_COMMITTED_CHILD_STATE_EFFECTS"
   },
   "decision_id": "ADR-080C2",
-  "decision_status": "CORRECTED_TECHNICAL_RECOMMENDATION_PREDECESSOR_ACCEPTANCE_PENDING",
+  "decision_status": "CORRECTED_TECHNICAL_RECOMMENDATION_PREDECESSOR_ACCEPTED_EXECUTABLE_VERIFICATION_HARDENED",
   "dependencies": [
-    "ADR-080C1 post-merge human architecture acceptance record",
+    "ADR-080C1 post-merge human architecture acceptance VERIFIED by comment 5083135387",
     "ADR-080C3 canonical transition and monotonic revision contract",
     "ADR-080C4 durable authority and reconstruction contract",
     "ADR-080C5 event-state atomicity and outbox contract",
@@ -199,15 +199,16 @@
     "required_invariant": "TASK_ID_GLOBALLY_UNIQUE_ACROSS_ALL_RUNS"
   },
   "predecessor_governance": {
-    "acceptance_comment_id": null,
-    "acceptance_type": "POST_MERGE_HUMAN_ARCHITECTURE_ACCEPTANCE_REQUIRED",
+    "acceptance_comment_id": 5083135387,
+    "acceptance_type": "POST_MERGE_HUMAN_ARCHITECTURE_ACCEPTANCE",
     "accepted_head_candidate": "9ad9503badd72afb0a935dbb8c02e828ea02d3e2",
     "decision_id": "ADR-080C1",
-    "human_architecture_acceptance": "PENDING",
+    "human_architecture_acceptance": "ACCEPT",
     "merge_commit": "9d7c7a6ad52a8a546a708dda048f28d4e23befc6",
     "run_lifecycle_truth_owner_candidate": "RUN_STATE_AUTHORITY",
-    "status": "BLOCKING_GOVERNANCE_PREREQUISITE",
-    "task_lifecycle_truth_owner_candidate": "TASK_STATE_AUTHORITY"
+    "status": "VERIFIED",
+    "task_lifecycle_truth_owner_candidate": "TASK_STATE_AUTHORITY",
+    "accepted_head": "9ad9503badd72afb0a935dbb8c02e828ea02d3e2"
   },
   "process_manager_contract": {
     "direct_redis_child_key_mutation": false,
@@ -259,7 +260,7 @@
     {
       "blob_sha": "659f77af1c8a99cf63626318cb050ac711352b74",
       "path": "docs/adr/sprint80/ADR-080C1-runtime-truth-authority.md",
-      "purpose": "merged predecessor whose literal human acceptance remains pending"
+      "purpose": "merged predecessor with verified post-merge human acceptance comment 5083135387"
     },
     {
       "blob_sha": "1d519c10f952907d4ac7a73e0854cff913a61eb6",
@@ -407,8 +408,8 @@
     "logical_edge_resolution_authority_decided": true,
     "logical_identity_decided": true,
     "physical_key_strategy_decided": true,
-    "predecessor_acceptance_record_present": false,
-    "predecessor_human_acceptance_verified": false,
+    "predecessor_acceptance_record_present": true,
+    "predecessor_human_acceptance_verified": true,
     "process_manager_retry_termination_decided": true,
     "product_source_mutation": 0,
     "revision_owners_decided": true,

@@ -36,11 +36,14 @@ def test_selected_model_and_revision_owners():
     assert value["child_revision_owner"] == "CHILD_TASK_AGGREGATE"
 
 
-def test_predecessor_is_not_falsely_accepted():
+def test_predecessor_acceptance_is_exactly_bound():
     value = matrix()["predecessor_governance"]
     assert value["accepted_head_candidate"] == "9ad9503badd72afb0a935dbb8c02e828ea02d3e2"
-    assert value["acceptance_comment_id"] is None
-    assert value["human_architecture_acceptance"] == "PENDING"
+    assert value["accepted_head"] == "9ad9503badd72afb0a935dbb8c02e828ea02d3e2"
+    assert value["acceptance_comment_id"] == 5083135387
+    assert value["acceptance_type"] == "POST_MERGE_HUMAN_ARCHITECTURE_ACCEPTANCE"
+    assert value["human_architecture_acceptance"] == "ACCEPT"
+    assert value["status"] == "VERIFIED"
 
 
 def test_child_admission_commits_topology_authority():
@@ -74,6 +77,7 @@ def test_logical_edge_resolution_value_is_complete():
         "graph_revision_or_topology_hash",
         "applied_child_revision",
     }
+    assert all(field_value == "REQUIRED" for field_value in value.values())
 
 
 def test_first_logical_edge_application_is_atomic():
@@ -152,16 +156,23 @@ def test_terminal_vocabulary_is_exact_and_complete():
     assert set(value) == {"done", "failed", "blocked_by_failure", "dead_lettered", "skipped"}
 
 
-def test_done_and_failed_late_edges_are_contradictions():
+def test_done_and_failed_late_edges_are_exact_contradictions():
     value = matrix()["terminal_state_command_disposition"]
-    assert value["done"]["unsatisfied_edge_command"] == "CONTRADICTION"
-    assert value["failed"]["unsatisfied_edge_command"] == "CONTRADICTION"
+    for state in ("done", "failed"):
+        assert value[state] == {
+  "unsatisfied_edge_command": "CONTRADICTION",
+  "child_mutation": 0,
+  "durable_conflict_record": "REQUIRED",
+  "reconciliation_candidate": "REQUIRED",
+  "retry": "STOP",
+        }
 
 
 def test_dead_lettered_is_authority_evidenced_terminal_noop():
     value = matrix()["terminal_state_command_disposition"]["dead_lettered"]
     assert value["unsatisfied_edge_command"] == "TERMINAL_CHILD_NOOP"
     assert set(value["required_authority_evidence"]) == {"terminal_transition_id", "child_state_authority_revision"}
+    assert value["missing_authority_evidence"] == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"
     assert value["retry"] == "STOP"
 
 
@@ -169,6 +180,7 @@ def test_skipped_is_authority_evidenced_terminal_noop():
     value = matrix()["terminal_state_command_disposition"]["skipped"]
     assert value["unsatisfied_edge_command"] == "TERMINAL_CHILD_NOOP"
     assert set(value["required_authority_evidence"]) == {"terminal_transition_id", "child_state_authority_revision"}
+    assert value["missing_authority_evidence"] == "MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION"
     assert value["retry"] == "STOP"
 
 
@@ -191,8 +203,9 @@ def test_full_bundle_is_technical_pass_with_governance_blocker():
         changed_paths=validator.PATHS,
     )
     assert report["technical_status"] == "PASS"
-    assert report["status"] == "PASS_WITH_GOVERNANCE_BLOCKER"
-    assert report["governance_status"] == "BLOCKED"
+    assert report["status"] == "PASS"
+    assert report["governance_status"] == "PASS"
+    assert report["predecessor_human_acceptance"] == "ACCEPT"
     assert report["implementation_authorized"] is False
 
 
@@ -242,6 +255,48 @@ def test_negative_skipped_without_authority_evidence():
     value = copy.deepcopy(matrix())
     value["terminal_state_command_disposition"]["skipped"]["required_authority_evidence"] = []
     assert "skipped disposition" in validator.validate_matrix(value, evidence())
+
+
+def test_negative_optional_logical_edge_resolution_field():
+    value = copy.deepcopy(matrix())
+    value["logical_edge_resolution_authority"]["value"]["accepted_outcome"] = "OPTIONAL"
+    assert "logical-edge resolution value" in validator.validate_matrix(value, evidence())
+
+
+def test_negative_done_retry_continues():
+    value = copy.deepcopy(matrix())
+    value["terminal_state_command_disposition"]["done"]["retry"] = "CONTINUE"
+    assert "done disposition" in validator.validate_matrix(value, evidence())
+
+
+def test_negative_failed_conflict_record_removed():
+    value = copy.deepcopy(matrix())
+    value["terminal_state_command_disposition"]["failed"]["durable_conflict_record"] = "NONE"
+    assert "failed disposition" in validator.validate_matrix(value, evidence())
+
+
+def test_negative_missing_terminal_evidence_silent_noop_dead_lettered():
+    value = copy.deepcopy(matrix())
+    value["terminal_state_command_disposition"]["dead_lettered"]["missing_authority_evidence"] = "SILENT_NOOP"
+    assert "dead_lettered disposition" in validator.validate_matrix(value, evidence())
+
+
+def test_negative_missing_terminal_evidence_silent_noop_skipped():
+    value = copy.deepcopy(matrix())
+    value["terminal_state_command_disposition"]["skipped"]["missing_authority_evidence"] = "SILENT_NOOP"
+    assert "skipped disposition" in validator.validate_matrix(value, evidence())
+
+
+def test_negative_manifest_immutable_base_head():
+    value = copy.deepcopy(validator.readj(MANIFEST))
+    value["base_head"] = "wrong"
+    assert "manifest immutable register" in validator.validate_manifest(ROOT, value)
+
+
+def test_negative_manifest_predecessor_comment_id():
+    value = copy.deepcopy(validator.readj(MANIFEST))
+    value["predecessor_acceptance_comment_id"] = 0
+    assert "manifest predecessor acceptance" in validator.validate_manifest(ROOT, value)
 
 
 def test_negative_product_source_scope():
