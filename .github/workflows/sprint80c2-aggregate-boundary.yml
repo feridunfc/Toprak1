@@ -41,5 +41,3 @@ jobs:
           --verify-git-scope
       - name: Check patch whitespace
         run: git diff --check 9d7c7a6ad52a8a546a708dda048f28d4e23befc6...HEAD
-
-# final verification trigger
