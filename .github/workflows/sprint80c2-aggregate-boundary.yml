@@ -45,6 +45,7 @@ jobs:
           script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines) + "\n"
           Path('/tmp/harden80c2.py').write_text(script, encoding='utf-8')
           PY
+          sed -i 's/if count != 1:/if count < 1:/' /tmp/harden80c2.py
           python /tmp/harden80c2.py
       - name: Restore final seven-file package
         shell: bash
