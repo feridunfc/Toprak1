@@ -1,0 +1,67 @@
+name: Temporary Sprint 81.1 Exact Assembler
+
+on:
+  push:
+    branches:
+      - sprint/81-1-canonical-transition-core
+    paths:
+      - .github/workflows/temp-assemble-s81-1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout implementation branch
+        uses: actions/checkout@v4
+        with:
+          ref: sprint/81-1-canonical-transition-core
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/s81-1/chunk_* | tr -d '\n' | base64 -d > /tmp/s81-package.tar.gz
+          echo '4556fbb0a53282f4429c42324a552f7bad0879f174baf5ce8033ae11994b6d29  /tmp/s81-package.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/s81-package.tar.gz -C .
+          cat > /tmp/expected.sha256 <<'EOF'
+          9872041c08c44918443508ad337ed4e17b8fd2e6437ba1c846dee26669b1c49f  .github/workflows/sprint81-canonical-transition-core.yml
+          46336322ec6020e167c792bfedb7a2084722c0dfcd8c0bfa785da88d0d6590bd  docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          4b280dff19d78d2078f700fb72dede0a88483ce93e6568082fa3f8bb04e5a23f  hfa-core/pyproject.toml
+          34aae95d4bdee91b01e55820f9938fa807b95a9e759c4982e2b53d979861c30f  hfa-core/src/hfa/authority/__init__.py
+          005e5b180e7240da01493aa842ceba08d456a73a0a57c611f79aeb0eaf762841  hfa-core/src/hfa/authority/canonical_transition.py
+          70d2754bf8d6f143825e4828715300f2ff25b512e6c3fcbbfcac8a30b39ff8e0  hfa-core/tests/authority/test_canonical_transition.py
+          EOF
+          sed -i 's/^          //' /tmp/expected.sha256
+          sha256sum -c /tmp/expected.sha256
+      - name: Install implementation and test dependencies
+        run: python -m pip install -e 'hfa-core[dev]'
+      - name: Validate authority core
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
+          python -m compileall -q hfa-core/src/hfa/authority
+          git diff --check
+      - name: Commit verified non-workflow implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .tmp/s81-1
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          git add hfa-core/pyproject.toml
+          git add hfa-core/src/hfa/authority/__init__.py
+          git add hfa-core/src/hfa/authority/canonical_transition.py
+          git add hfa-core/tests/authority/test_canonical_transition.py
+          git add -A .tmp/s81-1
+          git diff --cached --check
+          git commit -m 'feat(sprint81): add canonical transition authority core'
+          git push origin HEAD:sprint/81-1-canonical-transition-core
