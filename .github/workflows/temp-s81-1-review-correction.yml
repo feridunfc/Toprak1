@@ -1,0 +1,69 @@
+name: Temporary Sprint 81.1 Review Correction
+
+on:
+  push:
+    branches:
+      - sprint/81-1-canonical-transition-core
+    paths:
+      - .github/workflows/temp-s81-1-review-correction.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-correction:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout implementation branch
+        uses: actions/checkout@v4
+        with:
+          ref: sprint/81-1-canonical-transition-core
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct exact correction package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/s81-review
+          cat .tmp/s81-review/chunk_* | tr -d '\n' | base64 -d > /tmp/s81-review/correction.tar.gz
+          echo 'acdb01e4525b4bd0cf8ea36acc89ebbb3c1d2022f7ddcdd65be8efdcb0f31e06  /tmp/s81-review/correction.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/s81-review/correction.tar.gz -C /tmp/s81-review
+          cp /tmp/s81-review/hfa/authority/canonical_transition.py hfa-core/src/hfa/authority/canonical_transition.py
+          cp /tmp/s81-review/hfa/authority/__init__.py hfa-core/src/hfa/authority/__init__.py
+          cp /tmp/s81-review/tests/test_canonical_transition.py hfa-core/tests/authority/test_canonical_transition.py
+          cp /tmp/s81-review/docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          cat > /tmp/s81-review/expected.sha256 <<'EOF'
+          f0ab5dac301fd22d82f37a373b8e57f5d8fbc5ac53cddf7e8bbe3eccf5e7c9fc  hfa-core/src/hfa/authority/canonical_transition.py
+          ebe81eb3c8d6f36fe95cdda87256c696ec9c35e2aacc78787a6438b1ec965ebb  hfa-core/src/hfa/authority/__init__.py
+          44f88e5f998d058b2dcae362930200bd2ffd66c91cc70506f0918edefb41b8bb  hfa-core/tests/authority/test_canonical_transition.py
+          2f010e0ff3b0a1572cb8b0d3be3a5671e2ebab2e2e49306d1192f46e96fdf08d  docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          EOF
+          sed -i 's/^          //' /tmp/s81-review/expected.sha256
+          sha256sum -c /tmp/s81-review/expected.sha256
+      - name: Install implementation and test dependencies
+        run: python -m pip install -e 'hfa-core[dev]'
+      - name: Validate corrected authority core
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
+          python -m compileall -q hfa-core/src/hfa/authority
+          git diff --check
+      - name: Commit verified correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .tmp/s81-review
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add hfa-core/src/hfa/authority/canonical_transition.py
+          git add hfa-core/src/hfa/authority/__init__.py
+          git add hfa-core/tests/authority/test_canonical_transition.py
+          git add docs/implementation/sprint81/SPRINT81.1-canonical-transition-core.md
+          git add -A .tmp/s81-review
+          git diff --cached --check
+          git commit -m 'fix(sprint81): enforce authority proof integrity'
+          git push origin HEAD:sprint/81-1-canonical-transition-core
