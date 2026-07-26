@@ -25,7 +25,7 @@ The evidence remains unchanged. Current `task_complete.lua` commits parent state
 
 ## 2. Predecessor governance gate
 
-ADR-080C.1 is merged at `9d7c7a6ad52a8a546a708dda048f28d4e23befc6`, but no exact post-merge human architecture acceptance record is currently bound to this package.
+ADR-080C.1 is merged at `9d7c7a6ad52a8a546a708dda048f28d4e23befc6`, but no exact post-merge human architecture acceptance record is bound to this package.
 
 ```yaml
 predecessor_decision: ADR-080C1
@@ -37,7 +37,7 @@ human_architecture_acceptance: PENDING
 status: BLOCKING_GOVERNANCE_PREREQUISITE
 ```
 
-`MERGED` is not treated as `HUMAN_ACCEPTED`. This ADR may be technically corrected and tested, but it is not ready for human acceptance or merge until the predecessor record is present and machine-readably bound.
+`MERGED` is not treated as `HUMAN_ACCEPTED`. This package may become technically complete while remaining governance-blocked.
 
 ## 3. Selected aggregate model
 
@@ -52,11 +52,7 @@ distributed_transaction_across_tasks: false
 
 Each task is one lifecycle transaction aggregate. The process manager coordinates durable fanout but is neither task truth authority nor a direct writer of child authority keys.
 
-The technical rejection of a run-wide/DAG-wide aggregate is conditional on completion of the ADR-080C.1 governance chain. The other rejected alternatives are independent of that predecessor acceptance.
-
-## 4. Logical identity versus physical Redis keys
-
-The logical identity and physical storage identity are deliberately separated.
+## 4. Logical identity and physical Redis keys
 
 ```yaml
 logical_identity: run_id + task_id
@@ -66,59 +62,39 @@ collision_rule: EXISTING_TASK_ID_WITH_DIFFERENT_RUN_ID_REJECT_ADMISSION
 physical_rekey_in_80C2: NOT_SELECTED
 ```
 
-Existing keys such as `hfa:dag:task:<task_id>:state` remain a temporary physical layout. A run-scoped rekey is not silently implied. Any future rekey requires a separate accepted migration protocol with compatibility reads, writer cutover, old-key reconciliation, collision detection and rollback boundaries.
+A run-scoped rekey is not silently implied. Any future rekey requires a separate accepted migration protocol.
 
 ## 5. Child admission and topology authority
 
-The child aggregate owns its immutable expected parent-edge set. Child admission is the topology commit point for that child.
+The child aggregate owns its immutable expected parent-edge set. Child admission is the topology commit point.
 
 ```yaml
-child_admission_boundary:
-  authority_scope: ONE_CHILD_TASK_AGGREGATE
-  atomic_commit_members:
-    - child_identity
-    - child_initial_state
-    - expected_parent_edge_set
-    - dependency_policy
-    - graph_identity
-    - graph_revision_or_topology_hash
-    - child_initial_revision
-    - one_canonical_admission_record
+authority_scope: ONE_CHILD_TASK_AGGREGATE
+atomic_commit_members:
+  - child_identity
+  - child_initial_state
+  - expected_parent_edge_set
+  - dependency_policy
+  - graph_identity
+  - graph_revision_or_topology_hash
+  - child_initial_revision
+  - one_canonical_admission_record
 
 expected_parent_edge_set_owner: CHILD_TASK_AGGREGATE
 expected_parent_edge_set_mutability: IMMUTABLE_AFTER_ADMISSION
-graph_identity_format: run:{run_id}:graph
-graph_revision_or_topology_hash: REQUIRED_IMMUTABLE_SNAPSHOT_IDENTIFIER
-```
-
-Normative invariants:
-
-```yaml
-dependency_count:
-  authority: false
-  rule: MUST_EQUAL_CARDINALITY_OF_EXPECTED_PARENT_EDGE_SET
-
+dependency_count_authority: false
+dependency_count_rule: MUST_EQUAL_CARDINALITY_OF_EXPECTED_PARENT_EDGE_SET
 missing_expected_parent_set: FAIL_CLOSED
 count_set_mismatch: REJECT_ADMISSION_OR_RECONCILIATION_REQUIRED
 graph_identity_missing: FAIL_CLOSED
 topology_revision_or_hash_missing: FAIL_CLOSED
-active_run_topology_mutation: FORBIDDEN_UNLESS_SEPARATE_ACCEPTED_GRAPH_REVISION_PROTOCOL
 ```
 
-The child reconstructs dependency truth from the immutable expected set plus outcome-aware applied-edge receipts. It never reconstructs authority from `remaining_deps`.
+## 6. Parent completion and fanout intent
 
-## 6. Parent completion boundary and fanout intent
+One parent completion commit may write only parent authority, one parent revision, exactly one parent CanonicalTransitionRecord and one durable dependency-fanout intent. It mutates zero child and sibling authority keys.
 
-One parent completion commit may atomically write only:
-
-- parent state, metadata and output;
-- parent monotonic revision;
-- exactly one parent CanonicalTransitionRecord;
-- one durable dependency-fanout intent.
-
-It mutates zero child and zero sibling authority keys.
-
-Every fanout intent must contain:
+Every fanout intent contains:
 
 ```yaml
 parent_transition_id: REQUIRED
@@ -128,9 +104,7 @@ child_edge_set_digest: REQUIRED
 child_edge_set_digest_algorithm: CANONICAL_SORTED_CHILD_EDGE_IDENTITIES_SHA256
 ```
 
-## 7. One canonical edge-command identity
-
-The topology edge identity and command identity have different roles, but only one command identity controls idempotency.
+## 7. Edge and command identities
 
 ```yaml
 logical_edge_id:
@@ -143,55 +117,66 @@ edge_command_id:
 
 receipt_key_authority: edge_command_id
 process_manager_identity: dependency-fanout:{parent_transition_id}
-process_manager_identity_role: COORDINATION_INSTANCE_ONLY
 ```
 
-The same `edge_command_id` delivered again returns `ALREADY_APPLIED`, increments no child revision and creates no record. A different parent transition or different outcome for the same logical edge is a contradiction, not a duplicate; it produces zero child mutation, a durable conflict record and a reconciliation candidate.
+## 8. Logical-edge resolution authority
 
-## 8. Outcome-aware edge receipts
+Command-key idempotency alone cannot prevent opposite outcomes for one logical edge from both applying. Therefore each child aggregate owns a logical-edge resolution index.
 
-Applied dependency authority is:
+```yaml
+logical_edge_resolution_authority:
+  key: logical_edge_id
+  owner: CHILD_TASK_AGGREGATE
+  value:
+    accepted_edge_command_id: REQUIRED
+    accepted_parent_transition_id: REQUIRED
+    accepted_outcome: REQUIRED
+    graph_identity: REQUIRED
+    graph_revision_or_topology_hash: REQUIRED
+    applied_child_revision: REQUIRED
+```
+
+Application contract:
+
+```yaml
+when_logical_edge_resolution_absent:
+  validate_topology: REQUIRED
+  atomic_commit:
+    - logical_edge_resolution
+    - outcome_aware_edge_receipt
+    - child_state_effect
+    - child_revision
+    - one_canonical_transition_record
+
+when_same_edge_command_id_exists:
+  result: ALREADY_APPLIED
+  child_mutation: 0
+  revision_increment: 0
+  canonical_record_count: 0
+  retry: STOP
+
+when_logical_edge_resolved_by_different_command:
+  result: CONTRADICTION
+  child_mutation: 0
+  durable_conflict_record: REQUIRED
+  reconciliation_candidate: REQUIRED
+  retry: STOP
+```
+
+Resolution, receipt, child effect, revision and canonical record are one child-aggregate atomic commit. Different-outcome double application is impossible under this contract.
+
+## 9. Outcome-aware receipts and policy
 
 ```yaml
 applied_dependency_authority: IDEMPOTENT_APPLIED_EDGE_RECEIPTS_WITH_OUTCOME
 allowed_outcomes:
   - DEPENDENCY_SATISFIED
   - DEPENDENCY_FAILED
+remaining_deps: DERIVED_PROJECTION_NOT_AUTHORITY
+ready_emitted: NON_AUTHORITATIVE_PROJECTION_RECEIPT
 ```
 
-Every receipt contains:
-
-```yaml
-edge_command_id: REQUIRED
-parent_transition_id: REQUIRED
-parent_task_id: REQUIRED
-child_task_id: REQUIRED
-outcome: REQUIRED
-graph_identity: REQUIRED
-graph_revision_or_topology_hash: REQUIRED
-applied_child_revision: REQUIRED
-```
-
-`remaining_deps` is a derived projection only. `ready_emitted` is a non-authoritative projection receipt only.
-
-## 9. Deterministic dependency policy
-
-The default policy is `ALL_REQUIRED_PARENTS_MUST_SUCCEED`.
-
-### Satisfied edge
-
-A new valid `DEPENDENCY_SATISFIED` receipt:
-
-```yaml
-child_revision_increment: 1
-canonical_transition_record: EXACTLY_ONE
-ready_when: ALL_EXPECTED_EDGES_HAVE_DEPENDENCY_SATISFIED_RECEIPTS_AND_CHILD_IS_PENDING
-ready_projection_intent: ONE_IF_CHILD_BECOMES_READY
-```
-
-### Failed edge
-
-A new valid `DEPENDENCY_FAILED` receipt commits inside the child aggregate:
+Under `ALL_REQUIRED_PARENTS_MUST_SUCCEED`, a satisfied edge increments the child revision once and produces one canonical record. A failed edge commits:
 
 ```yaml
 child_disposition: blocked_by_failure
@@ -201,68 +186,68 @@ ready_projection_intent: 0
 process_manager_retry: STOP_AFTER_RECEIPT
 ```
 
-`blocked_by_failure` is an existing terminal task-state vocabulary value. It is not a placeholder.
+Unknown policy fails closed with zero child mutation, one durable conflict record and one reconciliation candidate.
 
-Unknown dependency policy fails closed with zero child mutation, a durable conflict record and a reconciliation candidate.
+## 10. Terminal and late command matrix
 
-## 10. Terminal and late command dispositions
-
-A terminal/no-authority disposition record belongs to durable process-manager coordination state. It is not a child revision when child mutation is zero.
+Terminal disposition records belong to durable process-manager coordination state whenever child mutation is zero.
 
 ```yaml
-child_already_terminal_due_to_valid_external_cancellation:
+done:
+  unsatisfied_edge_command: CONTRADICTION
   child_mutation: 0
-  disposition: TERMINAL_CHILD_NOOP
+  durable_conflict_record: REQUIRED
+  reconciliation_candidate: REQUIRED
+  retry: STOP
+
+failed:
+  unsatisfied_edge_command: CONTRADICTION
+  child_mutation: 0
+  durable_conflict_record: REQUIRED
+  reconciliation_candidate: REQUIRED
+  retry: STOP
+
+blocked_by_failure:
+  same_command: ALREADY_APPLIED
+  different_edge_command: TERMINAL_CHILD_ALREADY_BLOCKED
+  different_edge_child_mutation: 0
+  different_edge_child_revision_increment: 0
+  different_edge_canonical_transition_record_count: 0
   durable_disposition_record: REQUIRED
+  disposition_owner: DEPENDENCY_PROCESS_MANAGER_COORDINATION_STATE
+  disposition_identity: edge_command_id
   retry: STOP
 
-child_already_blocked_by_failure_with_exact_receipt:
+dead_lettered:
+  unsatisfied_edge_command: TERMINAL_CHILD_NOOP
   child_mutation: 0
-  disposition: ALREADY_APPLIED
+  durable_disposition_record: REQUIRED
+  required_authority_evidence:
+    - terminal_transition_id
+    - child_state_authority_revision
+  missing_authority_evidence: MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION
   retry: STOP
 
-child_done_or_failed_before_required_edges_complete:
+skipped:
+  unsatisfied_edge_command: TERMINAL_CHILD_NOOP
   child_mutation: 0
-  disposition: CONTRADICTION
-  durable_conflict_record: REQUIRED
-  reconciliation_candidate: REQUIRED
-  retry: STOP
-
-child_ready_or_running_with_unsatisfied_required_edges:
-  child_mutation: 0
-  disposition: CONTRADICTION
-  durable_conflict_record: REQUIRED
-  reconciliation_candidate: REQUIRED
-  retry: STOP
-
-parent_transition_valid_but_graph_edge_missing:
-  child_mutation: 0
-  disposition: INVALID_TOPOLOGY_EDGE
-  durable_conflict_record: REQUIRED
-  reconciliation_candidate: REQUIRED
-  retry: STOP
-
-child_aggregate_missing:
-  child_mutation: 0
-  disposition: MISSING_AUTHORITY
-  durable_conflict_record: REQUIRED
-  reconciliation_candidate: REQUIRED
+  durable_disposition_record: REQUIRED
+  required_authority_evidence:
+    - terminal_transition_id
+    - child_state_authority_revision
+  missing_authority_evidence: MISSING_AUTHORITY_DURABLE_CONFLICT_AND_RECONCILIATION
   retry: STOP
 ```
 
-The process manager retries only until an outcome-aware receipt, durable terminal disposition or durable conflict record exists.
+After the first failed edge blocks a child, a later command for a different logical edge does not create a child receipt, revision or canonical record. It creates a durable per-command `TERMINAL_CHILD_ALREADY_BLOCKED` disposition keyed by `edge_command_id`, and retry stops.
 
-## 11. Ready projection semantics
+## 11. Ready projection and canonical records
 
-`ready_emitted` cannot authorize or suppress a state transition. A normal `pending -> ready` transition commits state, child revision, one canonical record and ready-projection intent in one child boundary. Missing queue projection is replayed from the canonical ready transition. Legacy marker/state conflict fails closed and enters explicit reconciliation.
+`ready_emitted` cannot authorize or suppress state. A normal `pending -> ready` commit contains state, child revision, one canonical record and ready projection intent. Missing queue projection is replayed from the canonical ready transition.
 
-## 12. Canonical record behavior
+Every newly applied valid satisfied or failed receipt increments child revision exactly once and produces exactly one child CanonicalTransitionRecord. Duplicate commands and terminal no-op dispositions do not.
 
-Every newly applied valid edge receipt, satisfied or failed, increments the child revision exactly once and produces exactly one child CanonicalTransitionRecord. The final satisfied edge may include both the receipt effect and `pending -> ready` in that same record. Duplicate commands produce neither revision nor record.
-
-The exact record schema remains ADR-080C.3. The atomic record/outbox mechanism remains ADR-080C.5.
-
-## 13. Finding disposition
+## 12. Finding disposition
 
 ```yaml
 missing_remaining_counter_unlocks_fail_open:
@@ -276,18 +261,11 @@ ready_marker_strands_pending_child:
   implementation_sprint: 84
 ```
 
-This ADR does not claim either product finding is fixed.
+## 13. Migration and dependencies
 
-## 14. Migration and rollback
+Migration remains shadow-first, single-writer and reconciliation-backed. No dual authority is allowed.
 
-1. Run a shadow process manager with zero product writes.
-2. Add child admission topology authority and outcome-aware receipts behind a single-writer gate.
-3. Disable direct parent-to-child writes before making the process manager authoritative.
-4. Never run legacy counter authority and child-revision authority as simultaneous writers.
-5. Before any new child revision commits, rollback may return to the legacy path.
-6. After cutover, rollback requires reconciliation; blind counter decrement is never re-enabled.
-
-## 15. Dependencies
+Dependencies:
 
 - ADR-080C.1 post-merge human architecture acceptance record;
 - ADR-080C.3 canonical transition and monotonic revision contract;
@@ -295,7 +273,7 @@ This ADR does not claim either product finding is fixed.
 - ADR-080C.5 event/state atomicity and outbox contract;
 - ADR-080C.6 stable writer identity and operation allowlist.
 
-## 16. Verification and acceptance state
+## 14. Verification and acceptance state
 
 ```yaml
 architecture_contracts:
@@ -304,13 +282,14 @@ architecture_contracts:
   physical_key_strategy: DECIDED
   topology_owner: DECIDED
   child_admission_commit_boundary: DECIDED
-  graph_identity_and_topology_hash: REQUIRED
   dependency_count_authority: 0
   canonical_command_identity_count: 1
-  satisfied_outcome: DECIDED
+  logical_edge_resolution_authority: DECIDED
+  same_logical_edge_conflict_check: ATOMIC
+  different_outcome_double_application: IMPOSSIBLE
   failed_outcome: DECIDED
-  terminal_child_disposition: DECIDED
-  process_manager_retry_termination: DECIDED
+  blocked_child_late_edge_disposition: DECIDED
+  terminal_state_vocabulary_mapping: COMPLETE
   technical_unresolved_choice: 0
 
 governance:
