@@ -81,6 +81,15 @@ jobs:
           python -m pytest hfa-core/tests/authority/test_redis_canonical_authority.py \
             -q --tb=short 2>&1 | tee /tmp/s81-2-contract-parity.txt
 
+      - name: Upload Redis test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint81-2-contract-redis-${{ github.event.pull_request.head.sha }}
+          path: /tmp/s81-2-contract-parity.txt
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Compile authority package
         run: python -m compileall -q hfa-core/src/hfa/authority
 
