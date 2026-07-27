@@ -16,6 +16,7 @@ from hfa.authority import (
     OperationType,
     RedisAuthorityCommitStatus,
     RedisAuthorityKeyspace,
+    RedisAuthorityPersistenceError,
     RedisCanonicalAuthorityStore,
     evaluate_authority_commit,
 )
@@ -117,18 +118,20 @@ def test_keyspace_uses_one_cluster_hash_tag() -> None:
     identity = _identity()
     keyspace = RedisAuthorityKeyspace(identity.sha256)
     keys = keyspace.commit_keys(transition_id="ctr:v1:test", operation_id="op-1")
-    assert len(keys) == 5
+    assert len(keys) == 6
     assert all(keyspace.hash_tag in key for key in keys)
     assert len({key.split("{")[1].split("}")[0] for key in keys}) == 1
     assert keyspace.receipt("op-1") != keyspace.receipt("op-2")
+    assert keyspace.operation_record("op-1") != keyspace.operation_record("op-2")
 
 
 def test_lua_script_is_packaged_next_to_core() -> None:
     script = Path(__file__).resolve().parents[2] / "src" / "hfa" / "lua" / "canonical_authority_commit.lua"
     source = script.read_text(encoding="utf-8")
     assert "Receipt-first idempotency" in source
-    assert 'redis.call("SET", KEYS[2], record_json)' in source
-    assert 'redis.call("XADD", KEYS[4]' in source
+    assert 'redis.call("SET", KEYS[2], transition_index_json)' in source
+    assert 'redis.call("SET", KEYS[4], record_json)' in source
+    assert 'redis.call("XADD", KEYS[5]' in source
     assert "HFA_ALLOW" not in source
 
 
@@ -151,7 +154,8 @@ async def test_atomic_commit_persists_one_revision_record_receipt_and_intents(st
     assert snapshot.canonical_record_hash == plan.record.canonical_record_hash
 
     keyspace = store.keyspace(command.aggregate_identity.sha256)
-    assert await redis_client.exists(keyspace.transition(plan.record.transition_id)) == 1
+    assert await redis_client.exists(keyspace.transition_index(plan.record.transition_id)) == 1
+    assert await redis_client.exists(keyspace.operation_record(command.operation_id)) == 1
     assert await redis_client.exists(keyspace.receipt(command.operation_id)) == 1
     assert await redis_client.xlen(keyspace.transition_log) == 1
     assert await redis_client.xlen(keyspace.outbox) == 1
@@ -182,6 +186,18 @@ async def test_persisted_receipt_probe_round_trips_into_policy_evaluator(store) 
     assert duplicate.decision.code is AuthorityDecisionCode.ALREADY_APPLIED
     assert duplicate.decision.return_existing_transition_id == plan.record.transition_id
     assert duplicate.commit_plan is None
+
+
+@pytest.mark.asyncio
+async def test_missing_transition_index_blocks_receipt_probe_rehydration(store, redis_client) -> None:
+    command = _admit_command()
+    plan = _accepted_plan(command, current_revision=0, current_state=None, committed_at_ms=2_500)
+    assert (await store.commit(plan)).committed
+    keyspace = store.keyspace(command.aggregate_identity.sha256)
+    await redis_client.delete(keyspace.transition_index(plan.record.transition_id))
+
+    with pytest.raises(RedisAuthorityPersistenceError, match="transition index is missing"):
+        await store.load_receipt_probe(command.aggregate_identity, command.operation_id)
 
 
 @pytest.mark.asyncio
@@ -222,6 +238,28 @@ async def test_same_operation_id_with_different_command_is_idempotency_conflict(
 
 
 @pytest.mark.asyncio
+async def test_same_operation_id_different_revision_and_type_cannot_bypass_receipt(store, redis_client) -> None:
+    admit = _admit_command(operation_id="shared-operation-id")
+    admit_plan = _accepted_plan(admit, current_revision=0, current_state=None, committed_at_ms=4_500)
+    assert (await store.commit(admit_plan)).committed
+
+    changed_command = _dispatch_command(operation_id="shared-operation-id")
+    changed_plan = _accepted_plan(
+        changed_command,
+        current_revision=1,
+        current_state="ready",
+        committed_at_ms=4_501,
+    )
+    conflict = await store.commit(changed_plan)
+
+    assert conflict.status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
+    keyspace = store.keyspace(admit.aggregate_identity.sha256)
+    assert await redis_client.xlen(keyspace.transition_log) == 1
+    assert await redis_client.xlen(keyspace.outbox) == 1
+    assert (await store.get_aggregate_snapshot(admit.aggregate_identity)).revision == 1
+
+
+@pytest.mark.asyncio
 async def test_concurrent_second_transition_fails_strict_revision_cas(store, redis_client) -> None:
     admit = _admit_command()
     admit_plan = _accepted_plan(admit, current_revision=0, current_state=None, committed_at_ms=5_000)
@@ -253,6 +291,7 @@ async def test_record_without_receipt_fails_closed_without_new_mutation(store, r
     result = await store.commit(plan)
 
     assert result.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert await redis_client.exists(keyspace.operation_record(command.operation_id)) == 1
     assert await redis_client.xlen(keyspace.transition_log) == 1
     assert await redis_client.xlen(keyspace.outbox) == 1
     assert (await store.get_aggregate_snapshot(command.aggregate_identity)).revision == 1
@@ -268,7 +307,8 @@ async def test_wrong_redis_key_type_fails_before_any_authority_write(store, redi
     result = await store.commit(plan)
 
     assert result.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
-    assert await redis_client.exists(keyspace.transition(plan.record.transition_id)) == 0
+    assert await redis_client.exists(keyspace.transition_index(plan.record.transition_id)) == 0
+    assert await redis_client.exists(keyspace.operation_record(command.operation_id)) == 0
     assert await redis_client.exists(keyspace.receipt(command.operation_id)) == 0
     assert await redis_client.exists(keyspace.transition_log) == 0
     assert await redis_client.exists(keyspace.outbox) == 0
