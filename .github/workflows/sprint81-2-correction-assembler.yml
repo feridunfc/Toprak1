@@ -85,6 +85,7 @@ jobs:
         with:
           name: sprint81-2-correction-parts-${{ github.event.pull_request.head.sha }}
           path: .s81_2_patch
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 3
 
