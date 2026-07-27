@@ -84,11 +84,14 @@ Before idempotency classification Lua:
 5. validates exact schemas and semantic receipt–record–index equality;
 6. only then compares canonical command hashes.
 
-For an exact duplicate, the stored record, receipt and index payload bytes must
-also equal the incoming payload bytes.
+Sprint 81.2 selects **Model B — first persisted record wins**. Once the
+stored receipt, record and transition index have independently passed storage
+and semantic validation, canonical command hash equality is sufficient for
+`ALREADY_APPLIED`. Writer-generated commit metadata such as `committed_at_ms`
+may differ across concurrent independent evaluations.
 
 ```yaml
-same_operation_same_command_and_exact_payloads: ALREADY_APPLIED
+same_operation_same_canonical_command_hash: ALREADY_APPLIED
 same_operation_different_command: IDEMPOTENCY_CONFLICT
 stored_proof_missing_tampered_or_inconsistent: CANONICAL_RECORD_CORRUPTION_CONFLICT
 ```
@@ -111,8 +114,21 @@ required_existing_head_proof:
 ```
 
 The stream tails must match the aggregate revision, transition ID, record hash,
-operation identity and stored payloads. Missing streams, missing proof objects,
-or mismatched tails fail closed before any new lifecycle write.
+operation identity and stored payloads. The transition-index, receipt and record
+hash cardinalities and both stream lengths must also equal the current revision.
+Deletion or insertion anywhere in those persisted collections therefore fails
+closed before any new lifecycle write.
+
+```yaml
+current_head_continuity: PROVEN
+historical_cardinality_continuity: PROVEN
+full_historical_content_rehash: NOT_YET_PROVEN
+historical_content_tamper_detection: DEFERRED_TO_SPRINT_85
+```
+
+Sprint 81.2 does not claim that every non-head historical payload is rehashed on
+every commit. Full replay reconstruction and historical content verification
+remain a separately reviewed Sprint 85 responsibility.
 
 ## Durable conflict evidence
 
@@ -138,6 +154,11 @@ Conflict identity is deterministically derived from aggregate identity,
 operation ID, incoming command hash, stored command hash and conflict type.
 `HSETNX` deduplicates repeated identical conflict observations; `XADD` occurs
 only for the first insert.
+
+If either conflict store has the wrong Redis type, the script cannot truthfully
+claim durable conflict evidence. It returns the distinct fail-closed result
+`CONFLICT_EVIDENCE_STORE_UNAVAILABLE`, performs zero lifecycle mutation and
+requires operator/reconciliation handling.
 
 The Python `record_conflict()` method remains only for explicit operator audit
 notes. It is not used to complete a Lua conflict decision after the fact.
@@ -199,6 +220,10 @@ required_adversarial_coverage:
   transition_log_or_outbox_missing: PASS
   aggregate_head_stream_tail_mismatch: PASS
   durable_conflict_atomicity_and_deduplication: PASS
+  concurrent_same_command_different_commit_metadata: PASS
+  conflict_store_unavailable_result: PASS
+  old_revision_proof_deletion: PASS
+  old_stream_entry_deletion: PASS
   receipt_probe_lookup_binding: PASS
   snapshot_exact_validation: PASS
 ```
@@ -212,7 +237,12 @@ existing_task_claim_lua_modified: false
 existing_task_complete_lua_modified: false
 scheduler_or_worker_composition_modified: false
 trusted_runtime_adapter_implemented: false
+operation_digest_trust_boundary:
+  issued_and_recomputed_by_Python_adapter: true
+  direct_Lua_invocation: FORBIDDEN
+  runtime_wiring_before_independent_binding_review: FORBIDDEN
 historical_revision_synthesis: false
+full_historical_content_rehash: false
 legacy_key_migration: false
 feature_flag_cutover: false
 production_deployment: false

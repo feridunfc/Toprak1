@@ -324,9 +324,16 @@ if not sha256_hex_ok(identity_sha)
     return result("INVALID_COMMIT_PLAN", nil, nil, "invalid_identity_or_hash_fields")
 end
 
--- Conflict storage must itself be healthy before any outcome that requires it.
-if not key_type_ok(KEYS[7], "hash") or not key_type_ok(KEYS[8], "stream") then
-    return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "conflict_store_unavailable")
+-- Conflict storage failure is not reported as an evidenced canonical conflict.
+-- It is a separate fail-closed operational result because durable evidence cannot
+-- be guaranteed while either conflict store has the wrong Redis type.
+local conflict_index_type = redis_type(KEYS[7])
+local conflict_stream_type = redis_type(KEYS[8])
+if conflict_index_type ~= "none" and conflict_index_type ~= "hash" then
+    return result("CONFLICT_EVIDENCE_STORE_UNAVAILABLE", nil, nil, "conflict_index_type_mismatch")
+end
+if conflict_stream_type ~= "none" and conflict_stream_type ~= "stream" then
+    return result("CONFLICT_EVIDENCE_STORE_UNAVAILABLE", nil, nil, "conflict_stream_type_mismatch")
 end
 if not key_type_ok(KEYS[1], "hash")
     or not key_type_ok(KEYS[2], "hash")
@@ -406,12 +413,10 @@ if existing_receipt_raw or existing_record_raw then
     if not proof then
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", pre_record.canonical_command_hash, pre_record.transition_id, pre_record.to_revision, proof_error)
     end
+    -- Model B: the first fully validated persisted record wins. The canonical
+    -- command hash binds all requested authoritative effects. Writer-generated
+    -- commit metadata may differ across concurrent independent evaluations.
     if proof.receipt.canonical_command_hash == canonical_command_hash then
-        if proof.record_payload ~= record_json
-            or proof.receipt_payload ~= receipt_json
-            or proof.index_payload ~= transition_index_json then
-            return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", proof.receipt.canonical_command_hash, proof.receipt.transition_id, proof.receipt.aggregate_revision, "exact_duplicate_payload_mismatch")
-        end
         return result("ALREADY_APPLIED", proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
     end
     return emit_conflict("IDEMPOTENCY_CONFLICT", proof.receipt.canonical_command_hash, proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
@@ -502,6 +507,17 @@ if aggregate_exists == 1 then
         or outbox_tail.operation_digest ~= stored_operation_digest
         or outbox_tail.projection_intents_json ~= stored_projection_intents_json then
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", stored_command_hash, stored_transition_id, current_revision, "outbox_tail_mismatch")
+    end
+
+    -- Every accepted revision contributes exactly one index, receipt, record,
+    -- transition-log entry and outbox entry. This detects deletion or insertion
+    -- anywhere in the persisted history, not only corruption of the current tail.
+    if redis.call("HLEN", KEYS[2]) ~= current_revision
+        or redis.call("HLEN", KEYS[3]) ~= current_revision
+        or redis.call("HLEN", KEYS[4]) ~= current_revision
+        or redis.call("XLEN", KEYS[5]) ~= current_revision
+        or redis.call("XLEN", KEYS[6]) ~= current_revision then
+        return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", stored_command_hash, stored_transition_id, current_revision, "historical_cardinality_mismatch")
     end
 end
 
