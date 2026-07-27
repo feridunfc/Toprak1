@@ -100,12 +100,25 @@ jobs:
           print("SPRINT81_2_EXACT_SCOPE_OK")
           PY
 
-      - name: Run Sprint 81.1 and 81.2 authority tests
+      - name: Run Sprint 81.1 policy tests
+        run: python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q
+
+      - name: Run Sprint 81.2 real Redis tests
+        shell: bash
         run: |
-          python -m pytest \
-            hfa-core/tests/authority/test_canonical_transition.py \
-            hfa-core/tests/authority/test_redis_canonical_authority.py \
-            -q
+          mkdir -p local_out/sprint81_2
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_redis_canonical_authority.py \
+            -q --tb=short 2>&1 | tee local_out/sprint81_2/pytest.txt
+
+      - name: Upload Sprint 81.2 test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint81-2-pytest-${{ github.event.pull_request.head.sha }}
+          path: local_out/sprint81_2/pytest.txt
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Compile authority package
         run: python -m compileall -q hfa-core/src/hfa/authority
