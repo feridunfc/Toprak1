@@ -4,7 +4,7 @@
 
 ```yaml
 implementation_slice: 81.2
-status: TECHNICAL_IMPLEMENTATION_IN_PROGRESS
+status: TECHNICAL_SLICE_COMPLETE_READY_FOR_INDEPENDENT_REVIEW
 base_branch: baseline/local-import
 base_head: 34f7dd8e918829c55e6b64a5a09f623305dc9811
 
@@ -72,14 +72,20 @@ consume aggregate revision.
 3: VALIDATE_STORED_RECEIPT_RECORD_AND_TRANSITION_INDEX
 4: COMPARE_CANONICAL_COMMAND_AND_RECORD_HASHES
 5: REJECT_INCOMPLETE_OR_COLLIDING_STORED_PROOF
-6: COMPARE_EXPECTED_REVISION
-7: COMPARE_PREVIOUS_STATE
-8: WRITE_STATE_REVISION_INDEX_RECORD_RECEIPT_LOG_AND_OUTBOX
+6: VALIDATE_EXISTING_AGGREGATE_SNAPSHOT
+7: COMPARE_EXPECTED_REVISION
+8: COMPARE_PREVIOUS_STATE
+9: WRITE_STATE_REVISION_INDEX_RECORD_RECEIPT_LOG_AND_OUTBOX
 ```
 
 Receipt and operation-record lookup remain bound only to canonical aggregate
 identity plus operation ID. Operation type, mutation class, expected revision
 and state cannot bypass an existing receipt.
+
+An existing aggregate hash is never treated as logical revision zero. Revision,
+identity, state/null marker, last transition, last record hash and update time
+must all form a complete authority snapshot before a subsequent revision may
+commit.
 
 ## Outcomes
 
@@ -88,6 +94,7 @@ receipt_present_same_command_and_record: ALREADY_APPLIED
 receipt_present_different_command_or_record: IDEMPOTENCY_CONFLICT
 record_or_receipt_without_its_pair: CANONICAL_RECORD_CORRUPTION_CONFLICT
 transition_index_collision: CANONICAL_RECORD_CORRUPTION_CONFLICT
+partial_or_invalid_aggregate_snapshot: CANONICAL_RECORD_CORRUPTION_CONFLICT
 current_revision_less_than_expected: FUTURE_REVISION_CONFLICT
 current_revision_greater_than_expected: STALE_REVISION_CONFLICT
 create_revision_zero_existing_aggregate: AGGREGATE_ALREADY_EXISTS_CONFLICT
@@ -113,8 +120,9 @@ a new public writer authority or weaken the Sprint 81.1 threat model.
 The dedicated workflow uses isolated Redis 7 and requires:
 
 ```yaml
-Sprint_81_1_policy_tests: PASS
-Sprint_81_2_real_Redis_tests: PASS
+Sprint_81_1_policy_tests: 77_PASSED
+Sprint_81_2_real_Redis_tests: 14_PASSED
+focused_total: 91_PASSED
 compileall: PASS
 patch_whitespace: PASS
 exact_changed_files: 6
@@ -127,6 +135,8 @@ required_behaviors:
   concurrent_same_revision_second_commit: STALE_REVISION_CONFLICT
   incomplete_stored_proof: CANONICAL_RECORD_CORRUPTION_CONFLICT
   missing_transition_index_blocks_rehydration: true
+  partial_aggregate_is_not_revision_zero: true
+  incomplete_committed_snapshot_blocks_next_revision: true
   wrong_Redis_key_type: FAIL_CLOSED_BEFORE_AUTHORITY_WRITE
   keys_have_no_TTL: true
   log_and_outbox_exactly_once: true
