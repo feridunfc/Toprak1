@@ -4,10 +4,11 @@ Sprint 81.2 adds a persistence boundary only. It does not wire existing
 scheduler/worker writers to this adapter, migrate historical keys, or authorize
 runtime cutover.
 
-All keys participating in one authority commit share the same Redis Cluster
-hash tag. The Lua script performs receipt-first idempotency resolution, strict
-revision CAS, immutable record/receipt insertion, aggregate state advancement,
-and append-only log/outbox writes in one Redis script execution.
+All keys participating in one authority decision share the same Redis Cluster
+hash tag. The Lua script performs receipt-first proof validation, strict
+revision/state CAS, immutable record/receipt insertion, aggregate-head
+continuity checks, durable conflict recording, and append-only log/outbox writes
+in one Redis script execution.
 """
 from __future__ import annotations
 
@@ -24,6 +25,8 @@ from hfa.lua.loader import LuaScriptLoader
 from . import canonical_transition as _core
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+_MAX_SAFE_INTEGER = 2**53 - 1
 
 
 class RedisAuthorityPersistenceError(RuntimeError):
@@ -61,21 +64,22 @@ class PersistedAggregateSnapshot:
     state: str | None
     transition_id: str
     canonical_record_hash: str
+    canonical_command_hash: str
+    operation_id: str
+    operation_digest: str
+    projection_intents_json: str
     updated_at_ms: int
 
 
 @dataclass(frozen=True)
 class RedisAuthorityKeyspace:
-    """Cluster-slot-safe Redis keys for one aggregate authority."""
+    """Cluster-slot-safe fixed Redis keys for one aggregate authority."""
 
     canonical_aggregate_identity_sha256: str
     namespace: str = "hfa:authority:v1"
 
     def __post_init__(self) -> None:
-        if type(self.canonical_aggregate_identity_sha256) is not str or _SHA256_RE.fullmatch(
-            self.canonical_aggregate_identity_sha256
-        ) is None:
-            raise ValueError("canonical_aggregate_identity_sha256 must be lowercase SHA-256 hex")
+        _sha256(self.canonical_aggregate_identity_sha256, "canonical_aggregate_identity_sha256")
         if type(self.namespace) is not str or not self.namespace or "{" in self.namespace or "}" in self.namespace:
             raise ValueError("namespace must be a non-empty Redis key prefix without hash-tag braces")
 
@@ -87,14 +91,17 @@ class RedisAuthorityKeyspace:
     def aggregate(self) -> str:
         return f"{self.namespace}:{self.hash_tag}:aggregate"
 
-    def transition_index(self, transition_id: str) -> str:
-        return f"{self.namespace}:{self.hash_tag}:transition:{_nonempty(transition_id, 'transition_id')}"
+    @property
+    def transition_indexes(self) -> str:
+        return f"{self.namespace}:{self.hash_tag}:transition-indexes"
 
-    def receipt(self, operation_id: str) -> str:
-        return f"{self.namespace}:{self.hash_tag}:receipt:{_operation_digest(operation_id)}"
+    @property
+    def receipts(self) -> str:
+        return f"{self.namespace}:{self.hash_tag}:receipts"
 
-    def operation_record(self, operation_id: str) -> str:
-        return f"{self.namespace}:{self.hash_tag}:operation-record:{_operation_digest(operation_id)}"
+    @property
+    def operation_records(self) -> str:
+        return f"{self.namespace}:{self.hash_tag}:operation-records"
 
     @property
     def transition_log(self) -> str:
@@ -105,23 +112,47 @@ class RedisAuthorityKeyspace:
         return f"{self.namespace}:{self.hash_tag}:outbox"
 
     @property
+    def conflict_index(self) -> str:
+        return f"{self.namespace}:{self.hash_tag}:conflict-index"
+
+    @property
     def conflicts(self) -> str:
         return f"{self.namespace}:{self.hash_tag}:conflicts"
 
-    def commit_keys(self, *, transition_id: str, operation_id: str) -> list[str]:
+    def operation_field(self, operation_id: str) -> str:
+        return _operation_digest(operation_id)
+
+    def transition_field(self, transition_id: str) -> str:
+        return _nonempty(transition_id, "transition_id")
+
+    def commit_keys(self) -> list[str]:
         return [
             self.aggregate,
-            self.transition_index(transition_id),
-            self.receipt(operation_id),
-            self.operation_record(operation_id),
+            self.transition_indexes,
+            self.receipts,
+            self.operation_records,
             self.transition_log,
             self.outbox,
+            self.conflict_index,
+            self.conflicts,
         ]
 
 
 def _nonempty(value: Any, field_name: str) -> str:
     if type(value) is not str or not value:
         raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _sha256(value: Any, field_name: str) -> str:
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be lowercase SHA-256 hex")
+    return value
+
+
+def _safe_int(value: Any, field_name: str, *, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum or value > _MAX_SAFE_INTEGER:
+        raise ValueError(f"{field_name} must be an exact safe integer >= {minimum}")
     return value
 
 
@@ -174,9 +205,8 @@ def _record_from_payload(payload: Mapping[str, Any]) -> _core.CanonicalTransitio
         structured = payload["canonical_aggregate_identity"]
         if not isinstance(structured, Mapping):
             raise TypeError("canonical_aggregate_identity must be an object")
-        aggregate_type = _core.AggregateType(payload["aggregate_type"])
         identity = _core.CanonicalAggregateIdentity(
-            aggregate_type=aggregate_type,
+            aggregate_type=_core.AggregateType(payload["aggregate_type"]),
             run_id=structured["run_id"],
             task_id=structured.get("task_id"),
         )
@@ -238,9 +268,22 @@ def _decode_object(raw: str | bytes, *, field_name: str) -> Mapping[str, Any]:
     return value
 
 
+def _decode_storage_envelope(raw: str | bytes, *, field_name: str) -> tuple[str, Mapping[str, Any]]:
+    envelope = _decode_object(raw, field_name=f"{field_name} envelope")
+    if set(envelope) != {"payload", "storage_sha1"}:
+        raise RedisAuthorityPersistenceError(f"{field_name} envelope fields are invalid")
+    payload = envelope.get("payload")
+    digest = envelope.get("storage_sha1")
+    if type(payload) is not str or type(digest) is not str or _SHA1_RE.fullmatch(digest) is None:
+        raise RedisAuthorityPersistenceError(f"{field_name} envelope values are invalid")
+    actual = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    if actual != digest:
+        raise RedisAuthorityPersistenceError(f"{field_name} storage integrity digest mismatch")
+    return payload, _decode_object(payload, field_name=field_name)
+
+
 def _validate_transition_index(payload: Mapping[str, Any], record: _core.CanonicalTransitionRecord) -> None:
-    expected = _transition_index_payload(record)
-    if dict(payload) != expected:
+    if dict(payload) != _transition_index_payload(record):
         raise RedisAuthorityPersistenceError("transition index does not match canonical record")
 
 
@@ -291,16 +334,14 @@ class RedisCanonicalAuthorityStore:
         receipt_payload = _receipt_payload(receipt)
         transition_index_payload = _transition_index_payload(record)
         projection_intents = record_payload["durable_projection_intents"]
+        operation_digest = keyspace.operation_field(record.operation_id)
         is_create = record.operation_type in {
             _core.OperationType.TASK_ADMIT.value,
             _core.OperationType.RUN_CREATE.value,
         }
         raw = await self._commit_loader.run(
-            num_keys=6,
-            keys=keyspace.commit_keys(
-                transition_id=record.transition_id,
-                operation_id=record.operation_id,
-            ),
+            num_keys=8,
+            keys=keyspace.commit_keys(),
             args=[
                 record.aggregate_identity_sha256,
                 str(record.from_revision),
@@ -313,6 +354,7 @@ class RedisCanonicalAuthorityStore:
                 record.canonical_record_hash,
                 record.canonical_command_hash,
                 record.operation_id,
+                operation_digest,
                 record.operation_type,
                 str(record.committed_at_ms),
                 _canonical_text(transition_index_payload),
@@ -333,24 +375,32 @@ class RedisCanonicalAuthorityStore:
             raise TypeError("aggregate_identity must be CanonicalAggregateIdentity")
         operation_id = _nonempty(operation_id, "operation_id")
         keyspace = self.keyspace(aggregate_identity.sha256)
-        raw_receipt, raw_record = await self._redis.mget(
-            keyspace.receipt(operation_id),
-            keyspace.operation_record(operation_id),
-        )
+        field = keyspace.operation_field(operation_id)
+        raw_receipt = await self._redis.hget(keyspace.receipts, field)
+        raw_record = await self._redis.hget(keyspace.operation_records, field)
         if raw_receipt is None and raw_record is None:
             return None
         if raw_receipt is None or raw_record is None:
             raise RedisAuthorityPersistenceError("stored receipt proof is incomplete")
-        receipt = _receipt_from_payload(_decode_object(raw_receipt, field_name="operation receipt"))
-        record = _record_from_payload(_decode_object(raw_record, field_name="canonical operation record"))
-        raw_index = await self._redis.get(keyspace.transition_index(record.transition_id))
+        _, receipt_payload = _decode_storage_envelope(raw_receipt, field_name="operation receipt")
+        _, record_payload = _decode_storage_envelope(raw_record, field_name="canonical operation record")
+        receipt = _receipt_from_payload(receipt_payload)
+        record = _record_from_payload(record_payload)
+        raw_index = await self._redis.hget(keyspace.transition_indexes, keyspace.transition_field(record.transition_id))
         if raw_index is None:
             raise RedisAuthorityPersistenceError("canonical transition index is missing")
-        _validate_transition_index(
-            _decode_object(raw_index, field_name="canonical transition index"),
-            record,
-        )
-        return _core.ReceiptProbe(receipt=receipt, canonical_store_record=record)
+        _, index_payload = _decode_storage_envelope(raw_index, field_name="canonical transition index")
+        _validate_transition_index(index_payload, record)
+        probe = _core.ReceiptProbe(receipt=receipt, canonical_store_record=record)
+        try:
+            _core._validate_stored_duplicate_proof(
+                probe,
+                lookup_aggregate_identity_sha256=aggregate_identity.sha256,
+                lookup_operation_id=operation_id,
+            )
+        except _core.AuthorityContractError as exc:
+            raise RedisAuthorityPersistenceError(f"stored receipt proof mismatch: {exc}") from exc
+        return probe
 
     async def get_aggregate_snapshot(
         self,
@@ -362,21 +412,57 @@ class RedisCanonicalAuthorityStore:
         if not raw:
             return None
         data = {_as_text(key): _as_text(value) for key, value in raw.items()}
+        expected_fields = {
+            "canonical_aggregate_identity_sha256",
+            "revision",
+            "state",
+            "state_is_null",
+            "transition_id",
+            "canonical_record_hash",
+            "canonical_command_hash",
+            "operation_id",
+            "operation_digest",
+            "projection_intents_json",
+            "updated_at_ms",
+        }
+        if set(data) != expected_fields:
+            raise RedisAuthorityPersistenceError("aggregate snapshot fields are incomplete or unexpected")
         try:
-            state = None if data["state_is_null"] == "1" else data["state"]
-            snapshot = PersistedAggregateSnapshot(
-                canonical_aggregate_identity_sha256=data["canonical_aggregate_identity_sha256"],
-                revision=int(data["revision"]),
-                state=state,
-                transition_id=data["transition_id"],
-                canonical_record_hash=data["canonical_record_hash"],
-                updated_at_ms=int(data["updated_at_ms"]),
-            )
-        except (KeyError, ValueError) as exc:
+            identity_sha = _sha256(data["canonical_aggregate_identity_sha256"], "snapshot identity")
+            revision = _safe_int(int(data["revision"]), "snapshot revision", minimum=1)
+            updated_at_ms = _safe_int(int(data["updated_at_ms"]), "snapshot updated_at_ms")
+            if data["state_is_null"] not in {"0", "1"}:
+                raise ValueError("state_is_null must be 0 or 1")
+            state = None if data["state_is_null"] == "1" else _nonempty(data["state"], "snapshot state")
+            if state is None and data["state"] != "":
+                raise ValueError("null state must use an empty state value")
+            transition_id = _nonempty(data["transition_id"], "snapshot transition_id")
+            record_hash = _sha256(data["canonical_record_hash"], "snapshot canonical_record_hash")
+            command_hash = _sha256(data["canonical_command_hash"], "snapshot canonical_command_hash")
+            operation_id = _nonempty(data["operation_id"], "snapshot operation_id")
+            operation_digest = _sha256(data["operation_digest"], "snapshot operation_digest")
+            if operation_digest != _operation_digest(operation_id):
+                raise ValueError("snapshot operation digest mismatch")
+            projection_intents_json = data["projection_intents_json"]
+            decoded_intents = json.loads(projection_intents_json)
+            if not isinstance(decoded_intents, list):
+                raise ValueError("projection_intents_json must decode to a list")
+        except (ValueError, json.JSONDecodeError) as exc:
             raise RedisAuthorityPersistenceError(f"invalid aggregate snapshot: {exc}") from exc
-        if snapshot.canonical_aggregate_identity_sha256 != aggregate_identity.sha256:
+        if identity_sha != aggregate_identity.sha256:
             raise RedisAuthorityPersistenceError("aggregate snapshot identity mismatch")
-        return snapshot
+        return PersistedAggregateSnapshot(
+            canonical_aggregate_identity_sha256=identity_sha,
+            revision=revision,
+            state=state,
+            transition_id=transition_id,
+            canonical_record_hash=record_hash,
+            canonical_command_hash=command_hash,
+            operation_id=operation_id,
+            operation_digest=operation_digest,
+            projection_intents_json=projection_intents_json,
+            updated_at_ms=updated_at_ms,
+        )
 
     async def record_conflict(
         self,
@@ -387,12 +473,17 @@ class RedisCanonicalAuthorityStore:
         observed_at_ms: int,
         detail: Mapping[str, Any] | None = None,
     ) -> str:
+        """Append an operator-originated conflict note outside authority commit decisions.
+
+        Authority commit conflicts are recorded atomically by the Lua script. This
+        helper remains for explicit operator/audit notes and is not used to complete
+        a commit result after the fact.
+        """
         if not isinstance(aggregate_identity, _core.CanonicalAggregateIdentity):
             raise TypeError("aggregate_identity must be CanonicalAggregateIdentity")
         conflict_type = _nonempty(conflict_type, "conflict_type")
         operation_id = _nonempty(operation_id, "operation_id")
-        if type(observed_at_ms) is not int or observed_at_ms < 0:
-            raise ValueError("observed_at_ms must be a non-negative exact int")
+        observed_at_ms = _safe_int(observed_at_ms, "observed_at_ms")
         payload = _canonical_text(detail or {})
         return _as_text(
             await self._redis.xadd(
@@ -402,6 +493,7 @@ class RedisCanonicalAuthorityStore:
                     "operation_id": operation_id,
                     "observed_at_ms": str(observed_at_ms),
                     "detail_json": payload,
+                    "origin": "OPERATOR_NOTE",
                 },
             )
         )
@@ -415,7 +507,10 @@ class RedisCanonicalAuthorityStore:
         except (ValueError, IndexError) as exc:
             raise RedisAuthorityPersistenceError(f"unknown canonical authority Lua result: {raw!r}") from exc
         transition_id = _as_text(raw[1]) if len(raw) > 1 and raw[1] not in (None, "", b"") else None
-        revision = int(_as_text(raw[2])) if len(raw) > 2 and raw[2] not in (None, "", b"") else None
+        try:
+            revision = int(_as_text(raw[2])) if len(raw) > 2 and raw[2] not in (None, "", b"") else None
+        except ValueError as exc:
+            raise RedisAuthorityPersistenceError("canonical authority Lua revision is invalid") from exc
         detail = _as_text(raw[3]) if len(raw) > 3 and raw[3] not in (None, b"") else ""
         return RedisAuthorityCommitResult(status, transition_id, revision, detail)
 

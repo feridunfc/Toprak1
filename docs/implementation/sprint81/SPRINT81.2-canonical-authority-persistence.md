@@ -4,7 +4,7 @@
 
 ```yaml
 implementation_slice: 81.2
-status: TECHNICAL_SLICE_COMPLETE_READY_FOR_INDEPENDENT_REVIEW
+status: CORRECTED_READY_FOR_INDEPENDENT_IMPLEMENTATION_RE_REVIEW
 base_branch: baseline/local-import
 base_head: 34f7dd8e918829c55e6b64a5a09f623305dc9811
 
@@ -22,13 +22,36 @@ Sprint 81.2 implements the physical persistence boundary consumed by accepted
 Sprint 81.1 `AuthorityCommitPlan` values. It does not route scheduler, worker,
 control-plane or recovery traffic through the new store.
 
-The adapter persists one accepted aggregate mutation as:
+## Fixed aggregate-level key layout
+
+Every key uses `{canonical_aggregate_identity_sha256}` as one Redis Cluster hash
+tag:
+
+```text
+hfa:authority:v1:{aggregate_sha256}:aggregate
+hfa:authority:v1:{aggregate_sha256}:transition-indexes
+hfa:authority:v1:{aggregate_sha256}:receipts
+hfa:authority:v1:{aggregate_sha256}:operation-records
+hfa:authority:v1:{aggregate_sha256}:log
+hfa:authority:v1:{aggregate_sha256}:outbox
+hfa:authority:v1:{aggregate_sha256}:conflict-index
+hfa:authority:v1:{aggregate_sha256}:conflicts
+```
+
+Transition indexes, receipts and operation records are fixed hashes. Their
+fields are transition IDs or collision-safe operation-ID digests. This allows
+Lua to resolve an existing operation proof and the current aggregate head
+without deriving a key from the incoming transition ID.
+
+Authority keys have no TTL.
+
+## Accepted mutation atomicity
 
 ```yaml
 authority_commit:
   aggregate_state_and_revision: 1
+  canonical_transition_index: 1
   canonical_operation_record: 1
-  transition_uniqueness_index: 1
   immutable_operation_receipt: 1
   aggregate_transition_log_entry: 1
   aggregate_outbox_entry: 1
@@ -40,106 +63,143 @@ execution_boundary:
   TTL: FORBIDDEN
 ```
 
-## Physical key layout
+## Stored proof integrity
 
-All keys for one aggregate share `{canonical_aggregate_identity_sha256}` as the
-Redis Cluster hash tag:
+Each immutable transition index, operation record and receipt is stored in a
+Redis storage envelope:
 
-```text
-hfa:authority:v1:{aggregate_sha256}:aggregate
-hfa:authority:v1:{aggregate_sha256}:transition:{transition_id}
-hfa:authority:v1:{aggregate_sha256}:receipt:{operation_id_sha256}
-hfa:authority:v1:{aggregate_sha256}:operation-record:{operation_id_sha256}
-hfa:authority:v1:{aggregate_sha256}:log
-hfa:authority:v1:{aggregate_sha256}:outbox
-hfa:authority:v1:{aggregate_sha256}:conflicts
+```yaml
+storage_envelope:
+  payload: EXACT_JSON_BYTES
+  storage_sha1: REDIS_LUA_COMPUTED
 ```
 
-The operation-record key is the immutable canonical record store entry used by
-receipt-first proof resolution. Its key is stable when an incoming command
-reuses the same operation ID with a different operation type, expected revision
-or state. The transition key is an immutable transition-ID uniqueness index.
+Before idempotency classification Lua:
 
-The aggregate hash is the current authority snapshot. The log and outbox are
-append-only Redis streams. Conflict evidence is a separate stream and does not
-consume aggregate revision.
+1. loads the record and receipt through the stable operation field;
+2. obtains the historical transition ID from the stored record;
+3. loads that transition index independently of the incoming transition ID;
+4. verifies every storage digest;
+5. validates exact schemas and semantic receipt–record–index equality;
+6. only then compares canonical command hashes.
+
+For an exact duplicate, the stored record, receipt and index payload bytes must
+also equal the incoming payload bytes.
+
+```yaml
+same_operation_same_command_and_exact_payloads: ALREADY_APPLIED
+same_operation_different_command: IDEMPOTENCY_CONFLICT
+stored_proof_missing_tampered_or_inconsistent: CANONICAL_RECORD_CORRUPTION_CONFLICT
+```
+
+The Redis storage digest is an additional corruption-detection layer. It does
+not replace the accepted canonical SHA-256 record hash.
+
+## Existing-head and history continuity
+
+For every commit after revision one, the aggregate head is validated against:
+
+```yaml
+required_existing_head_proof:
+  last_operation_id_and_digest: REQUIRED
+  last_transition_index: PRESENT_AND_MATCHING
+  last_operation_record: PRESENT_AND_STORAGE_VALID
+  last_operation_receipt: PRESENT_AND_MATCHING
+  transition_log_tail: MATCHING
+  outbox_tail: MATCHING
+```
+
+The stream tails must match the aggregate revision, transition ID, record hash,
+operation identity and stored payloads. Missing streams, missing proof objects,
+or mismatched tails fail closed before any new lifecycle write.
+
+## Durable conflict evidence
+
+The Lua authority decision has access to a fixed conflict index and conflict
+stream. These outcomes write conflict evidence in the same script execution:
+
+```yaml
+conflict_outcomes:
+  - IDEMPOTENCY_CONFLICT
+  - AGGREGATE_ALREADY_EXISTS_CONFLICT
+  - CANONICAL_RECORD_CORRUPTION_CONFLICT
+
+conflict_mutation:
+  aggregate_revision_increment: 0
+  canonical_record_count: 0
+  operation_receipt_count: 0
+  transition_log_mutation: 0
+  outbox_mutation: 0
+  durable_conflict_record_count: 1
+```
+
+Conflict identity is deterministically derived from aggregate identity,
+operation ID, incoming command hash, stored command hash and conflict type.
+`HSETNX` deduplicates repeated identical conflict observations; `XADD` occurs
+only for the first insert.
+
+The Python `record_conflict()` method remains only for explicit operator audit
+notes. It is not used to complete a Lua conflict decision after the fact.
+
+## Adapter read contracts
+
+`load_receipt_probe()` verifies storage envelopes, canonical record semantics,
+transition index equality and the accepted Sprint 81.1 stored-proof validator
+against the requested aggregate and operation lookup before returning.
+
+`get_aggregate_snapshot()` exact-validates:
+
+```yaml
+snapshot:
+  exact_field_set: REQUIRED
+  identity_sha256: REQUIRED
+  revision: POSITIVE_JCS_SAFE_INTEGER
+  state_is_null: EXACT_0_OR_1
+  transition_id: NON_EMPTY
+  canonical_record_hash: SHA256
+  canonical_command_hash: SHA256
+  operation_id: NON_EMPTY
+  operation_digest: SHA256_AND_MATCHING_OPERATION_ID
+  updated_at_ms: NON_NEGATIVE_JCS_SAFE_INTEGER
+  projection_intents_json: JSON_ARRAY
+```
 
 ## Lua evaluation order
 
 ```yaml
-1: VALIDATE_COMMIT_PLAN_AND_REDIS_KEY_TYPES
-2: RESOLVE_OPERATION_RECEIPT_AND_STABLE_OPERATION_RECORD
-3: VALIDATE_STORED_RECEIPT_RECORD_AND_TRANSITION_INDEX
-4: COMPARE_CANONICAL_COMMAND_AND_RECORD_HASHES
-5: REJECT_INCOMPLETE_OR_COLLIDING_STORED_PROOF
-6: VALIDATE_EXISTING_AGGREGATE_SNAPSHOT
-7: COMPARE_EXPECTED_REVISION
-8: COMPARE_PREVIOUS_STATE
-9: WRITE_STATE_REVISION_INDEX_RECORD_RECEIPT_LOG_AND_OUTBOX
+1: VALIDATE_COMMIT_PLAN_AND_CONFLICT_STORE
+2: VALIDATE_REDIS_KEY_TYPES
+3: RESOLVE_OPERATION_RECEIPT_AND_RECORD_BY_STABLE_OPERATION_FIELD
+4: LOAD_HISTORICAL_TRANSITION_INDEX_FROM_STORED_RECORD
+5: VALIDATE_STORAGE_DIGESTS_AND_STORED_PROOF_SEMANTICS
+6: COMPARE_CANONICAL_COMMAND_HASH
+7: VALIDATE_EXISTING_AGGREGATE_HEAD_AND_STREAM_CONTINUITY
+8: COMPARE_EXPECTED_REVISION
+9: COMPARE_PREVIOUS_STATE
+10: WRITE_ACCEPTED_STATE_RECORD_RECEIPT_LOG_AND_OUTBOX
 ```
-
-Receipt and operation-record lookup remain bound only to canonical aggregate
-identity plus operation ID. Operation type, mutation class, expected revision
-and state cannot bypass an existing receipt.
-
-An existing aggregate hash is never treated as logical revision zero. Revision,
-identity, state/null marker, last transition, last record hash and update time
-must all form a complete authority snapshot before a subsequent revision may
-commit.
-
-## Outcomes
-
-```yaml
-receipt_present_same_command_and_record: ALREADY_APPLIED
-receipt_present_different_command_or_record: IDEMPOTENCY_CONFLICT
-record_or_receipt_without_its_pair: CANONICAL_RECORD_CORRUPTION_CONFLICT
-transition_index_collision: CANONICAL_RECORD_CORRUPTION_CONFLICT
-partial_or_invalid_aggregate_snapshot: CANONICAL_RECORD_CORRUPTION_CONFLICT
-current_revision_less_than_expected: FUTURE_REVISION_CONFLICT
-current_revision_greater_than_expected: STALE_REVISION_CONFLICT
-create_revision_zero_existing_aggregate: AGGREGATE_ALREADY_EXISTS_CONFLICT
-previous_state_mismatch: ILLEGAL_STATE_TRANSITION
-accepted_commit: COMMITTED
-```
-
-All non-`COMMITTED` outcomes perform zero new lifecycle, transition-log or outbox
-mutation.
-
-## Stored proof rehydration
-
-`RedisCanonicalAuthorityStore.load_receipt_probe()` loads the immutable receipt,
-operation-indexed canonical record and transition uniqueness index. It validates
-the record through the Sprint 81.1 contract, verifies all three stored objects
-agree, and returns a `ReceiptProbe` suitable for receipt-first policy evaluation.
-
-The codec is internal to the trusted `hfa.authority` package. It does not create
-a new public writer authority or weaken the Sprint 81.1 threat model.
 
 ## Verification contract
 
 The dedicated workflow uses isolated Redis 7 and requires:
 
 ```yaml
-Sprint_81_1_policy_tests: 77_PASSED
-Sprint_81_2_real_Redis_tests: 14_PASSED
-focused_total: 91_PASSED
+Sprint_81_1_policy_tests: PASS
+expanded_Sprint_81_2_real_Redis_tests: PASS
 compileall: PASS
 patch_whitespace: PASS
 exact_changed_files: 6
 
-required_behaviors:
-  first_commit: COMMITTED
-  exact_duplicate: ALREADY_APPLIED
-  changed_command_same_operation_id: IDEMPOTENCY_CONFLICT
-  changed_revision_and_operation_type_same_operation_id: IDEMPOTENCY_CONFLICT
-  concurrent_same_revision_second_commit: STALE_REVISION_CONFLICT
-  incomplete_stored_proof: CANONICAL_RECORD_CORRUPTION_CONFLICT
-  missing_transition_index_blocks_rehydration: true
-  partial_aggregate_is_not_revision_zero: true
-  incomplete_committed_snapshot_blocks_next_revision: true
-  wrong_Redis_key_type: FAIL_CLOSED_BEFORE_AUTHORITY_WRITE
-  keys_have_no_TTL: true
-  log_and_outbox_exactly_once: true
+required_adversarial_coverage:
+  changed_transition_with_missing_old_index: PASS
+  stored_record_effect_tamper: PASS
+  transition_index_extra_field: PASS
+  previous_record_receipt_or_index_missing: PASS
+  transition_log_or_outbox_missing: PASS
+  aggregate_head_stream_tail_mismatch: PASS
+  durable_conflict_atomicity_and_deduplication: PASS
+  receipt_probe_lookup_binding: PASS
+  snapshot_exact_validation: PASS
 ```
 
 ## Deliberate exclusions
