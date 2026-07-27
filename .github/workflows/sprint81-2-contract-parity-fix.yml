@@ -44,7 +44,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python .s81_2_contract_fix/patch.py 2>&1 | tee /tmp/s81-2-contract-patch.txt
+          python .s81_2_contract_fix/run.py 2>&1 | tee /tmp/s81-2-contract-patch.txt
 
       - name: Upload contract patch diagnostics
         if: always()
@@ -115,6 +115,6 @@ jobs:
       - name: Commit verified contract correction
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "4189828+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "fix(sprint81.2): restore canonical store contract parity"
           git push origin HEAD:sprint/81-2-canonical-authority-persistence
