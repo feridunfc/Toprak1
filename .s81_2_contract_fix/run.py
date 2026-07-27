@@ -106,3 +106,4 @@ text = text.replace(actual_duplicate, normalized_duplicate, 1)
 
 lua_path.write_text(text, encoding="utf-8")
 runpy.run_path(str(Path(__file__).with_name("patch.py")), run_name="__main__")
+runpy.run_path(str(Path(__file__).with_name("post_patch.py")), run_name="__main__")
