@@ -84,20 +84,31 @@ Before idempotency classification Lua:
 5. validates exact schemas and semantic receipt–record–index equality;
 6. only then compares canonical command hashes.
 
-Sprint 81.2 selects **Model B — first persisted record wins**. Once the
-stored receipt, record and transition index have independently passed storage
-and semantic validation, canonical command hash equality is sufficient for
-`ALREADY_APPLIED`. Writer-generated commit metadata such as `committed_at_ms`
-may differ across concurrent independent evaluations.
+Sprint 81.2 preserves the accepted Sprint 81.1 canonical-store classifier.
+`ALREADY_APPLIED` requires the same deterministic transition ID, canonical
+record hash and exact immutable record, receipt and transition-index payloads.
+Canonical command hash equality alone is not sufficient.
 
 ```yaml
-same_operation_same_canonical_command_hash: ALREADY_APPLIED
+same_operation_same_exact_canonical_record: ALREADY_APPLIED
+same_operation_same_command_but_different_record: CANONICAL_RECORD_CORRUPTION_CONFLICT
 same_operation_different_command: IDEMPOTENCY_CONFLICT
 stored_proof_missing_tampered_or_inconsistent: CANONICAL_RECORD_CORRUPTION_CONFLICT
 ```
 
+Concurrent evaluators for one operation must therefore receive stable
+operation-level commit metadata (`committed_at_ms`, authority writer identity
+and correlation identity where present). Creating that stable metadata is a
+trusted-adapter precondition and remains outside this persistence-only slice.
+
 The Redis storage digest is an additional corruption-detection layer. It does
-not replace the accepted canonical SHA-256 record hash.
+not replace the accepted canonical SHA-256 record hash. Before each Lua commit,
+the trusted Python adapter reconstructs stored records with the Sprint 81.1
+canonical validator, including canonical hash recomputation, deterministic
+transition identity, structured aggregate identity, operation contract and
+projection-intent validation. Lua compares SHA-1 digests of the exact Redis
+storage envelopes observed by that prevalidation; a race causes an internal
+retry rather than an unvalidated authority decision.
 
 ## Existing-head and history continuity
 
@@ -152,16 +163,27 @@ conflict_mutation:
 
 Conflict identity is deterministically derived from aggregate identity,
 operation ID, incoming command hash, stored command hash and conflict type.
+The authority-conflict index contains a reserved monotonic evidence-count field.
+Before every decision, index cardinality and stream length must equal that count.
 `HSETNX` deduplicates repeated identical conflict observations; `XADD` occurs
 only for the first insert.
 
-If either conflict store has the wrong Redis type, the script cannot truthfully
-claim durable conflict evidence. It returns the distinct fail-closed result
-`CONFLICT_EVIDENCE_STORE_UNAVAILABLE`, performs zero lifecycle mutation and
-requires operator/reconciliation handling.
+```yaml
+authority_conflict_pair:
+  both_absent_before_first_conflict: ALLOWED
+  both_present_with_matching_count: ALLOWED
+  one_missing_after_prior_conflict: CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+  deleted_index_entry_or_stream_row: CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+```
 
-The Python `record_conflict()` method remains only for explicit operator audit
-notes. It is not used to complete a Lua conflict decision after the fact.
+If either conflict store has the wrong Redis type or the authority evidence pair
+is incomplete, the script cannot truthfully claim durable conflict evidence. It
+returns `CONFLICT_EVIDENCE_STORE_UNAVAILABLE`, performs zero lifecycle mutation
+and requires operator/reconciliation handling.
+
+The Python `record_conflict()` method writes to a separate operator-audit stream.
+Operator notes cannot alter authority conflict pair cardinality and are never
+used to complete a Lua conflict decision after the fact.
 
 ## Adapter read contracts
 
@@ -189,16 +211,17 @@ snapshot:
 ## Lua evaluation order
 
 ```yaml
-1: VALIDATE_COMMIT_PLAN_AND_CONFLICT_STORE
-2: VALIDATE_REDIS_KEY_TYPES
-3: RESOLVE_OPERATION_RECEIPT_AND_RECORD_BY_STABLE_OPERATION_FIELD
-4: LOAD_HISTORICAL_TRANSITION_INDEX_FROM_STORED_RECORD
-5: VALIDATE_STORAGE_DIGESTS_AND_STORED_PROOF_SEMANTICS
-6: COMPARE_CANONICAL_COMMAND_HASH
-7: VALIDATE_EXISTING_AGGREGATE_HEAD_AND_STREAM_CONTINUITY
-8: COMPARE_EXPECTED_REVISION
-9: COMPARE_PREVIOUS_STATE
-10: WRITE_ACCEPTED_STATE_RECORD_RECEIPT_LOG_AND_OUTBOX
+1: PYTHON_CANONICAL_PREVALIDATE_OPERATION_AND_HEAD_PROOFS
+2: VALIDATE_COMMIT_PLAN_AND_AUTHORITY_CONFLICT_PAIR
+3: VALIDATE_REDIS_KEY_TYPES
+4: BIND_LUA_READS_TO_PREVALIDATED_RAW_ENVELOPE_DIGESTS
+5: RESOLVE_OPERATION_RECEIPT_AND_RECORD_BY_STABLE_OPERATION_FIELD
+6: LOAD_HISTORICAL_TRANSITION_INDEX_FROM_STORED_RECORD
+7: VALIDATE_STORAGE_DIGESTS_AND_STORED_PROOF_SEMANTICS
+8: APPLY_EXACT_CANONICAL_STORE_CLASSIFIER_PARITY
+9: VALIDATE_EXISTING_AGGREGATE_HEAD_AND_STREAM_CONTINUITY
+10: COMPARE_EXPECTED_REVISION_AND_PREVIOUS_STATE
+11: WRITE_ACCEPTED_STATE_RECORD_RECEIPT_LOG_AND_OUTBOX
 ```
 
 ## Verification contract
@@ -220,7 +243,9 @@ required_adversarial_coverage:
   transition_log_or_outbox_missing: PASS
   aggregate_head_stream_tail_mismatch: PASS
   durable_conflict_atomicity_and_deduplication: PASS
-  concurrent_same_command_different_commit_metadata: PASS
+  Redis_and_core_classifier_same_outcome: PASS
+  refreshed_storage_digest_canonical_tamper: PASS
+  authority_conflict_pair_loss_detection: PASS
   conflict_store_unavailable_result: PASS
   old_revision_proof_deletion: PASS
   old_stream_entry_deletion: PASS

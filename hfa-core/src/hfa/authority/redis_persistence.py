@@ -43,6 +43,7 @@ class RedisAuthorityCommitStatus(str, Enum):
     ILLEGAL_STATE_TRANSITION = "ILLEGAL_STATE_TRANSITION"
     CANONICAL_RECORD_CORRUPTION_CONFLICT = "CANONICAL_RECORD_CORRUPTION_CONFLICT"
     CONFLICT_EVIDENCE_STORE_UNAVAILABLE = "CONFLICT_EVIDENCE_STORE_UNAVAILABLE"
+    PREVALIDATION_RETRY_REQUIRED = "PREVALIDATION_RETRY_REQUIRED"
     INVALID_COMMIT_PLAN = "INVALID_COMMIT_PLAN"
 
 
@@ -120,6 +121,10 @@ class RedisAuthorityKeyspace:
     def conflicts(self) -> str:
         return f"{self.namespace}:{self.hash_tag}:conflicts"
 
+    @property
+    def operator_audits(self) -> str:
+        return f"{self.namespace}:{self.hash_tag}:operator-audits"
+
     def operation_field(self, operation_id: str) -> str:
         return _operation_digest(operation_id)
 
@@ -161,6 +166,20 @@ def _operation_digest(operation_id: str) -> str:
     value = _nonempty(operation_id, "operation_id")
     encoded = value.encode("utf-8")
     return hashlib.sha256(len(encoded).to_bytes(8, "big") + encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class _StoredProofPrevalidation:
+    status: str
+    record_sha1: str = ""
+    receipt_sha1: str = ""
+    index_sha1: str = ""
+
+
+def _raw_sha1(value: Any) -> str:
+    if value is None:
+        return ""
+    return hashlib.sha1(_as_text(value).encode("utf-8")).hexdigest()
 
 
 def _as_text(value: Any) -> str:
@@ -326,6 +345,128 @@ class RedisCanonicalAuthorityStore:
     def keyspace(self, canonical_aggregate_identity_sha256: str) -> RedisAuthorityKeyspace:
         return RedisAuthorityKeyspace(canonical_aggregate_identity_sha256, self._namespace)
 
+    async def _prevalidate_raw_proof(
+        self,
+        keyspace: RedisAuthorityKeyspace,
+        *,
+        operation_id: str,
+        raw_record: Any,
+        raw_receipt: Any,
+    ) -> _StoredProofPrevalidation:
+        record_sha1 = _raw_sha1(raw_record)
+        receipt_sha1 = _raw_sha1(raw_receipt)
+        if raw_record is None and raw_receipt is None:
+            return _StoredProofPrevalidation("ABSENT")
+        if raw_record is None or raw_receipt is None:
+            return _StoredProofPrevalidation("INVALID", record_sha1, receipt_sha1)
+        raw_index: Any = None
+        try:
+            _, record_payload = _decode_storage_envelope(
+                raw_record,
+                field_name="canonical operation record",
+            )
+            _, receipt_payload = _decode_storage_envelope(
+                raw_receipt,
+                field_name="operation receipt",
+            )
+            record = _record_from_payload(record_payload)
+            receipt = _receipt_from_payload(receipt_payload)
+            raw_index = await self._redis.hget(
+                keyspace.transition_indexes,
+                keyspace.transition_field(record.transition_id),
+            )
+            if raw_index is None:
+                return _StoredProofPrevalidation(
+                    "INVALID",
+                    record_sha1,
+                    receipt_sha1,
+                )
+            _, index_payload = _decode_storage_envelope(
+                raw_index,
+                field_name="canonical transition index",
+            )
+            _validate_transition_index(index_payload, record)
+            _core._validate_stored_duplicate_proof(
+                _core.ReceiptProbe(
+                    receipt=receipt,
+                    canonical_store_record=record,
+                ),
+                lookup_aggregate_identity_sha256=keyspace.canonical_aggregate_identity_sha256,
+                lookup_operation_id=operation_id,
+            )
+        except (
+            RedisAuthorityPersistenceError,
+            _core.AuthorityContractError,
+            TypeError,
+            ValueError,
+        ):
+            return _StoredProofPrevalidation(
+                "INVALID",
+                record_sha1,
+                receipt_sha1,
+                _raw_sha1(raw_index),
+            )
+        return _StoredProofPrevalidation(
+            "VALID",
+            record_sha1,
+            receipt_sha1,
+            _raw_sha1(raw_index),
+        )
+
+    async def _prevalidate_operation_proof(
+        self,
+        keyspace: RedisAuthorityKeyspace,
+        operation_id: str,
+    ) -> _StoredProofPrevalidation:
+        field = keyspace.operation_field(operation_id)
+        raw_receipt = await self._redis.hget(keyspace.receipts, field)
+        raw_record = await self._redis.hget(keyspace.operation_records, field)
+        return await self._prevalidate_raw_proof(
+            keyspace,
+            operation_id=operation_id,
+            raw_record=raw_record,
+            raw_receipt=raw_receipt,
+        )
+
+    async def _prevalidate_head_proof(
+        self,
+        keyspace: RedisAuthorityKeyspace,
+    ) -> _StoredProofPrevalidation:
+        aggregate_kind = _as_text(await self._redis.type(keyspace.aggregate))
+        if aggregate_kind == "none":
+            return _StoredProofPrevalidation("ABSENT")
+        if aggregate_kind != "hash":
+            return _StoredProofPrevalidation("INVALID")
+        raw_snapshot = await self._redis.hgetall(keyspace.aggregate)
+        if not raw_snapshot:
+            return _StoredProofPrevalidation("INVALID")
+        data = {_as_text(key): _as_text(value) for key, value in raw_snapshot.items()}
+        operation_id = data.get("operation_id", "")
+        operation_digest = data.get("operation_digest", "")
+        transition_id = data.get("transition_id", "")
+        if (
+            not operation_id
+            or operation_digest != keyspace.operation_field(operation_id)
+            or not transition_id
+        ):
+            return _StoredProofPrevalidation("INVALID")
+        raw_receipt = await self._redis.hget(keyspace.receipts, operation_digest)
+        raw_record = await self._redis.hget(keyspace.operation_records, operation_digest)
+        raw_index = await self._redis.hget(keyspace.transition_indexes, transition_id)
+        if raw_record is None or raw_receipt is None:
+            return _StoredProofPrevalidation(
+                "INVALID",
+                _raw_sha1(raw_record),
+                _raw_sha1(raw_receipt),
+                _raw_sha1(raw_index),
+            )
+        return await self._prevalidate_raw_proof(
+            keyspace,
+            operation_id=operation_id,
+            raw_record=raw_record,
+            raw_receipt=raw_receipt,
+        )
+
     async def commit(self, plan: _core.AuthorityCommitPlan) -> RedisAuthorityCommitResult:
         _validate_plan(plan)
         record = plan.record
@@ -340,32 +481,51 @@ class RedisCanonicalAuthorityStore:
             _core.OperationType.TASK_ADMIT.value,
             _core.OperationType.RUN_CREATE.value,
         }
-        raw = await self._commit_loader.run(
-            num_keys=8,
-            keys=keyspace.commit_keys(),
-            args=[
-                record.aggregate_identity_sha256,
-                str(record.from_revision),
-                str(record.to_revision),
-                "1" if record.previous_state is None else "0",
-                record.previous_state or "",
-                "1" if record.next_state is None else "0",
-                record.next_state or "",
-                record.transition_id,
-                record.canonical_record_hash,
-                record.canonical_command_hash,
+        for _attempt in range(3):
+            operation_prevalidation = await self._prevalidate_operation_proof(
+                keyspace,
                 record.operation_id,
-                operation_digest,
-                record.operation_type,
-                str(record.committed_at_ms),
-                _canonical_text(transition_index_payload),
-                _canonical_text(record_payload),
-                _canonical_text(receipt_payload),
-                _canonical_text(projection_intents),
-                "1" if is_create else "0",
-            ],
+            )
+            head_prevalidation = await self._prevalidate_head_proof(keyspace)
+            raw = await self._commit_loader.run(
+                num_keys=8,
+                keys=keyspace.commit_keys(),
+                args=[
+                    record.aggregate_identity_sha256,
+                    str(record.from_revision),
+                    str(record.to_revision),
+                    "1" if record.previous_state is None else "0",
+                    record.previous_state or "",
+                    "1" if record.next_state is None else "0",
+                    record.next_state or "",
+                    record.transition_id,
+                    record.canonical_record_hash,
+                    record.canonical_command_hash,
+                    record.operation_id,
+                    operation_digest,
+                    record.operation_type,
+                    str(record.committed_at_ms),
+                    _canonical_text(transition_index_payload),
+                    _canonical_text(record_payload),
+                    _canonical_text(receipt_payload),
+                    _canonical_text(projection_intents),
+                    "1" if is_create else "0",
+                    operation_prevalidation.status,
+                    operation_prevalidation.record_sha1,
+                    operation_prevalidation.receipt_sha1,
+                    operation_prevalidation.index_sha1,
+                    head_prevalidation.status,
+                    head_prevalidation.record_sha1,
+                    head_prevalidation.receipt_sha1,
+                    head_prevalidation.index_sha1,
+                ],
+            )
+            result = self._parse_commit_result(raw)
+            if result.status is not RedisAuthorityCommitStatus.PREVALIDATION_RETRY_REQUIRED:
+                return result
+        raise RedisAuthorityPersistenceError(
+            "stored authority proof changed repeatedly during canonical commit"
         )
-        return self._parse_commit_result(raw)
 
     async def load_receipt_probe(
         self,
@@ -488,7 +648,7 @@ class RedisCanonicalAuthorityStore:
         payload = _canonical_text(detail or {})
         return _as_text(
             await self._redis.xadd(
-                self.keyspace(aggregate_identity.sha256).conflicts,
+                self.keyspace(aggregate_identity.sha256).operator_audits,
                 {
                     "conflict_type": conflict_type,
                     "operation_id": operation_id,

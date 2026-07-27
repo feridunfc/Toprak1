@@ -16,11 +16,13 @@ from hfa.authority import (
     AuthorityDecisionCode,
     AuthorityEntryContext,
     CanonicalAggregateIdentity,
+    CanonicalStoreDecision,
     OperationType,
     RedisAuthorityCommitStatus,
     RedisAuthorityKeyspace,
     RedisAuthorityPersistenceError,
     RedisCanonicalAuthorityStore,
+    classify_canonical_store_write,
     evaluate_authority_commit,
 )
 
@@ -304,7 +306,7 @@ async def test_idempotency_conflict_is_durable_deduplicated_and_revision_neutral
     assert one.status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
     assert two.status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
     keyspace = store.keyspace(first.aggregate_identity.sha256)
-    assert await redis_client.hlen(keyspace.conflict_index) == 1
+    assert await redis_client.hlen(keyspace.conflict_index) == 2
     assert await redis_client.xlen(keyspace.conflicts) == 1
     await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
 
@@ -322,8 +324,8 @@ async def test_changed_transition_with_missing_old_index_is_corruption_before_id
     repeated = await store.commit(changed_plan)
     assert result.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
     assert repeated.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
-    assert result.detail == "stored_transition_index_missing"
-    assert await redis_client.hlen(keyspace.conflict_index) == 1
+    assert result.detail == "stored_proof_canonical_validation_failed"
+    assert await redis_client.hlen(keyspace.conflict_index) == 2
     assert await redis_client.xlen(keyspace.conflicts) == 1
     await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
 
@@ -406,7 +408,7 @@ async def test_aggregate_exists_conflict_writes_one_durable_record_without_revis
     assert (await store.commit(second_plan)).status is RedisAuthorityCommitStatus.AGGREGATE_ALREADY_EXISTS_CONFLICT
     assert (await store.commit(second_plan)).status is RedisAuthorityCommitStatus.AGGREGATE_ALREADY_EXISTS_CONFLICT
     keyspace = store.keyspace(first.aggregate_identity.sha256)
-    assert await redis_client.hlen(keyspace.conflict_index) == 1
+    assert await redis_client.hlen(keyspace.conflict_index) == 2
     assert await redis_client.xlen(keyspace.conflicts) == 1
     await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
 
@@ -540,7 +542,7 @@ def _claim_command(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_same_command_with_different_commit_timestamps_is_already_applied(
+async def test_redis_duplicate_outcome_matches_canonical_store_classifier(
     store,
     redis_client,
 ) -> None:
@@ -559,20 +561,24 @@ async def test_concurrent_same_command_with_different_commit_timestamps_is_alrea
     )
     assert first_plan.record.canonical_command_hash == second_plan.record.canonical_command_hash
     assert first_plan.record.canonical_record_hash != second_plan.record.canonical_record_hash
+    assert (
+        classify_canonical_store_write(first_plan.record, second_plan.record)
+        is CanonicalStoreDecision.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    )
 
     first = await store.commit(first_plan)
     second = await store.commit(second_plan)
 
     assert first.status is RedisAuthorityCommitStatus.COMMITTED
-    assert second.status is RedisAuthorityCommitStatus.ALREADY_APPLIED
-    assert second.transition_id == first_plan.record.transition_id
+    assert second.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert second.detail == "exact_duplicate_payload_mismatch"
     keyspace = store.keyspace(command.aggregate_identity.sha256)
     assert await redis_client.hlen(keyspace.transition_indexes) == 1
     assert await redis_client.hlen(keyspace.receipts) == 1
     assert await redis_client.hlen(keyspace.operation_records) == 1
     assert await redis_client.xlen(keyspace.transition_log) == 1
     assert await redis_client.xlen(keyspace.outbox) == 1
-    assert await redis_client.xlen(keyspace.conflicts) == 0
+    assert await redis_client.xlen(keyspace.conflicts) == 1
     assert (await store.get_aggregate_snapshot(command.aggregate_identity)).revision == 1
 
 
@@ -608,57 +614,22 @@ async def test_conflict_store_wrong_type_has_explicit_fail_closed_result(
 
 
 @pytest.mark.asyncio
-async def test_conflict_index_present_and_stream_missing_can_emit_first_conflict(
+async def test_operator_audit_notes_are_separate_from_authority_conflict_pair(
     store,
     redis_client,
 ) -> None:
-    command = _admit_command(operation_id="index-present-stream-missing", payload_version=1)
-    plan = _accepted_plan(command, current_revision=0, current_state=None, committed_at_ms=10_200)
-    assert (await store.commit(plan)).committed
-    keyspace = store.keyspace(command.aggregate_identity.sha256)
-    await redis_client.hset(keyspace.conflict_index, "preexisting-audit", "{}")
-    assert await redis_client.exists(keyspace.conflicts) == 0
-
-    conflicting = _admit_command(operation_id=command.operation_id, payload_version=2)
-    conflicting_plan = _accepted_plan(
-        conflicting,
-        current_revision=0,
-        current_state=None,
-        committed_at_ms=10_201,
+    identity = _identity()
+    await store.record_conflict(
+        identity,
+        conflict_type="OPERATOR_NOTE",
+        operation_id="operator-note",
+        observed_at_ms=10_200,
+        detail={"reason": "manual audit"},
     )
-    result = await store.commit(conflicting_plan)
-
-    assert result.status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
-    assert await redis_client.hlen(keyspace.conflict_index) == 2
-    assert await redis_client.xlen(keyspace.conflicts) == 1
-    await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
-
-
-@pytest.mark.asyncio
-async def test_conflict_stream_present_and_index_missing_can_emit_first_conflict(
-    store,
-    redis_client,
-) -> None:
-    command = _admit_command(operation_id="stream-present-index-missing", payload_version=1)
-    plan = _accepted_plan(command, current_revision=0, current_state=None, committed_at_ms=10_300)
-    assert (await store.commit(plan)).committed
-    keyspace = store.keyspace(command.aggregate_identity.sha256)
-    await redis_client.xadd(keyspace.conflicts, {"origin": "preexisting-audit"})
+    keyspace = store.keyspace(identity.sha256)
+    assert await redis_client.xlen(keyspace.operator_audits) == 1
     assert await redis_client.exists(keyspace.conflict_index) == 0
-
-    conflicting = _admit_command(operation_id=command.operation_id, payload_version=2)
-    conflicting_plan = _accepted_plan(
-        conflicting,
-        current_revision=0,
-        current_state=None,
-        committed_at_ms=10_301,
-    )
-    result = await store.commit(conflicting_plan)
-
-    assert result.status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
-    assert await redis_client.hlen(keyspace.conflict_index) == 1
-    assert await redis_client.xlen(keyspace.conflicts) == 2
-    await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
+    assert await redis_client.exists(keyspace.conflicts) == 0
 
 
 async def _commit_two_revisions(store):
@@ -746,3 +717,162 @@ async def test_old_outbox_entry_deletion_blocks_next_commit(store, redis_client)
     assert (await store.get_aggregate_snapshot(admit.aggregate_identity)).revision == 2
     assert await redis_client.xlen(keyspace.transition_log) == 2
     assert await redis_client.xlen(keyspace.outbox) == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper_kind",
+    [
+        "writer_id",
+        "authoritative_metadata_changes",
+        "child_effects",
+        "durable_projection_intents",
+        "canonical_aggregate_identity",
+        "transition_id",
+    ],
+)
+async def test_refreshed_storage_digest_cannot_hide_canonical_record_tamper(
+    store,
+    redis_client,
+    tamper_kind: str,
+) -> None:
+    command = _admit_command(operation_id=f"canonical-tamper-{tamper_kind}")
+    plan = _accepted_plan(
+        command,
+        current_revision=0,
+        current_state=None,
+        committed_at_ms=11_000,
+    )
+    assert (await store.commit(plan)).committed
+    keyspace = store.keyspace(command.aggregate_identity.sha256)
+    field = keyspace.operation_field(command.operation_id)
+    _, record = await _stored_payload(redis_client, keyspace.operation_records, field)
+    if tamper_kind == "writer_id":
+        record["writer_id"] = "tampered-writer"
+    elif tamper_kind == "authoritative_metadata_changes":
+        record["authoritative_metadata_changes"] = {"tenant_id": "tampered"}
+    elif tamper_kind == "child_effects":
+        record["child_effects"] = [{"kind": "tampered"}]
+    elif tamper_kind == "durable_projection_intents":
+        record["durable_projection_intents"] = []
+    elif tamper_kind == "canonical_aggregate_identity":
+        record["canonical_aggregate_identity"]["run_id"] = "tampered-run"
+    elif tamper_kind == "transition_id":
+        record["transition_id"] = "ctr:v1:semantically-invalid"
+    else:  # pragma: no cover - parameter list is closed.
+        raise AssertionError(tamper_kind)
+    await _replace_payload(
+        redis_client,
+        keyspace.operation_records,
+        field,
+        record,
+        refresh_digest=True,
+    )
+
+    result = await store.commit(plan)
+
+    assert result.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert result.detail == "stored_proof_canonical_validation_failed"
+    assert await redis_client.xlen(keyspace.transition_log) == 1
+    assert await redis_client.xlen(keyspace.outbox) == 1
+
+
+async def _create_durable_idempotency_conflict(store, *, operation_id: str, version: int, observed_at: int):
+    base = _admit_command(operation_id=operation_id, payload_version=1)
+    base_plan = _accepted_plan(base, current_revision=0, current_state=None, committed_at_ms=observed_at)
+    assert (await store.commit(base_plan)).committed
+    conflicting = _admit_command(operation_id=operation_id, payload_version=version)
+    conflicting_plan = _accepted_plan(
+        conflicting,
+        current_revision=0,
+        current_state=None,
+        committed_at_ms=observed_at + version,
+    )
+    result = await store.commit(conflicting_plan)
+    assert result.status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
+    return base, conflicting_plan
+
+
+@pytest.mark.asyncio
+async def test_prior_authority_conflict_index_without_stream_fails_closed(store, redis_client) -> None:
+    base, conflicting_plan = await _create_durable_idempotency_conflict(
+        store,
+        operation_id="pair-stream-deleted",
+        version=2,
+        observed_at=12_000,
+    )
+    keyspace = store.keyspace(base.aggregate_identity.sha256)
+    await redis_client.delete(keyspace.conflicts)
+
+    result = await store.commit(conflicting_plan)
+
+    assert result.status is RedisAuthorityCommitStatus.CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+    assert result.detail == "authority_conflict_pair_missing_member"
+    await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
+
+
+@pytest.mark.asyncio
+async def test_prior_authority_conflict_stream_without_index_fails_closed(store, redis_client) -> None:
+    base, conflicting_plan = await _create_durable_idempotency_conflict(
+        store,
+        operation_id="pair-index-deleted",
+        version=2,
+        observed_at=12_100,
+    )
+    keyspace = store.keyspace(base.aggregate_identity.sha256)
+    await redis_client.delete(keyspace.conflict_index)
+
+    result = await store.commit(conflicting_plan)
+
+    assert result.status is RedisAuthorityCommitStatus.CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+    assert result.detail == "authority_conflict_pair_missing_member"
+    await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
+
+
+@pytest.mark.asyncio
+async def test_deleted_authority_conflict_index_entry_is_detected(store, redis_client) -> None:
+    base, conflict_two = await _create_durable_idempotency_conflict(
+        store,
+        operation_id="pair-index-entry-deleted",
+        version=2,
+        observed_at=12_200,
+    )
+    conflict_three_command = _admit_command(operation_id=base.operation_id, payload_version=3)
+    conflict_three = _accepted_plan(
+        conflict_three_command,
+        current_revision=0,
+        current_state=None,
+        committed_at_ms=12_203,
+    )
+    assert (await store.commit(conflict_three)).status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
+    keyspace = store.keyspace(base.aggregate_identity.sha256)
+    fields = [
+        field
+        for field in await redis_client.hkeys(keyspace.conflict_index)
+        if field != "__authority_conflict_count"
+    ]
+    assert len(fields) == 2
+    await redis_client.hdel(keyspace.conflict_index, fields[0])
+
+    result = await store.commit(conflict_two)
+
+    assert result.status is RedisAuthorityCommitStatus.CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+    assert result.detail == "authority_conflict_pair_cardinality_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_deleted_authority_conflict_stream_row_is_detected(store, redis_client) -> None:
+    base, conflicting_plan = await _create_durable_idempotency_conflict(
+        store,
+        operation_id="pair-stream-row-deleted",
+        version=2,
+        observed_at=12_300,
+    )
+    keyspace = store.keyspace(base.aggregate_identity.sha256)
+    rows = await redis_client.xrange(keyspace.conflicts)
+    assert len(rows) == 1
+    await redis_client.xdel(keyspace.conflicts, rows[0][0])
+
+    result = await store.commit(conflicting_plan)
+
+    assert result.status is RedisAuthorityCommitStatus.CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+    assert result.detail == "authority_conflict_pair_cardinality_mismatch"

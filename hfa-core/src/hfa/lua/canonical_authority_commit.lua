@@ -33,6 +33,14 @@ local record_json = ARGV[16]
 local receipt_json = ARGV[17]
 local projection_intents_json = ARGV[18]
 local is_create_operation = ARGV[19]
+local operation_prevalidation_status = ARGV[20]
+local operation_record_raw_sha1 = ARGV[21]
+local operation_receipt_raw_sha1 = ARGV[22]
+local operation_index_raw_sha1 = ARGV[23]
+local head_prevalidation_status = ARGV[24]
+local head_record_raw_sha1 = ARGV[25]
+local head_receipt_raw_sha1 = ARGV[26]
+local head_index_raw_sha1 = ARGV[27]
 
 local function result(status, existing_transition_id, revision, detail)
     return {
@@ -81,6 +89,17 @@ local function sha1_hex_ok(value)
     return type(value) == "string"
         and string.len(value) == 40
         and string.match(value, "^[0-9a-f]+$") ~= nil
+end
+
+local function raw_sha1(value)
+    if type(value) ~= "string" then
+        return ""
+    end
+    return redis.sha1hex(value)
+end
+
+local function prevalidation_status_ok(value)
+    return value == "ABSENT" or value == "VALID" or value == "INVALID"
 end
 
 local function nullable_string_ok(value)
@@ -247,6 +266,40 @@ local function length_prefix(value)
     return tostring(string.len(text)) .. ":" .. text
 end
 
+local CONFLICT_COUNT_FIELD = "__authority_conflict_count"
+local authority_conflict_count = 0
+
+local function conflict_store_unavailable(detail)
+    return result("CONFLICT_EVIDENCE_STORE_UNAVAILABLE", nil, nil, detail)
+end
+
+local function conflict_pair_state()
+    local index_kind = redis_type(KEYS[7])
+    local stream_kind = redis_type(KEYS[8])
+    if index_kind ~= "none" and index_kind ~= "hash" then
+        return false, "conflict_index_type_mismatch"
+    end
+    if stream_kind ~= "none" and stream_kind ~= "stream" then
+        return false, "conflict_stream_type_mismatch"
+    end
+    if (index_kind == "none") ~= (stream_kind == "none") then
+        return false, "authority_conflict_pair_missing_member"
+    end
+    if index_kind == "none" then
+        return true, 0
+    end
+    local count_raw = redis.call("HGET", KEYS[7], CONFLICT_COUNT_FIELD)
+    local count = count_raw and tonumber(count_raw) or nil
+    if not exact_nonnegative_integer(count) then
+        return false, "authority_conflict_count_missing_or_invalid"
+    end
+    if redis.call("HLEN", KEYS[7]) ~= count + 1
+        or redis.call("XLEN", KEYS[8]) ~= count then
+        return false, "authority_conflict_pair_cardinality_mismatch"
+    end
+    return true, count
+end
+
 local function emit_conflict(conflict_type, stored_command_hash, existing_transition_id, revision, detail)
     local material = length_prefix(identity_sha)
         .. length_prefix(operation_id)
@@ -268,6 +321,8 @@ local function emit_conflict(conflict_type, stored_command_hash, existing_transi
     })
     local inserted = redis.call("HSETNX", KEYS[7], conflict_id, payload)
     if inserted == 1 then
+        authority_conflict_count = authority_conflict_count + 1
+        redis.call("HSET", KEYS[7], CONFLICT_COUNT_FIELD, tostring(authority_conflict_count))
         redis.call("XADD", KEYS[8], "*",
             "conflict_id", conflict_id,
             "conflict_type", conflict_type,
@@ -280,6 +335,8 @@ local function emit_conflict(conflict_type, stored_command_hash, existing_transi
             "detail", detail or "",
             "conflict_json", payload
         )
+    elseif redis.call("HGET", KEYS[7], conflict_id) ~= payload then
+        return conflict_store_unavailable("authority_conflict_index_payload_mismatch")
     end
     return result(conflict_type, existing_transition_id, revision, detail or "")
 end
@@ -320,21 +377,17 @@ if not sha256_hex_ok(identity_sha)
     or not sha256_hex_ok(operation_digest)
     or type(transition_id) ~= "string" or transition_id == ""
     or type(operation_id) ~= "string" or operation_id == ""
-    or type(operation_type) ~= "string" or operation_type == "" then
-    return result("INVALID_COMMIT_PLAN", nil, nil, "invalid_identity_or_hash_fields")
+    or type(operation_type) ~= "string" or operation_type == ""
+    or not prevalidation_status_ok(operation_prevalidation_status)
+    or not prevalidation_status_ok(head_prevalidation_status) then
+    return result("INVALID_COMMIT_PLAN", nil, nil, "invalid_identity_hash_or_prevalidation_fields")
 end
 
--- Conflict storage failure is not reported as an evidenced canonical conflict.
--- It is a separate fail-closed operational result because durable evidence cannot
--- be guaranteed while either conflict store has the wrong Redis type.
-local conflict_index_type = redis_type(KEYS[7])
-local conflict_stream_type = redis_type(KEYS[8])
-if conflict_index_type ~= "none" and conflict_index_type ~= "hash" then
-    return result("CONFLICT_EVIDENCE_STORE_UNAVAILABLE", nil, nil, "conflict_index_type_mismatch")
+local conflict_pair_ok, conflict_pair_value = conflict_pair_state()
+if not conflict_pair_ok then
+    return conflict_store_unavailable(conflict_pair_value)
 end
-if conflict_stream_type ~= "none" and conflict_stream_type ~= "stream" then
-    return result("CONFLICT_EVIDENCE_STORE_UNAVAILABLE", nil, nil, "conflict_stream_type_mismatch")
-end
+authority_conflict_count = conflict_pair_value
 if not key_type_ok(KEYS[1], "hash")
     or not key_type_ok(KEYS[2], "hash")
     or not key_type_ok(KEYS[3], "hash")
@@ -392,6 +445,19 @@ end
 local existing_receipt_raw = redis.call("HGET", KEYS[3], operation_digest)
 local existing_record_raw = redis.call("HGET", KEYS[4], operation_digest)
 if existing_receipt_raw or existing_record_raw then
+    if operation_prevalidation_status == "ABSENT" then
+        return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "operation_proof_appeared")
+    end
+    if raw_sha1(existing_record_raw) ~= operation_record_raw_sha1
+        or raw_sha1(existing_receipt_raw) ~= operation_receipt_raw_sha1 then
+        return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "operation_proof_changed")
+    end
+    if operation_prevalidation_status == "INVALID" then
+        return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, nil, "stored_proof_canonical_validation_failed")
+    end
+    if operation_prevalidation_status ~= "VALID" then
+        return result("INVALID_COMMIT_PLAN", nil, nil, "operation_prevalidation_status_invalid")
+    end
     if not existing_receipt_raw or not existing_record_raw then
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, nil, "stored_receipt_proof_incomplete")
     end
@@ -400,6 +466,9 @@ if existing_receipt_raw or existing_record_raw then
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, nil, "stored_record_envelope_invalid")
     end
     local existing_index_raw = redis.call("HGET", KEYS[2], pre_record.transition_id)
+    if raw_sha1(existing_index_raw) ~= operation_index_raw_sha1 then
+        return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "operation_index_changed")
+    end
     if not existing_index_raw then
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", pre_record.canonical_command_hash, pre_record.transition_id, pre_record.to_revision, "stored_transition_index_missing")
     end
@@ -413,13 +482,17 @@ if existing_receipt_raw or existing_record_raw then
     if not proof then
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", pre_record.canonical_command_hash, pre_record.transition_id, pre_record.to_revision, proof_error)
     end
-    -- Model B: the first fully validated persisted record wins. The canonical
-    -- command hash binds all requested authoritative effects. Writer-generated
-    -- commit metadata may differ across concurrent independent evaluations.
     if proof.receipt.canonical_command_hash == canonical_command_hash then
-        return result("ALREADY_APPLIED", proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
+        if proof.record_payload == record_json
+            and proof.receipt_payload == receipt_json
+            and proof.index_payload == transition_index_json then
+            return result("ALREADY_APPLIED", proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
+        end
+        return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", proof.receipt.canonical_command_hash, proof.receipt.transition_id, proof.receipt.aggregate_revision, "exact_duplicate_payload_mismatch")
     end
     return emit_conflict("IDEMPOTENCY_CONFLICT", proof.receipt.canonical_command_hash, proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
+elseif operation_prevalidation_status ~= "ABSENT" then
+    return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "operation_proof_disappeared")
 end
 
 if redis.call("HEXISTS", KEYS[2], transition_id) == 1 then
@@ -427,6 +500,12 @@ if redis.call("HEXISTS", KEYS[2], transition_id) == 1 then
 end
 
 local aggregate_exists = redis.call("EXISTS", KEYS[1])
+if aggregate_exists == 0 and head_prevalidation_status ~= "ABSENT" then
+    return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "aggregate_head_disappeared")
+end
+if aggregate_exists == 1 and head_prevalidation_status == "ABSENT" then
+    return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "aggregate_head_appeared")
+end
 local current_revision_raw = redis.call("HGET", KEYS[1], "revision")
 local current_revision = current_revision_raw and tonumber(current_revision_raw) or 0
 if aggregate_exists == 1 and current_revision_raw == false then
@@ -465,6 +544,17 @@ if aggregate_exists == 1 then
     local head_record_raw = redis.call("HGET", KEYS[4], stored_operation_digest)
     local head_receipt_raw = redis.call("HGET", KEYS[3], stored_operation_digest)
     local head_index_raw = redis.call("HGET", KEYS[2], stored_transition_id)
+    if raw_sha1(head_record_raw) ~= head_record_raw_sha1
+        or raw_sha1(head_receipt_raw) ~= head_receipt_raw_sha1
+        or raw_sha1(head_index_raw) ~= head_index_raw_sha1 then
+        return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "aggregate_head_proof_changed")
+    end
+    if head_prevalidation_status == "INVALID" then
+        return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", stored_command_hash, stored_transition_id, current_revision, "aggregate_head_canonical_validation_failed")
+    end
+    if head_prevalidation_status ~= "VALID" then
+        return result("INVALID_COMMIT_PLAN", nil, nil, "head_prevalidation_status_invalid")
+    end
     if not head_record_raw or not head_receipt_raw or not head_index_raw then
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", stored_command_hash, stored_transition_id, current_revision, "aggregate_head_proof_missing")
     end
