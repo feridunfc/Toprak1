@@ -22,7 +22,8 @@ local canonical_record_hash = ARGV[9]
 local canonical_command_hash = ARGV[10]
 local operation_id = ARGV[11]
 local operation_type = ARGV[12]
-local committed_at_ms = ARGV[13]
+local committed_at_ms = tonumber(ARGV[13])
+local committed_at_ms_raw = ARGV[13]
 local transition_index_json = ARGV[14]
 local record_json = ARGV[15]
 local receipt_json = ARGV[16]
@@ -55,14 +56,37 @@ local function decode_object(raw)
     return value
 end
 
-if not expected_revision or not next_revision or next_revision ~= expected_revision + 1 then
+local function exact_nonnegative_integer(value)
+    return value and value >= 0 and value % 1 == 0
+end
+
+local function sha256_hex_ok(value)
+    return type(value) == "string"
+        and string.len(value) == 64
+        and string.match(value, "^[0-9a-f]+$") ~= nil
+end
+
+if not exact_nonnegative_integer(expected_revision)
+    or not exact_nonnegative_integer(next_revision)
+    or next_revision ~= expected_revision + 1 then
     return result("INVALID_COMMIT_PLAN", nil, nil, "non_contiguous_revision")
+end
+if not exact_nonnegative_integer(committed_at_ms) then
+    return result("INVALID_COMMIT_PLAN", nil, nil, "invalid_committed_at_ms")
 end
 if previous_is_null ~= "0" and previous_is_null ~= "1" then
     return result("INVALID_COMMIT_PLAN", nil, nil, "invalid_previous_null_flag")
 end
 if next_is_null ~= "0" and next_is_null ~= "1" then
     return result("INVALID_COMMIT_PLAN", nil, nil, "invalid_next_null_flag")
+end
+if not sha256_hex_ok(identity_sha)
+    or not sha256_hex_ok(canonical_record_hash)
+    or not sha256_hex_ok(canonical_command_hash)
+    or type(transition_id) ~= "string" or transition_id == ""
+    or type(operation_id) ~= "string" or operation_id == ""
+    or type(operation_type) ~= "string" or operation_type == "" then
+    return result("INVALID_COMMIT_PLAN", nil, nil, "invalid_identity_or_hash_fields")
 end
 
 if not key_type_ok(KEYS[1], "hash")
@@ -98,14 +122,16 @@ if incoming_index.transition_id ~= transition_id
     return result("INVALID_COMMIT_PLAN", nil, nil, "transition_index_argument_mismatch")
 end
 
-if incoming_record.canonical_aggregate_identity_sha256 ~= identity_sha
+if incoming_record.schema_version ~= "ctr.v1"
+    or incoming_record.canonical_aggregate_identity_sha256 ~= identity_sha
     or incoming_record.from_revision ~= expected_revision
     or incoming_record.to_revision ~= next_revision
     or incoming_record.transition_id ~= transition_id
     or incoming_record.canonical_record_hash ~= canonical_record_hash
     or incoming_record.canonical_command_hash ~= canonical_command_hash
     or incoming_record.operation_id ~= operation_id
-    or incoming_record.operation_type ~= operation_type then
+    or incoming_record.operation_type ~= operation_type
+    or incoming_record.committed_at_ms ~= committed_at_ms then
     return result("INVALID_COMMIT_PLAN", nil, nil, "record_argument_mismatch")
 end
 
@@ -114,7 +140,8 @@ if incoming_receipt.operation_id ~= operation_id
     or incoming_receipt.aggregate_revision ~= next_revision
     or incoming_receipt.transition_id ~= transition_id
     or incoming_receipt.canonical_record_hash ~= canonical_record_hash
-    or incoming_receipt.canonical_command_hash ~= canonical_command_hash then
+    or incoming_receipt.canonical_command_hash ~= canonical_command_hash
+    or incoming_receipt.committed_at_ms ~= committed_at_ms then
     return result("INVALID_COMMIT_PLAN", nil, nil, "receipt_argument_mismatch")
 end
 
@@ -131,7 +158,8 @@ if existing_receipt_json or existing_record_json then
     if not existing_receipt or not existing_record then
         return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "stored_proof_json_invalid")
     end
-    if existing_record.canonical_aggregate_identity_sha256 ~= identity_sha
+    if existing_record.schema_version ~= "ctr.v1"
+        or existing_record.canonical_aggregate_identity_sha256 ~= identity_sha
         or existing_record.operation_id ~= operation_id
         or existing_receipt.operation_id ~= operation_id
         or existing_receipt.operation_id ~= existing_record.operation_id
@@ -166,10 +194,32 @@ if redis.call("EXISTS", KEYS[2]) == 1 then
     return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "transition_index_collision")
 end
 
+local aggregate_exists = redis.call("EXISTS", KEYS[1])
 local current_revision_raw = redis.call("HGET", KEYS[1], "revision")
 local current_revision = current_revision_raw and tonumber(current_revision_raw) or 0
-if not current_revision then
+if aggregate_exists == 1 and current_revision_raw == false then
+    return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "aggregate_revision_missing")
+end
+if not exact_nonnegative_integer(current_revision) then
     return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "aggregate_revision_invalid")
+end
+
+local state_exists = redis.call("HEXISTS", KEYS[1], "state")
+local state_is_null = redis.call("HGET", KEYS[1], "state_is_null")
+local stored_identity = redis.call("HGET", KEYS[1], "canonical_aggregate_identity_sha256")
+if aggregate_exists == 1 then
+    local stored_transition_id = redis.call("HGET", KEYS[1], "transition_id")
+    local stored_record_hash = redis.call("HGET", KEYS[1], "canonical_record_hash")
+    local stored_updated_at = tonumber(redis.call("HGET", KEYS[1], "updated_at_ms"))
+    if current_revision < 1
+        or stored_identity ~= identity_sha
+        or state_exists ~= 1
+        or (state_is_null ~= "0" and state_is_null ~= "1")
+        or type(stored_transition_id) ~= "string" or stored_transition_id == ""
+        or not sha256_hex_ok(stored_record_hash)
+        or not exact_nonnegative_integer(stored_updated_at) then
+        return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, current_revision, "aggregate_snapshot_incomplete")
+    end
 end
 
 if current_revision < expected_revision then
@@ -180,13 +230,6 @@ if current_revision > expected_revision then
         return result("AGGREGATE_ALREADY_EXISTS_CONFLICT", nil, current_revision, "")
     end
     return result("STALE_REVISION_CONFLICT", nil, current_revision, "")
-end
-
-local state_exists = redis.call("HEXISTS", KEYS[1], "state")
-local state_is_null = redis.call("HGET", KEYS[1], "state_is_null")
-local stored_identity = redis.call("HGET", KEYS[1], "canonical_aggregate_identity_sha256")
-if stored_identity and stored_identity ~= identity_sha then
-    return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, current_revision, "aggregate_identity_mismatch")
 end
 
 if previous_is_null == "1" then
@@ -214,7 +257,7 @@ redis.call(
     "state_is_null", next_is_null,
     "transition_id", transition_id,
     "canonical_record_hash", canonical_record_hash,
-    "updated_at_ms", committed_at_ms
+    "updated_at_ms", committed_at_ms_raw
 )
 redis.call("XADD", KEYS[5], "*",
     "aggregate_revision", tostring(next_revision),
@@ -222,7 +265,7 @@ redis.call("XADD", KEYS[5], "*",
     "canonical_record_hash", canonical_record_hash,
     "operation_id", operation_id,
     "operation_type", operation_type,
-    "committed_at_ms", committed_at_ms,
+    "committed_at_ms", committed_at_ms_raw,
     "record_json", record_json
 )
 redis.call("XADD", KEYS[6], "*",
@@ -230,7 +273,7 @@ redis.call("XADD", KEYS[6], "*",
     "transition_id", transition_id,
     "canonical_record_hash", canonical_record_hash,
     "projection_intents_json", projection_intents_json,
-    "committed_at_ms", committed_at_ms
+    "committed_at_ms", committed_at_ms_raw
 )
 
 return result("COMMITTED", transition_id, next_revision, "")
