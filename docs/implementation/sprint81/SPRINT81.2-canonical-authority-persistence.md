@@ -37,6 +37,7 @@ hfa:authority:v1:{aggregate_sha256}:log
 hfa:authority:v1:{aggregate_sha256}:outbox
 hfa:authority:v1:{aggregate_sha256}:conflict-index
 hfa:authority:v1:{aggregate_sha256}:conflicts
+hfa:authority:v1:{aggregate_sha256}:operator-audits
 ```
 
 Transition indexes, receipts and operation records are fixed hashes. Their
@@ -64,7 +65,7 @@ execution_boundary:
   TTL: FORBIDDEN
 ```
 
-## Stored proof integrity
+## Stored proof integrity and canonical parity
 
 Each immutable transition index, operation record and receipt is stored in a
 Redis storage envelope:
@@ -74,15 +75,6 @@ storage_envelope:
   payload: EXACT_JSON_BYTES
   storage_sha1: REDIS_LUA_COMPUTED
 ```
-
-Before idempotency classification Lua:
-
-1. loads the record and receipt through the stable operation field;
-2. obtains the historical transition ID from the stored record;
-3. loads that transition index independently of the incoming transition ID;
-4. verifies every storage digest;
-5. validates exact schemas and semantic receipt–record–index equality;
-6. only then compares canonical command hashes.
 
 Sprint 81.2 preserves the accepted Sprint 81.1 canonical-store classifier.
 `ALREADY_APPLIED` requires the same deterministic transition ID, canonical
@@ -96,19 +88,26 @@ same_operation_different_command: IDEMPOTENCY_CONFLICT
 stored_proof_missing_tampered_or_inconsistent: CANONICAL_RECORD_CORRUPTION_CONFLICT
 ```
 
-Concurrent evaluators for one operation must therefore receive stable
-operation-level commit metadata (`committed_at_ms`, authority writer identity
-and correlation identity where present). Creating that stable metadata is a
-trusted-adapter precondition and remains outside this persistence-only slice.
+Concurrent evaluators for one operation must receive stable operation-level
+commit metadata (`committed_at_ms`, authority writer identity and correlation
+identity where present). Creating that stable metadata is a trusted-adapter
+precondition outside this persistence-only slice.
 
-The Redis storage digest is an additional corruption-detection layer. It does
-not replace the accepted canonical SHA-256 record hash. Before each Lua commit,
-the trusted Python adapter reconstructs stored records with the Sprint 81.1
-canonical validator, including canonical hash recomputation, deterministic
-transition identity, structured aggregate identity, operation contract and
-projection-intent validation. Lua compares SHA-1 digests of the exact Redis
-storage envelopes observed by that prevalidation; a race causes an internal
-retry rather than an unvalidated authority decision.
+Before each Lua commit, the trusted Python adapter reconstructs stored records
+with the Sprint 81.1 canonical validator, including:
+
+```yaml
+canonical_record_validation:
+  canonical_hash_recomputation: REQUIRED
+  deterministic_transition_id: REQUIRED
+  structured_aggregate_identity_binding: REQUIRED
+  exact_operation_contract: REQUIRED
+  projection_intent_contract: REQUIRED
+```
+
+Lua compares SHA-1 digests of the exact Redis storage envelopes observed during
+that validation. A concurrent proof change causes an internal bounded retry,
+not an unvalidated authority decision.
 
 ## Existing-head and history continuity
 
@@ -118,17 +117,15 @@ For every commit after revision one, the aggregate head is validated against:
 required_existing_head_proof:
   last_operation_id_and_digest: REQUIRED
   last_transition_index: PRESENT_AND_MATCHING
-  last_operation_record: PRESENT_AND_STORAGE_VALID
+  last_operation_record: PRESENT_AND_CANONICALLY_VALID
   last_operation_receipt: PRESENT_AND_MATCHING
   transition_log_tail: MATCHING
   outbox_tail: MATCHING
 ```
 
-The stream tails must match the aggregate revision, transition ID, record hash,
-operation identity and stored payloads. The transition-index, receipt and record
-hash cardinalities and both stream lengths must also equal the current revision.
-Deletion or insertion anywhere in those persisted collections therefore fails
-closed before any new lifecycle write.
+The transition-index, receipt and record cardinalities and both stream lengths
+must equal the current revision. Deletion or insertion anywhere in those
+persisted collections fails closed before a new lifecycle write.
 
 ```yaml
 current_head_continuity: PROVEN
@@ -141,12 +138,19 @@ Sprint 81.2 does not claim that every non-head historical payload is rehashed on
 every commit. Full replay reconstruction and historical content verification
 remain a separately reviewed Sprint 85 responsibility.
 
-## Durable conflict evidence
+## Durable authority-conflict evidence
 
-The Lua authority decision has access to a fixed conflict index and conflict
-stream. These outcomes write conflict evidence in the same script execution:
+Authority conflict evidence uses a fixed index and append-only stream. Operator
+audit notes use a separate stream and cannot affect authority conflict-pair
+integrity.
 
 ```yaml
+authority_conflict_pair:
+  both_absent_before_first_conflict: ALLOWED
+  both_present_with_matching_count: ALLOWED
+  one_missing_after_prior_conflict: CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+  deleted_index_entry_or_stream_row: CONFLICT_EVIDENCE_STORE_UNAVAILABLE
+
 conflict_outcomes:
   - IDEMPOTENCY_CONFLICT
   - AGGREGATE_ALREADY_EXISTS_CONFLICT
@@ -161,34 +165,16 @@ conflict_mutation:
   durable_conflict_record_count: 1
 ```
 
-Conflict identity is deterministically derived from aggregate identity,
-operation ID, incoming command hash, stored command hash and conflict type.
 The authority-conflict index contains a reserved monotonic evidence-count field.
 Before every decision, index cardinality and stream length must equal that count.
-`HSETNX` deduplicates repeated identical conflict observations; `XADD` occurs
-only for the first insert.
-
-```yaml
-authority_conflict_pair:
-  both_absent_before_first_conflict: ALLOWED
-  both_present_with_matching_count: ALLOWED
-  one_missing_after_prior_conflict: CONFLICT_EVIDENCE_STORE_UNAVAILABLE
-  deleted_index_entry_or_stream_row: CONFLICT_EVIDENCE_STORE_UNAVAILABLE
-```
-
-If either conflict store has the wrong Redis type or the authority evidence pair
-is incomplete, the script cannot truthfully claim durable conflict evidence. It
-returns `CONFLICT_EVIDENCE_STORE_UNAVAILABLE`, performs zero lifecycle mutation
-and requires operator/reconciliation handling.
-
-The Python `record_conflict()` method writes to a separate operator-audit stream.
-Operator notes cannot alter authority conflict pair cardinality and are never
-used to complete a Lua conflict decision after the fact.
+If the pair is incomplete or has an invalid Redis type, the script returns
+`CONFLICT_EVIDENCE_STORE_UNAVAILABLE`, performs zero lifecycle mutation and
+requires operator/reconciliation handling.
 
 ## Adapter read contracts
 
 `load_receipt_probe()` verifies storage envelopes, canonical record semantics,
-transition index equality and the accepted Sprint 81.1 stored-proof validator
+transition-index equality and the accepted Sprint 81.1 stored-proof validator
 against the requested aggregate and operation lookup before returning.
 
 `get_aggregate_snapshot()` exact-validates:
@@ -208,7 +194,7 @@ snapshot:
   projection_intents_json: JSON_ARRAY
 ```
 
-## Lua evaluation order
+## Evaluation order
 
 ```yaml
 1: PYTHON_CANONICAL_PREVALIDATE_OPERATION_AND_HEAD_PROOFS
@@ -224,33 +210,32 @@ snapshot:
 11: WRITE_ACCEPTED_STATE_RECORD_RECEIPT_LOG_AND_OUTBOX
 ```
 
-## Verification contract
-
-The dedicated workflow uses isolated Redis 7 and requires:
+## Final verification
 
 ```yaml
-Sprint_81_1_policy_tests: PASS
-expanded_Sprint_81_2_real_Redis_tests: PASS
+verified_head: fcad9c62426abf810f632ca3e43f61aa45bdd708
+Sprint_81_1_policy_tests: 77_PASSED
+expanded_Sprint_81_2_real_Redis_tests: 49_PASSED
+focused_total: 126_PASSED
 compileall: PASS
 patch_whitespace: PASS
 exact_changed_files: 6
 
-required_adversarial_coverage:
-  changed_transition_with_missing_old_index: PASS
-  stored_record_effect_tamper: PASS
-  transition_index_extra_field: PASS
-  previous_record_receipt_or_index_missing: PASS
-  transition_log_or_outbox_missing: PASS
-  aggregate_head_stream_tail_mismatch: PASS
-  durable_conflict_atomicity_and_deduplication: PASS
-  Redis_and_core_classifier_same_outcome: PASS
-  refreshed_storage_digest_canonical_tamper: PASS
-  authority_conflict_pair_loss_detection: PASS
-  conflict_store_unavailable_result: PASS
-  old_revision_proof_deletion: PASS
-  old_stream_entry_deletion: PASS
-  receipt_probe_lookup_binding: PASS
-  snapshot_exact_validation: PASS
+package_specific_run:
+  id: 30301663199
+  conclusion: SUCCESS
+
+Sprint_81_1_regression_run:
+  id: 30301662437
+  conclusion: SUCCESS
+
+Authority_Gate:
+  id: 30301662228
+  conclusion: SUCCESS
+
+pytest_artifact:
+  id: 8666793121
+  digest: sha256:f46a9fa66d365b4ab22f619af694ed8400d01364fca50c9aa1215c78b8157af5
 ```
 
 ## Deliberate exclusions
@@ -266,6 +251,7 @@ operation_digest_trust_boundary:
   issued_and_recomputed_by_Python_adapter: true
   direct_Lua_invocation: FORBIDDEN
   runtime_wiring_before_independent_binding_review: FORBIDDEN
+stable_operation_commit_metadata_issuer: NOT_IMPLEMENTED
 historical_revision_synthesis: false
 full_historical_content_rehash: false
 legacy_key_migration: false
