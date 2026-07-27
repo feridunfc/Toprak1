@@ -79,6 +79,15 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Upload staged package diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint81-2-correction-parts-${{ github.event.pull_request.head.sha }}
+          path: .s81_2_patch
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Verify isolated Redis 7
         run: |
           python - <<'PY'
