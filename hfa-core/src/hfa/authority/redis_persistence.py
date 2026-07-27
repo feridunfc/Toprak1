@@ -87,11 +87,14 @@ class RedisAuthorityKeyspace:
     def aggregate(self) -> str:
         return f"{self.namespace}:{self.hash_tag}:aggregate"
 
-    def transition(self, transition_id: str) -> str:
+    def transition_index(self, transition_id: str) -> str:
         return f"{self.namespace}:{self.hash_tag}:transition:{_nonempty(transition_id, 'transition_id')}"
 
     def receipt(self, operation_id: str) -> str:
-        return f"{self.namespace}:{self.hash_tag}:receipt:{_component_digest(_nonempty(operation_id, 'operation_id'))}"
+        return f"{self.namespace}:{self.hash_tag}:receipt:{_operation_digest(operation_id)}"
+
+    def operation_record(self, operation_id: str) -> str:
+        return f"{self.namespace}:{self.hash_tag}:operation-record:{_operation_digest(operation_id)}"
 
     @property
     def transition_log(self) -> str:
@@ -108,8 +111,9 @@ class RedisAuthorityKeyspace:
     def commit_keys(self, *, transition_id: str, operation_id: str) -> list[str]:
         return [
             self.aggregate,
-            self.transition(transition_id),
+            self.transition_index(transition_id),
             self.receipt(operation_id),
+            self.operation_record(operation_id),
             self.transition_log,
             self.outbox,
         ]
@@ -121,7 +125,8 @@ def _nonempty(value: Any, field_name: str) -> str:
     return value
 
 
-def _component_digest(value: str) -> str:
+def _operation_digest(operation_id: str) -> str:
+    value = _nonempty(operation_id, "operation_id")
     encoded = value.encode("utf-8")
     return hashlib.sha256(len(encoded).to_bytes(8, "big") + encoded).hexdigest()
 
@@ -152,6 +157,15 @@ def _receipt_payload(receipt: _core.OperationReceipt) -> dict[str, Any]:
         "aggregate_revision": receipt.aggregate_revision,
         "operation_type": receipt.operation_type,
         "committed_at_ms": receipt.committed_at_ms,
+    }
+
+
+def _transition_index_payload(record: _core.CanonicalTransitionRecord) -> dict[str, Any]:
+    return {
+        "transition_id": record.transition_id,
+        "canonical_record_hash": record.canonical_record_hash,
+        "operation_id": record.operation_id,
+        "aggregate_revision": record.to_revision,
     }
 
 
@@ -224,6 +238,12 @@ def _decode_object(raw: str | bytes, *, field_name: str) -> Mapping[str, Any]:
     return value
 
 
+def _validate_transition_index(payload: Mapping[str, Any], record: _core.CanonicalTransitionRecord) -> None:
+    expected = _transition_index_payload(record)
+    if dict(payload) != expected:
+        raise RedisAuthorityPersistenceError("transition index does not match canonical record")
+
+
 def _validate_plan(plan: _core.AuthorityCommitPlan) -> None:
     if not isinstance(plan, _core.AuthorityCommitPlan):
         raise TypeError("plan must be AuthorityCommitPlan")
@@ -269,13 +289,14 @@ class RedisCanonicalAuthorityStore:
         keyspace = self.keyspace(record.aggregate_identity_sha256)
         record_payload = _record_payload(record)
         receipt_payload = _receipt_payload(receipt)
+        transition_index_payload = _transition_index_payload(record)
         projection_intents = record_payload["durable_projection_intents"]
         is_create = record.operation_type in {
             _core.OperationType.TASK_ADMIT.value,
             _core.OperationType.RUN_CREATE.value,
         }
         raw = await self._commit_loader.run(
-            num_keys=5,
+            num_keys=6,
             keys=keyspace.commit_keys(
                 transition_id=record.transition_id,
                 operation_id=record.operation_id,
@@ -294,6 +315,7 @@ class RedisCanonicalAuthorityStore:
                 record.operation_id,
                 record.operation_type,
                 str(record.committed_at_ms),
+                _canonical_text(transition_index_payload),
                 _canonical_text(record_payload),
                 _canonical_text(receipt_payload),
                 _canonical_text(projection_intents),
@@ -311,14 +333,22 @@ class RedisCanonicalAuthorityStore:
             raise TypeError("aggregate_identity must be CanonicalAggregateIdentity")
         operation_id = _nonempty(operation_id, "operation_id")
         keyspace = self.keyspace(aggregate_identity.sha256)
-        raw_receipt = await self._redis.get(keyspace.receipt(operation_id))
-        if raw_receipt is None:
+        raw_receipt, raw_record = await self._redis.mget(
+            keyspace.receipt(operation_id),
+            keyspace.operation_record(operation_id),
+        )
+        if raw_receipt is None and raw_record is None:
             return None
-        receipt_payload = _decode_object(raw_receipt, field_name="operation receipt")
-        receipt = _receipt_from_payload(receipt_payload)
-        raw_record = await self._redis.get(keyspace.transition(receipt.transition_id))
-        record = None if raw_record is None else _record_from_payload(
-            _decode_object(raw_record, field_name="canonical transition record")
+        if raw_receipt is None or raw_record is None:
+            raise RedisAuthorityPersistenceError("stored receipt proof is incomplete")
+        receipt = _receipt_from_payload(_decode_object(raw_receipt, field_name="operation receipt"))
+        record = _record_from_payload(_decode_object(raw_record, field_name="canonical operation record"))
+        raw_index = await self._redis.get(keyspace.transition_index(record.transition_id))
+        if raw_index is None:
+            raise RedisAuthorityPersistenceError("canonical transition index is missing")
+        _validate_transition_index(
+            _decode_object(raw_index, field_name="canonical transition index"),
+            record,
         )
         return _core.ReceiptProbe(receipt=receipt, canonical_store_record=record)
 
