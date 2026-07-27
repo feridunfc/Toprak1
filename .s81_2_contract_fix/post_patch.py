@@ -90,9 +90,12 @@ tests = replace_once(
 test_path.write_text(tests, encoding="utf-8")
 
 for path in (py_path, test_path, lua_path, doc_path):
-    normalized = "\n".join(
-        line.rstrip() for line in path.read_text(encoding="utf-8").splitlines()
-    ) + "\n"
-    path.write_text(normalized, encoding="utf-8")
+    lines = [
+        line.rstrip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    while lines and lines[-1] == "":
+        lines.pop()
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 print("SPRINT81_2_POST_PATCH_APPLIED")
