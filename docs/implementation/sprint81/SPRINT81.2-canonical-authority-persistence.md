@@ -7,7 +7,7 @@ implementation_slice: 81.2
 status: FINAL_CORRECTION_READY_FOR_INDEPENDENT_IMPLEMENTATION_RE_REVIEW
 base_branch: baseline/local-import
 base_head: 34f7dd8e918829c55e6b64a5a09f623305dc9811
-head_binding: PR_EXACT_HEAD_AT_VERIFICATION_COMMENT
+head_binding: LATEST_SUPERSEDING_PR_VERIFICATION_COMMENT
 
 product_source_mutation: true
 new_Redis_Lua_adapter: true
@@ -210,19 +210,18 @@ snapshot:
 11: WRITE_ACCEPTED_STATE_RECORD_RECEIPT_LOG_AND_OUTBOX
 ```
 
-## Final verification
+## Verification contract
 
-The authoritative exact-head verification register is the latest superseding
-PR conversation comment. The values below record the most recent completed
-package before that comment and are informational; the comment binds the final
-review SHA without requiring another source mutation.
+The latest superseding PR conversation comment is the sole authoritative
+exact-head verification register. This source document intentionally contains no
+commit SHA, run ID, artifact ID or blob register so recording evidence cannot
+change the reviewed implementation HEAD.
 
 ```yaml
-Sprint_81_1_policy_tests: 77_PASSED
-expanded_Sprint_81_2_real_Redis_tests: 49_PASSED
-focused_total: 126_PASSED
-compileall: PASS
-patch_whitespace: PASS
+Sprint_81_1_policy_tests: REQUIRED_PASS
+expanded_Sprint_81_2_real_Redis_tests: REQUIRED_PASS
+compileall: REQUIRED_PASS
+patch_whitespace: REQUIRED_PASS
 exact_changed_files: 6
 ```
 
