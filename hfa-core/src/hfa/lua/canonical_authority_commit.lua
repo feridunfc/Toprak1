@@ -37,7 +37,11 @@ local function result(status, existing_transition_id, revision, detail)
 end
 
 local function key_type_ok(key, expected)
-    local kind = redis.call("TYPE", key)["ok"]
+    local reply = redis.call("TYPE", key)
+    local kind = reply
+    if type(reply) == "table" then
+        kind = reply["ok"]
+    end
     return kind == "none" or kind == expected
 end
 
