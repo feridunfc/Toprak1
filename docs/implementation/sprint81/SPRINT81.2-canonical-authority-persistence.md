@@ -105,9 +105,13 @@ canonical_record_validation:
   projection_intent_contract: REQUIRED
 ```
 
-Lua compares SHA-1 digests of the exact Redis storage envelopes observed during
-that validation. A concurrent proof change causes an internal bounded retry,
-not an unvalidated authority decision.
+Python checks proof-key Redis types before issuing any `HGET`. Wrong-type
+receipt, operation-record or transition-index keys are deliberately left for
+Lua's atomic key-type gate, which returns an evidenced canonical corruption
+without leaking a raw Redis `WRONGTYPE` exception. Lua also compares SHA-1
+digests of the exact Redis storage envelopes observed during canonical
+validation. A concurrent proof change causes an internal bounded retry, not an
+unvalidated authority decision.
 
 ## Existing-head and history continuity
 
@@ -166,8 +170,12 @@ conflict_mutation:
 ```
 
 The authority-conflict index contains a reserved monotonic evidence-count field.
-Before every decision, index cardinality and stream length must equal that count.
-If the pair is incomplete or has an invalid Redis type, the script returns
+Conflict identity binds aggregate identity, operation ID, incoming/stored command
+hashes and conflict type. Observation time, detail text and existing-transition
+metadata are not identity fields: the first stored payload wins and repeated
+logical observations compare only identity-bound fields. Before every decision,
+index cardinality and stream length must equal the evidence count. If the pair is
+incomplete or has an invalid Redis type, the script returns
 `CONFLICT_EVIDENCE_STORE_UNAVAILABLE`, performs zero lifecycle mutation and
 requires operator/reconciliation handling.
 
@@ -176,6 +184,10 @@ requires operator/reconciliation handling.
 `load_receipt_probe()` verifies storage envelopes, canonical record semantics,
 transition-index equality and the accepted Sprint 81.1 stored-proof validator
 against the requested aggregate and operation lookup before returning.
+
+The commit path and `get_aggregate_snapshot()` share the same exact eleven-field
+aggregate snapshot schema. Existing snapshots with missing or unexpected fields
+fail closed before a later lifecycle write.
 
 `get_aggregate_snapshot()` exact-validates:
 

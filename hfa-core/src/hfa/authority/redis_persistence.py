@@ -27,6 +27,19 @@ from . import canonical_transition as _core
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_SAFE_INTEGER = 2**53 - 1
+_AGGREGATE_SNAPSHOT_FIELDS = frozenset({
+    "canonical_aggregate_identity_sha256",
+    "revision",
+    "state",
+    "state_is_null",
+    "transition_id",
+    "canonical_record_hash",
+    "canonical_command_hash",
+    "operation_id",
+    "operation_digest",
+    "projection_intents_json",
+    "updated_at_ms",
+})
 
 
 class RedisAuthorityPersistenceError(RuntimeError):
@@ -371,6 +384,13 @@ class RedisCanonicalAuthorityStore:
             )
             record = _record_from_payload(record_payload)
             receipt = _receipt_from_payload(receipt_payload)
+            index_kind = _as_text(await self._redis.type(keyspace.transition_indexes))
+            if index_kind not in {"none", "hash"}:
+                return _StoredProofPrevalidation(
+                    "INVALID",
+                    record_sha1,
+                    receipt_sha1,
+                )
             raw_index = await self._redis.hget(
                 keyspace.transition_indexes,
                 keyspace.transition_field(record.transition_id),
@@ -419,6 +439,12 @@ class RedisCanonicalAuthorityStore:
         operation_id: str,
     ) -> _StoredProofPrevalidation:
         field = keyspace.operation_field(operation_id)
+        receipt_kind = _as_text(await self._redis.type(keyspace.receipts))
+        record_kind = _as_text(await self._redis.type(keyspace.operation_records))
+        if receipt_kind not in {"none", "hash"} or record_kind not in {"none", "hash"}:
+            # Do not issue HGET against a wrong-type proof key. Lua owns the
+            # atomic key-type decision and durable corruption evidence.
+            return _StoredProofPrevalidation("ABSENT")
         raw_receipt = await self._redis.hget(keyspace.receipts, field)
         raw_record = await self._redis.hget(keyspace.operation_records, field)
         return await self._prevalidate_raw_proof(
@@ -441,6 +467,8 @@ class RedisCanonicalAuthorityStore:
         if not raw_snapshot:
             return _StoredProofPrevalidation("INVALID")
         data = {_as_text(key): _as_text(value) for key, value in raw_snapshot.items()}
+        if set(data) != _AGGREGATE_SNAPSHOT_FIELDS:
+            return _StoredProofPrevalidation("INVALID")
         operation_id = data.get("operation_id", "")
         operation_digest = data.get("operation_digest", "")
         transition_id = data.get("transition_id", "")
@@ -449,6 +477,13 @@ class RedisCanonicalAuthorityStore:
             or operation_digest != keyspace.operation_field(operation_id)
             or not transition_id
         ):
+            return _StoredProofPrevalidation("INVALID")
+        proof_kinds = {
+            _as_text(await self._redis.type(keyspace.receipts)),
+            _as_text(await self._redis.type(keyspace.operation_records)),
+            _as_text(await self._redis.type(keyspace.transition_indexes)),
+        }
+        if not proof_kinds.issubset({"none", "hash"}):
             return _StoredProofPrevalidation("INVALID")
         raw_receipt = await self._redis.hget(keyspace.receipts, operation_digest)
         raw_record = await self._redis.hget(keyspace.operation_records, operation_digest)
@@ -573,19 +608,7 @@ class RedisCanonicalAuthorityStore:
         if not raw:
             return None
         data = {_as_text(key): _as_text(value) for key, value in raw.items()}
-        expected_fields = {
-            "canonical_aggregate_identity_sha256",
-            "revision",
-            "state",
-            "state_is_null",
-            "transition_id",
-            "canonical_record_hash",
-            "canonical_command_hash",
-            "operation_id",
-            "operation_digest",
-            "projection_intents_json",
-            "updated_at_ms",
-        }
+        expected_fields = _AGGREGATE_SNAPSHOT_FIELDS
         if set(data) != expected_fields:
             raise RedisAuthorityPersistenceError("aggregate snapshot fields are incomplete or unexpected")
         try:

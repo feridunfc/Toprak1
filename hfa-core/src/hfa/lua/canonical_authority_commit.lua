@@ -335,8 +335,21 @@ local function emit_conflict(conflict_type, stored_command_hash, existing_transi
             "detail", detail or "",
             "conflict_json", payload
         )
-    elseif redis.call("HGET", KEYS[7], conflict_id) ~= payload then
-        return conflict_store_unavailable("authority_conflict_index_payload_mismatch")
+    else
+        -- Conflict identity excludes observation metadata. Repeated observations
+        -- compare only fields bound into conflict_id; the first payload wins.
+        local stored_payload = decode_object(redis.call("HGET", KEYS[7], conflict_id))
+        local expected_stored_hash = stored_command_hash or cjson.null
+        if not stored_payload
+            or stored_payload.conflict_id ~= conflict_id
+            or stored_payload.conflict_type ~= conflict_type
+            or stored_payload.canonical_aggregate_identity_sha256 ~= identity_sha
+            or stored_payload.operation_id ~= operation_id
+            or stored_payload.operation_digest ~= operation_digest
+            or stored_payload.incoming_command_hash ~= canonical_command_hash
+            or stored_payload.stored_command_hash ~= expected_stored_hash then
+            return conflict_store_unavailable("authority_conflict_index_identity_mismatch")
+        end
     end
     return result(conflict_type, existing_transition_id, revision, detail or "")
 end
@@ -527,6 +540,9 @@ local stored_projection_intents_json = redis.call("HGET", KEYS[1], "projection_i
 local stored_updated_at = tonumber(redis.call("HGET", KEYS[1], "updated_at_ms"))
 
 if aggregate_exists == 1 then
+    if redis.call("HLEN", KEYS[1]) ~= 11 then
+        return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", stored_command_hash, stored_transition_id, current_revision, "aggregate_snapshot_field_count_mismatch")
+    end
     if current_revision < 1
         or stored_identity ~= identity_sha
         or state_exists ~= 1
