@@ -7,6 +7,7 @@ implementation_slice: 81.2
 status: CORRECTED_READY_FOR_INDEPENDENT_IMPLEMENTATION_RE_REVIEW
 base_branch: baseline/local-import
 base_head: 34f7dd8e918829c55e6b64a5a09f623305dc9811
+corrected_head: bc4501882e01740cb5952e6b04cd868796f2cffb
 
 product_source_mutation: true
 new_Redis_Lua_adapter: true
@@ -40,8 +41,8 @@ hfa:authority:v1:{aggregate_sha256}:conflicts
 
 Transition indexes, receipts and operation records are fixed hashes. Their
 fields are transition IDs or collision-safe operation-ID digests. This allows
-Lua to resolve an existing operation proof and the current aggregate head
-without deriving a key from the incoming transition ID.
+Lua to resolve an existing operation proof and current aggregate head without
+deriving a Redis key from the incoming transition ID.
 
 Authority keys have no TTL.
 
@@ -76,15 +77,15 @@ storage_envelope:
 
 Before idempotency classification Lua:
 
-1. loads the record and receipt through the stable operation field;
+1. loads record and receipt through the stable operation field;
 2. obtains the historical transition ID from the stored record;
 3. loads that transition index independently of the incoming transition ID;
 4. verifies every storage digest;
 5. validates exact schemas and semantic receipt–record–index equality;
 6. only then compares canonical command hashes.
 
-For an exact duplicate, the stored record, receipt and index payload bytes must
-also equal the incoming payload bytes.
+For an exact duplicate, stored record, receipt and index payload bytes must also
+equal the incoming payload bytes.
 
 ```yaml
 same_operation_same_command_and_exact_payloads: ALREADY_APPLIED
@@ -135,8 +136,8 @@ conflict_mutation:
 
 Conflict identity is deterministically derived from aggregate identity,
 operation ID, incoming command hash, stored command hash and conflict type.
-`HSETNX` deduplicates repeated identical conflict observations; `XADD` occurs
-only for the first insert.
+`HSETNX` deduplicates repeated identical observations; `XADD` occurs only for
+the first insert.
 
 The Python `record_conflict()` method remains only for explicit operator audit
 notes. It is not used to complete a Lua conflict decision after the fact.
@@ -184,20 +185,46 @@ snapshot:
 The dedicated workflow uses isolated Redis 7 and requires:
 
 ```yaml
-Sprint_81_1_policy_tests: PASS
-expanded_Sprint_81_2_real_Redis_tests: PASS
+Sprint_81_1_policy_tests: 77_PASSED
+expanded_Sprint_81_2_real_Redis_tests: 32_PASSED
+focused_total: 109_PASSED
 compileall: PASS
 patch_whitespace: PASS
 exact_changed_files: 6
 
-required_adversarial_coverage:
+package_specific_run:
+  id: 30289598507
+  conclusion: SUCCESS
+
+Sprint_81_1_regression_run:
+  id: 30289598440
+  conclusion: SUCCESS
+
+Authority_Gate:
+  id: 30289598581
+  conclusion: SUCCESS
+```
+
+Required adversarial coverage includes:
+
+```yaml
+stored_proof:
   changed_transition_with_missing_old_index: PASS
-  stored_record_effect_tamper: PASS
+  changed_transition_with_corrupted_old_index: PASS
+  tampered_record_effects: PASS
   transition_index_extra_field: PASS
-  previous_record_receipt_or_index_missing: PASS
+
+history_continuity:
+  previous_index_record_receipt_missing: PASS
   transition_log_or_outbox_missing: PASS
   aggregate_head_stream_tail_mismatch: PASS
-  durable_conflict_atomicity_and_deduplication: PASS
+
+conflict_durability:
+  idempotency_conflict_atomic_and_deduplicated: PASS
+  canonical_corruption_atomic: PASS
+  aggregate_exists_atomic_and_revision_neutral: PASS
+
+adapter_reads:
   receipt_probe_lookup_binding: PASS
   snapshot_exact_validation: PASS
 ```
