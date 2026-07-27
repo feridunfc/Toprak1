@@ -1,3 +1,4 @@
+# Final exact-head verification trigger after the self-deleting status-binding commit.
 name: Sprint 81.2 Canonical Authority Persistence
 
 on:
