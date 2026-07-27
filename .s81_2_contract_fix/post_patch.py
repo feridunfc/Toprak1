@@ -13,6 +13,8 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 root = Path(__file__).resolve().parents[1]
 py_path = root / "hfa-core/src/hfa/authority/redis_persistence.py"
 test_path = root / "hfa-core/tests/authority/test_redis_canonical_authority.py"
+lua_path = root / "hfa-core/src/hfa/lua/canonical_authority_commit.lua"
+doc_path = root / "docs/implementation/sprint81/SPRINT81.2-canonical-authority-persistence.md"
 
 py = py_path.read_text(encoding="utf-8")
 old = '''    async def _prevalidate_head_proof(
@@ -86,5 +88,11 @@ tests = replace_once(
     "missing index canonical detail",
 )
 test_path.write_text(tests, encoding="utf-8")
+
+for path in (py_path, test_path, lua_path, doc_path):
+    normalized = "\n".join(
+        line.rstrip() for line in path.read_text(encoding="utf-8").splitlines()
+    ) + "\n"
+    path.write_text(normalized, encoding="utf-8")
 
 print("SPRINT81_2_POST_PATCH_APPLIED")
