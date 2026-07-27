@@ -212,30 +212,18 @@ snapshot:
 
 ## Final verification
 
+The authoritative exact-head verification register is the latest superseding
+PR conversation comment. The values below record the most recent completed
+package before that comment and are informational; the comment binds the final
+review SHA without requiring another source mutation.
+
 ```yaml
-verified_head: fcad9c62426abf810f632ca3e43f61aa45bdd708
 Sprint_81_1_policy_tests: 77_PASSED
 expanded_Sprint_81_2_real_Redis_tests: 49_PASSED
 focused_total: 126_PASSED
 compileall: PASS
 patch_whitespace: PASS
 exact_changed_files: 6
-
-package_specific_run:
-  id: 30301663199
-  conclusion: SUCCESS
-
-Sprint_81_1_regression_run:
-  id: 30301662437
-  conclusion: SUCCESS
-
-Authority_Gate:
-  id: 30301662228
-  conclusion: SUCCESS
-
-pytest_artifact:
-  id: 8666793121
-  digest: sha256:f46a9fa66d365b4ab22f619af694ed8400d01364fca50c9aa1215c78b8157af5
 ```
 
 ## Deliberate exclusions
