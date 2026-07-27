@@ -180,8 +180,7 @@ redis.call(
     "canonical_record_hash", canonical_record_hash,
     "updated_at_ms", committed_at_ms
 )
-redis.call(
-    "XADD", KEYS[4], "*",
+redis.call("XADD", KEYS[4], "*",
     "aggregate_revision", tostring(next_revision),
     "transition_id", transition_id,
     "canonical_record_hash", canonical_record_hash,
@@ -190,8 +189,7 @@ redis.call(
     "committed_at_ms", committed_at_ms,
     "record_json", record_json
 )
-redis.call(
-    "XADD", KEYS[5], "*",
+redis.call("XADD", KEYS[5], "*",
     "aggregate_revision", tostring(next_revision),
     "transition_id", transition_id,
     "canonical_record_hash", canonical_record_hash,
