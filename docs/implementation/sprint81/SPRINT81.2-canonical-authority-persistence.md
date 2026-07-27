@@ -7,7 +7,7 @@ implementation_slice: 81.2
 status: CORRECTED_READY_FOR_INDEPENDENT_IMPLEMENTATION_RE_REVIEW
 base_branch: baseline/local-import
 base_head: 34f7dd8e918829c55e6b64a5a09f623305dc9811
-corrected_head: bc4501882e01740cb5952e6b04cd868796f2cffb
+corrected_head: da8d61776a3f63143be7276dda2bb49da76765bb
 
 product_source_mutation: true
 new_Redis_Lua_adapter: true
@@ -193,16 +193,20 @@ patch_whitespace: PASS
 exact_changed_files: 6
 
 package_specific_run:
-  id: 30289598507
+  id: 30289808129
   conclusion: SUCCESS
 
 Sprint_81_1_regression_run:
-  id: 30289598440
+  id: 30289806746
   conclusion: SUCCESS
 
 Authority_Gate:
-  id: 30289598581
+  id: 30289807251
   conclusion: SUCCESS
+
+pytest_artifact:
+  id: 8662313889
+  digest: sha256:624bd14fe23631fec7665b5b7e1a215776119735329888dd890991c9bb0273b3
 ```
 
 Required adversarial coverage includes:
