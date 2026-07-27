@@ -56,13 +56,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/s81-2.sha256 <<'EOF'
+          sha256sum \
+            hfa-core/src/hfa/authority/redis_persistence.py \
+            hfa-core/src/hfa/lua/canonical_authority_commit.lua \
+            hfa-core/tests/authority/test_redis_canonical_authority.py \
+            docs/implementation/sprint81/SPRINT81.2-canonical-authority-persistence.md \
+            | tee /tmp/s81-2-actual.sha256
+          cat > /tmp/s81-2.sha256 <<'CHECKSUMS'
           ec997b6b0c1fbb8dfe8e158cd491f3d1a20d2295d136af99f5a667385e6b8fe7  hfa-core/src/hfa/authority/redis_persistence.py
           d1449941f7da70f8d8e97721f0a077fcb06c606d8a36e2ae54baa8d6a0d0f244  hfa-core/src/hfa/lua/canonical_authority_commit.lua
           88314c7c240e113bb16db223d41ea5e24c6886591e2abb4e0c157cbac7c356c7  hfa-core/tests/authority/test_redis_canonical_authority.py
           d82e6f8bcba2531610ca0dde140f8cd4893df530adf8112a917f36b3fcca3acc  docs/implementation/sprint81/SPRINT81.2-canonical-authority-persistence.md
-          EOF
+          CHECKSUMS
           sha256sum -c /tmp/s81-2.sha256
+
+      - name: Upload checksum diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint81-2-correction-sha-${{ github.event.pull_request.head.sha }}
+          path: /tmp/s81-2-actual.sha256
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Verify isolated Redis 7
         run: |
