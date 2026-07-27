@@ -132,6 +132,7 @@ def test_lua_script_is_packaged_next_to_core() -> None:
     assert 'redis.call("SET", KEYS[2], transition_index_json)' in source
     assert 'redis.call("SET", KEYS[4], record_json)' in source
     assert 'redis.call("XADD", KEYS[5]' in source
+    assert "aggregate_snapshot_incomplete" in source
     assert "HFA_ALLOW" not in source
 
 
@@ -312,6 +313,44 @@ async def test_wrong_redis_key_type_fails_before_any_authority_write(store, redi
     assert await redis_client.exists(keyspace.receipt(command.operation_id)) == 0
     assert await redis_client.exists(keyspace.transition_log) == 0
     assert await redis_client.exists(keyspace.outbox) == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_aggregate_hash_is_not_treated_as_revision_zero(store, redis_client) -> None:
+    command = _admit_command()
+    plan = _accepted_plan(command, current_revision=0, current_state=None, committed_at_ms=7_500)
+    keyspace = store.keyspace(command.aggregate_identity.sha256)
+    await redis_client.hset(keyspace.aggregate, mapping={"unrelated": "value"})
+
+    result = await store.commit(plan)
+
+    assert result.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert result.detail == "aggregate_revision_missing"
+    assert await redis_client.exists(keyspace.transition_index(plan.record.transition_id)) == 0
+    assert await redis_client.exists(keyspace.operation_record(command.operation_id)) == 0
+    assert await redis_client.exists(keyspace.receipt(command.operation_id)) == 0
+    assert await redis_client.exists(keyspace.transition_log) == 0
+    assert await redis_client.exists(keyspace.outbox) == 0
+
+
+@pytest.mark.asyncio
+async def test_incomplete_committed_snapshot_blocks_next_revision(store, redis_client) -> None:
+    admit = _admit_command()
+    admit_plan = _accepted_plan(admit, current_revision=0, current_state=None, committed_at_ms=7_700)
+    assert (await store.commit(admit_plan)).committed
+    keyspace = store.keyspace(admit.aggregate_identity.sha256)
+    await redis_client.hdel(keyspace.aggregate, "canonical_record_hash")
+
+    dispatch = _dispatch_command(operation_id="op-after-corruption")
+    dispatch_plan = _accepted_plan(dispatch, current_revision=1, current_state="ready", committed_at_ms=7_701)
+    result = await store.commit(dispatch_plan)
+
+    assert result.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert result.detail == "aggregate_snapshot_incomplete"
+    assert await redis_client.exists(keyspace.operation_record(dispatch.operation_id)) == 0
+    assert await redis_client.exists(keyspace.receipt(dispatch.operation_id)) == 0
+    assert await redis_client.xlen(keyspace.transition_log) == 1
+    assert await redis_client.xlen(keyspace.outbox) == 1
 
 
 @pytest.mark.asyncio
