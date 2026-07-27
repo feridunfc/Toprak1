@@ -80,8 +80,13 @@ jobs:
             hfa-core/src/hfa/lua/canonical_authority_commit.lua \
             hfa-core/tests/authority/test_redis_canonical_authority.py
 
-      - name: Verify patch scope
+      - name: Stage and verify patch scope
         run: |
+          git add \
+            docs/implementation/sprint81/SPRINT81.2-canonical-authority-persistence.md \
+            hfa-core/src/hfa/authority/redis_persistence.py \
+            hfa-core/src/hfa/lua/canonical_authority_commit.lua \
+            hfa-core/tests/authority/test_redis_canonical_authority.py
           python - <<'PY'
           import subprocess
           expected = {
@@ -90,7 +95,9 @@ jobs:
               "hfa-core/src/hfa/lua/canonical_authority_commit.lua",
               "hfa-core/tests/authority/test_redis_canonical_authority.py",
           }
-          observed = set(subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines())
+          observed = set(
+              subprocess.check_output(["git", "diff", "--cached", "--name-only"], text=True).splitlines()
+          )
           assert observed == expected, {"expected": sorted(expected), "observed": sorted(observed)}
           print("SPRINT81_2_FINAL_REREVIEW_SCOPE_OK")
           PY
@@ -99,10 +106,5 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            docs/implementation/sprint81/SPRINT81.2-canonical-authority-persistence.md \
-            hfa-core/src/hfa/authority/redis_persistence.py \
-            hfa-core/src/hfa/lua/canonical_authority_commit.lua \
-            hfa-core/tests/authority/test_redis_canonical_authority.py
           git commit -m "fix(sprint81.2): close final persistence review blockers"
           git push origin HEAD:sprint/81-2-canonical-authority-persistence
