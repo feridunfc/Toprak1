@@ -184,6 +184,8 @@ def test_lua_script_contains_fixed_proof_history_and_conflict_gates() -> None:
     assert "transition_log_tail_mismatch" in source
     assert "outbox_tail_mismatch" in source
     assert 'redis.call("HSETNX", KEYS[7]' in source
+    assert "detail_code=stable_detail_code" in source
+    assert "length_prefix(stable_detail_code)" in source
     assert "HFA_ALLOW" not in source
 
 
@@ -981,4 +983,55 @@ async def test_repeated_logical_conflict_ignores_new_observation_timestamp(
     keyspace = store.keyspace(original.aggregate_identity.sha256)
     assert await redis_client.hlen(keyspace.conflict_index) == 2
     assert await redis_client.xlen(keyspace.conflicts) == 1
+    await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
+
+
+@pytest.mark.asyncio
+async def test_different_stable_conflict_detail_code_creates_distinct_conflict(
+    store,
+    redis_client,
+) -> None:
+    admit = _admit_command(operation_id="distinct-conflict-causes")
+    admit_plan = _accepted_plan(admit, current_revision=0, current_state=None, committed_at_ms=30_500)
+    assert (await store.commit(admit_plan)).committed
+    keyspace = store.keyspace(admit.aggregate_identity.sha256)
+    dispatch = _dispatch_command(operation_id="distinct-conflict-causes-dispatch")
+    dispatch_plan = _accepted_plan(dispatch, current_revision=1, current_state="ready", committed_at_ms=30_501)
+
+    await redis_client.hset(keyspace.aggregate, "unexpected_authority_field", "forbidden")
+    first = await store.commit(dispatch_plan)
+    assert first.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert first.detail == "aggregate_snapshot_field_count_mismatch"
+
+    await redis_client.hdel(keyspace.aggregate, "unexpected_authority_field")
+    tail = await redis_client.xrevrange(keyspace.transition_log, count=1)
+    assert len(tail) == 1
+    await redis_client.xdel(keyspace.transition_log, tail[0][0])
+    await redis_client.xadd(
+        keyspace.transition_log,
+        {
+            "aggregate_revision": "1",
+            "transition_id": admit_plan.record.transition_id,
+            "canonical_record_hash": admit_plan.record.canonical_record_hash,
+            "canonical_command_hash": admit_plan.record.canonical_command_hash,
+            "operation_id": admit.operation_id,
+            "operation_digest": keyspace.operation_field(admit.operation_id),
+            "record_json": "tampered",
+            "receipt_json": "tampered",
+        },
+    )
+
+    second = await store.commit(dispatch_plan)
+    assert second.status is RedisAuthorityCommitStatus.CANONICAL_RECORD_CORRUPTION_CONFLICT
+    assert second.detail == "transition_log_tail_mismatch"
+
+    index_rows = await redis_client.hgetall(keyspace.conflict_index)
+    evidence = [json.loads(value) for key, value in index_rows.items() if key != "__authority_conflict_count"]
+    assert len(evidence) == 2
+    assert {row["detail_code"] for row in evidence} == {
+        "aggregate_snapshot_field_count_mismatch",
+        "transition_log_tail_mismatch",
+    }
+    assert len({row["conflict_id"] for row in evidence}) == 2
+    assert await redis_client.xlen(keyspace.conflicts) == 2
     await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
