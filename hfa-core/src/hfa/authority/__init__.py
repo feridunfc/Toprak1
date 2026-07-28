@@ -1,4 +1,4 @@
-"""Aggregate authority policy-evaluation primitives."""
+"""Aggregate authority policy and persistence primitives."""
 from .canonical_transition import (
     AUTHORITY_CONTEXT_TRUST_MODEL,
     OPERATION_CONTRACTS,
@@ -29,6 +29,14 @@ from .canonical_transition import (
     validate_canonical_transition_record,
     validate_operation_contract,
 )
+from .redis_persistence import (
+    PersistedAggregateSnapshot,
+    RedisAuthorityCommitResult,
+    RedisAuthorityCommitStatus,
+    RedisAuthorityKeyspace,
+    RedisAuthorityPersistenceError,
+    RedisCanonicalAuthorityStore,
+)
 
 __all__ = [
     "AUTHORITY_CONTEXT_TRUST_MODEL",
@@ -48,9 +56,15 @@ __all__ = [
     "OperationContract",
     "OperationReceipt",
     "OperationType",
+    "PersistedAggregateSnapshot",
     "ProjectionApplicationReceipt",
     "ProjectionDecision",
     "ReceiptProbe",
+    "RedisAuthorityCommitResult",
+    "RedisAuthorityCommitStatus",
+    "RedisAuthorityKeyspace",
+    "RedisAuthorityPersistenceError",
+    "RedisCanonicalAuthorityStore",
     "canonical_json_bytes",
     "canonical_json_sha256",
     "classify_canonical_store_write",
