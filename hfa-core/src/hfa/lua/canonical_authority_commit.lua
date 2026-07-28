@@ -301,15 +301,21 @@ local function conflict_pair_state()
 end
 
 local function emit_conflict(conflict_type, stored_command_hash, existing_transition_id, revision, detail)
+    -- The detail value is a stable machine-readable cause code. It is part of
+    -- conflict identity so distinct corruption causes remain separately durable,
+    -- while observation time and other mutable metadata remain non-identity.
+    local stable_detail_code = detail or ""
     local material = length_prefix(identity_sha)
         .. length_prefix(operation_id)
         .. length_prefix(canonical_command_hash)
         .. length_prefix(stored_command_hash or "")
         .. length_prefix(conflict_type)
+        .. length_prefix(stable_detail_code)
     local conflict_id = redis.sha1hex(material)
     local payload = cjson.encode({
         conflict_id=conflict_id,
         conflict_type=conflict_type,
+        detail_code=stable_detail_code,
         canonical_aggregate_identity_sha256=identity_sha,
         operation_id=operation_id,
         operation_digest=operation_digest,
@@ -326,6 +332,7 @@ local function emit_conflict(conflict_type, stored_command_hash, existing_transi
         redis.call("XADD", KEYS[8], "*",
             "conflict_id", conflict_id,
             "conflict_type", conflict_type,
+            "detail_code", stable_detail_code,
             "operation_id", operation_id,
             "operation_digest", operation_digest,
             "incoming_command_hash", canonical_command_hash,
@@ -343,6 +350,7 @@ local function emit_conflict(conflict_type, stored_command_hash, existing_transi
         if not stored_payload
             or stored_payload.conflict_id ~= conflict_id
             or stored_payload.conflict_type ~= conflict_type
+            or stored_payload.detail_code ~= stable_detail_code
             or stored_payload.canonical_aggregate_identity_sha256 ~= identity_sha
             or stored_payload.operation_id ~= operation_id
             or stored_payload.operation_digest ~= operation_digest

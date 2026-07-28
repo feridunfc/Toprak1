@@ -261,3 +261,8 @@ production_deployment: false
 A later, separately reviewed Sprint 81.3 may connect one selected operation to
 this persistence adapter under a feature flag. This document does not authorize
 that connection.
+
+
+## Conflict cause identity correction
+
+Stable machine-readable `detail_code` participates in deterministic conflict identity. Observation timestamps remain non-identity metadata; repeated observations of the same cause deduplicate, while distinct causes create distinct index and stream evidence.
