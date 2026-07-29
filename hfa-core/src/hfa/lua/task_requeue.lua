@@ -40,15 +40,17 @@ local run_tasks_set         = KEYS[7]
 local truth_conflict_index  = KEYS[8]
 local truth_conflict_stream = KEYS[9]
 
-local task_id           = ARGV[1]
+local task_id           = ARGV[1] or ''
 local run_id            = ARGV[2] or ''
-local tenant_id         = ARGV[3]
-local expected_state    = ARGV[4]
-local now_ms            = ARGV[5]
-local ready_score       = ARGV[6]
+local tenant_id         = ARGV[3] or ''
+local expected_state    = ARGV[4] or ''
+local now_ms            = ARGV[5] or ''
+local ready_score       = ARGV[6] or ''
 local max_requeue_count = tonumber(ARGV[7])
-local reason_code       = ARGV[8]
+local reason_code       = ARGV[8] or ''
 local stream_maxlen     = tonumber(ARGV[9])
+local now_ms_number     = tonumber(now_ms)
+local ready_score_number = tonumber(ready_score)
 
 local OPERATION = 'TASK_REQUEUE'
 local TRUTH_COUNT_FIELD = '__runtime_truth_conflict_count'
@@ -126,7 +128,7 @@ local function emit_truth_conflict(status, detail_code, observed_run_state, obse
         task_id=task_id,
         observed_run_state=run_state_json,
         observed_task_state=task_state_json,
-        observed_at_ms=tonumber(now_ms),
+        observed_at_ms=now_ms_number,
         tenant_id=tenant_id,
         reason_code=reason_code
     })
@@ -168,8 +170,17 @@ local function emit_truth_conflict(status, detail_code, observed_run_state, obse
     return failure(status)
 end
 
-if run_id == '' then
-    return failure('identity_run_id_missing')
+if task_id == '' or run_id == '' or tenant_id == '' then
+    return failure('identity_required_field_missing')
+end
+if expected_state ~= 'running' then
+    return failure('invalid_requeue_expected_state')
+end
+if not now_ms_number or now_ms_number < 0
+    or not ready_score_number
+    or not max_requeue_count or max_requeue_count < 0 or max_requeue_count % 1 ~= 0
+    or not stream_maxlen or stream_maxlen <= 0 or stream_maxlen % 1 ~= 0 then
+    return failure('invalid_requeue_contract')
 end
 
 -- Resolve a trustworthy task/run binding before RUN truth or conflict evidence.
@@ -264,9 +275,30 @@ if not nonterminal[run_state] then
     return emit_truth_conflict('run_truth_corruption_conflict', 'run_state_unknown', run_state, current_state)
 end
 
+-- Redis scripts do not roll back earlier writes after a runtime command error.
+-- Validate every mutation target before the first lifecycle mutation.
+local running_kind = redis_type(task_running_zset)
+if running_kind ~= 'none' and running_kind ~= 'zset' then
+    return emit_truth_conflict('task_truth_corruption_conflict', 'task_running_projection_type_mismatch', run_state, current_state)
+end
+local completion_kind = redis_type(completion_stream)
+if completion_kind ~= 'none' and completion_kind ~= 'stream' then
+    return emit_truth_conflict('task_truth_corruption_conflict', 'completion_stream_type_mismatch', run_state, current_state)
+end
+
 local raw_count = redis.call('HGET', task_meta_key, 'requeue_count')
-local retries = tonumber(raw_count or '0') or 0
+local retries = tonumber(raw_count or '0')
+if not retries or retries < 0 or retries % 1 ~= 0 then
+    return emit_truth_conflict('task_truth_corruption_conflict', 'requeue_count_invalid', run_state, current_state)
+end
 retries = retries + 1
+
+if retries <= max_requeue_count then
+    local ready_kind = redis_type(tenant_ready_queue)
+    if ready_kind ~= 'none' and ready_kind ~= 'zset' then
+        return emit_truth_conflict('task_truth_corruption_conflict', 'ready_queue_type_mismatch', run_state, current_state)
+    end
+end
 
 redis.call('ZREM', task_running_zset, task_id)
 
