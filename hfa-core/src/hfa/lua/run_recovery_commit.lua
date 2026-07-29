@@ -3,7 +3,8 @@
 --
 -- The Python caller pre-reads the run task SET only to construct dynamic KEYS.
 -- This script revalidates the SET type/cardinality/membership and every task
--- identity before it mutates RUN state, metadata or the running projection.
+-- identity before it mutates RUN state, metadata, the running projection or
+-- appends scheduler-facing recovery events.
 --
 -- KEYS
 -- 1  run_state_key
@@ -12,7 +13,8 @@
 -- 4  run_tasks_set
 -- 5  global_runtime_truth_conflict_index
 -- 6  global_runtime_truth_conflict_stream
--- 7+ task_state_key, task_meta_key pairs in task_id order
+-- 7  control_stream
+-- 8+ task_state_key, task_meta_key pairs in task_id order
 --
 -- ARGV
 -- 1  run_id
@@ -25,7 +27,8 @@
 -- 8  run_meta_ttl_seconds
 -- 9  task_count
 -- 10 reason_code
--- 11.. task_ids in the same order as KEYS pairs
+-- 11 stream_maxlen
+-- 12.. task_ids in the same order as KEYS pairs
 --
 -- RETURN
 -- { status, reschedule_count, observed_run_state, conflict_task_id }
@@ -36,6 +39,7 @@ local running_zset          = KEYS[3]
 local run_tasks_set         = KEYS[4]
 local truth_conflict_index  = KEYS[5]
 local truth_conflict_stream = KEYS[6]
+local control_stream        = KEYS[7]
 
 local run_id                    = ARGV[1] or ''
 local now_ms                    = ARGV[2]
@@ -47,6 +51,7 @@ local run_state_ttl             = tonumber(ARGV[7]) or 86400
 local run_meta_ttl              = tonumber(ARGV[8]) or 86400
 local task_count                = tonumber(ARGV[9]) or 0
 local reason_code               = ARGV[10] or ''
+local stream_maxlen             = tonumber(ARGV[11]) or 10000
 
 local OPERATION = 'RUN_RECOVERY'
 local TRUTH_COUNT_FIELD = '__runtime_truth_conflict_count'
@@ -164,7 +169,9 @@ end
 if requested_action ~= 'RESCHEDULE' and requested_action ~= 'DEAD_LETTER' then
     return failure('invalid_recovery_action')
 end
-if task_count < 0 or task_count % 1 ~= 0 or #KEYS ~= 6 + (task_count * 2) or #ARGV ~= 10 + task_count then
+if task_count < 0 or task_count % 1 ~= 0
+    or #KEYS ~= 7 + (task_count * 2)
+    or #ARGV ~= 11 + task_count then
     return failure('recovery_contract_cardinality_mismatch')
 end
 
@@ -187,9 +194,23 @@ end
 if meta_kind ~= 'hash' then
     return emit_truth_conflict('run_truth_corruption_conflict', 'run_meta_type_mismatch', run_state, '', nil)
 end
-local stored_run_id = redis.call('HGET', run_meta_key, 'run_id')
+local run_identity = redis.call(
+    'HMGET',
+    run_meta_key,
+    'run_id',
+    'tenant_id',
+    'agent_type',
+    'worker_group'
+)
+local stored_run_id = run_identity[1]
+local tenant_id = run_identity[2]
+local agent_type = run_identity[3] or ''
+local previous_worker = run_identity[4] or ''
 if stored_run_id and stored_run_id ~= '' and stored_run_id ~= run_id then
     return failure('identity_run_id_mismatch', run_state, '')
+end
+if not tenant_id or tenant_id == '' then
+    return emit_truth_conflict('run_truth_corruption_conflict', 'run_tenant_id_missing', run_state, '', nil)
 end
 
 local task_set_kind = redis_type(run_tasks_set)
@@ -217,9 +238,9 @@ local first_task_id = ''
 local first_task_state = ''
 
 for index = 1, task_count do
-    local task_id = ARGV[10 + index]
-    local task_state_key = KEYS[5 + (index * 2)]
-    local task_meta_key = KEYS[6 + (index * 2)]
+    local task_id = ARGV[11 + index]
+    local task_state_key = KEYS[6 + (index * 2)]
+    local task_meta_key = KEYS[7 + (index * 2)]
 
     if not task_id or task_id == '' or redis.call('SISMEMBER', run_tasks_set, task_id) ~= 1 then
         return emit_truth_conflict('task_truth_corruption_conflict', 'run_task_membership_mismatch', run_state, task_id or '', nil)
@@ -304,10 +325,10 @@ end
 if stored_count ~= expected_reschedule_count then
     return failure('RUN_RECOVERY_COUNT_CONFLICT', run_state, '')
 end
-
 if stored_count >= max_reschedule_attempts then
     return failure('RUN_RECOVERY_DECISION_CONFLICT', run_state, '')
 end
+
 local new_count = stored_count + 1
 redis.call('SET', run_state_key, 'rescheduled', 'EX', run_state_ttl)
 redis.call('HSET', run_meta_key,
@@ -318,4 +339,21 @@ redis.call('HSET', run_meta_key,
 )
 redis.call('EXPIRE', run_meta_key, run_meta_ttl)
 redis.call('ZADD', running_zset, running_score, run_id)
+redis.call('XADD', control_stream, 'MAXLEN', '~', stream_maxlen, '*',
+    'event_type', 'RunRescheduled',
+    'run_id', run_id,
+    'tenant_id', tenant_id,
+    'previous_worker', previous_worker,
+    'reschedule_count', tostring(new_count),
+    'reason', reason_code,
+    'rescheduled_at', tostring(tonumber(now_ms) / 1000)
+)
+redis.call('XADD', control_stream, 'MAXLEN', '~', stream_maxlen, '*',
+    'event_type', 'RunAdmitted',
+    'run_id', run_id,
+    'tenant_id', tenant_id,
+    'agent_type', agent_type,
+    'priority', '5',
+    'admitted_at', tostring(tonumber(now_ms) / 1000)
+)
 return {'RUN_RESCHEDULED', tostring(new_count), 'rescheduled', ''}
