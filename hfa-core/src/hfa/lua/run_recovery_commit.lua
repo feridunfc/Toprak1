@@ -42,16 +42,18 @@ local truth_conflict_stream = KEYS[6]
 local control_stream        = KEYS[7]
 
 local run_id                    = ARGV[1] or ''
-local now_ms                    = ARGV[2]
-local running_score             = ARGV[3]
-local max_reschedule_attempts   = tonumber(ARGV[4]) or 0
-local expected_reschedule_count = tonumber(ARGV[5]) or 0
+local now_ms                    = ARGV[2] or ''
+local running_score             = ARGV[3] or ''
+local max_reschedule_attempts   = tonumber(ARGV[4])
+local expected_reschedule_count = tonumber(ARGV[5])
 local requested_action          = ARGV[6] or ''
-local run_state_ttl             = tonumber(ARGV[7]) or 86400
-local run_meta_ttl              = tonumber(ARGV[8]) or 86400
-local task_count                = tonumber(ARGV[9]) or 0
+local run_state_ttl             = tonumber(ARGV[7])
+local run_meta_ttl              = tonumber(ARGV[8])
+local task_count                = tonumber(ARGV[9])
 local reason_code               = ARGV[10] or ''
-local stream_maxlen             = tonumber(ARGV[11]) or 10000
+local stream_maxlen             = tonumber(ARGV[11])
+local now_ms_number             = tonumber(now_ms)
+local running_score_number      = tonumber(running_score)
 
 local OPERATION = 'RUN_RECOVERY'
 local TRUTH_COUNT_FIELD = '__runtime_truth_conflict_count'
@@ -68,7 +70,12 @@ local function length_prefix(value)
 end
 
 local function failure(status, observed_run_state, task_id)
-    return {status, tostring(expected_reschedule_count), observed_run_state or '', task_id or ''}
+    return {
+        status,
+        tostring(expected_reschedule_count or 0),
+        observed_run_state or '',
+        task_id or ''
+    }
 end
 
 local function truth_conflict_pair_state()
@@ -121,7 +128,7 @@ local function emit_truth_conflict(status, detail_code, observed_run_state, task
         task_id=task_id or '',
         observed_run_state=run_state_json,
         observed_task_state=task_state_json,
-        observed_at_ms=tonumber(now_ms),
+        observed_at_ms=now_ms_number,
         requested_action=requested_action,
         reason_code=reason_code
     })
@@ -169,9 +176,19 @@ end
 if requested_action ~= 'RESCHEDULE' and requested_action ~= 'DEAD_LETTER' then
     return failure('invalid_recovery_action')
 end
-if task_count < 0 or task_count % 1 ~= 0
-    or #KEYS ~= 7 + (task_count * 2)
-    or #ARGV ~= 11 + task_count then
+if not now_ms_number or now_ms_number < 0
+    or not running_score_number
+    or not max_reschedule_attempts or max_reschedule_attempts < 0
+        or max_reschedule_attempts % 1 ~= 0
+    or not expected_reschedule_count or expected_reschedule_count < 0
+        or expected_reschedule_count % 1 ~= 0
+    or not run_state_ttl or run_state_ttl <= 0 or run_state_ttl % 1 ~= 0
+    or not run_meta_ttl or run_meta_ttl <= 0 or run_meta_ttl % 1 ~= 0
+    or not task_count or task_count < 0 or task_count % 1 ~= 0
+    or not stream_maxlen or stream_maxlen <= 0 or stream_maxlen % 1 ~= 0 then
+    return failure('invalid_recovery_contract')
+end
+if #KEYS ~= 7 + (task_count * 2) or #ARGV ~= 11 + task_count then
     return failure('recovery_contract_cardinality_mismatch')
 end
 
@@ -317,6 +334,17 @@ if requested_action == 'DEAD_LETTER' then
     )
 end
 
+-- Redis scripts do not roll back earlier writes after a runtime command error.
+-- Validate every mutation target before the first lifecycle mutation.
+local running_kind = redis_type(running_zset)
+if running_kind ~= 'none' and running_kind ~= 'zset' then
+    return emit_truth_conflict('run_truth_corruption_conflict', 'running_projection_type_mismatch', run_state, '', running_kind)
+end
+local control_kind = redis_type(control_stream)
+if control_kind ~= 'none' and control_kind ~= 'stream' then
+    return emit_truth_conflict('run_truth_corruption_conflict', 'control_stream_type_mismatch', run_state, '', control_kind)
+end
+
 local raw_count = redis.call('HGET', run_meta_key, 'reschedule_count')
 local stored_count = tonumber(raw_count or '0')
 if not stored_count or stored_count < 0 or stored_count % 1 ~= 0 then
@@ -346,7 +374,7 @@ redis.call('XADD', control_stream, 'MAXLEN', '~', stream_maxlen, '*',
     'previous_worker', previous_worker,
     'reschedule_count', tostring(new_count),
     'reason', reason_code,
-    'rescheduled_at', tostring(tonumber(now_ms) / 1000)
+    'rescheduled_at', tostring(now_ms_number / 1000)
 )
 redis.call('XADD', control_stream, 'MAXLEN', '~', stream_maxlen, '*',
     'event_type', 'RunAdmitted',
@@ -354,6 +382,6 @@ redis.call('XADD', control_stream, 'MAXLEN', '~', stream_maxlen, '*',
     'tenant_id', tenant_id,
     'agent_type', agent_type,
     'priority', '5',
-    'admitted_at', tostring(tonumber(now_ms) / 1000)
+    'admitted_at', tostring(now_ms_number / 1000)
 )
 return {'RUN_RESCHEDULED', tostring(new_count), 'rescheduled', ''}
