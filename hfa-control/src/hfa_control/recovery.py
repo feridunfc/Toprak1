@@ -3,11 +3,12 @@ hfa-control/src/hfa_control/recovery.py
 ---------------------------------------
 Leader-owned recovery service with Sprint 82.3 TASK/RUN truth convergence.
 
-Stale detection is read-only. A stale candidate may mutate RUN state, metadata
-and the running projection only through ``run_recovery_commit.lua`` after the
-RUN authority, run-task index and every task identity/state have been checked.
-Contradictions produce durable runtime-truth evidence and never trigger silent
-projection cleanup or automatic repair.
+Stale detection is read-only. A stale candidate may mutate RUN state, metadata,
+the running projection and scheduler-facing events only through
+``run_recovery_commit.lua`` after the RUN authority, run-task index and every
+task identity/state have been checked. Contradictions produce durable
+runtime-truth evidence and never trigger silent projection cleanup or automatic
+repair.
 """
 from __future__ import annotations
 
@@ -23,11 +24,7 @@ from unittest.mock import Mock
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.schema import DagRedisKey
 from hfa.events.codec import serialize_event
-from hfa.events.schema import (
-    RunAdmittedEvent,
-    RunDeadLetteredEvent,
-    RunRescheduledEvent,
-)
+from hfa.events.schema import RunAdmittedEvent, RunDeadLetteredEvent
 from hfa.lua.loader import LuaScriptLoader
 from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
@@ -270,6 +267,7 @@ class RecoveryService:
             DagRedisKey.run_tasks(run_id),
             RedisKey.runtime_truth_conflict_index(),
             RedisKey.runtime_truth_conflict_stream(),
+            self._config.control_stream,
         ]
         for task_id in task_ids:
             keys.extend(
@@ -290,6 +288,7 @@ class RecoveryService:
             str(RedisTTL.RUN_META),
             str(len(task_ids)),
             reason_code,
+            str(RedisTTL.STREAM_MAXLEN),
             *task_ids,
         ]
         raw = await self._recovery_loader.run(
@@ -331,74 +330,27 @@ class RecoveryService:
         now_ms: int,
         running_score: float,
     ) -> list[str]:
-        """Mock/fakeredis compatibility; conflict cases fail closed.
+        """Mutation-free compatibility path.
 
-        Production Redis always executes the Lua script. The fallback may
-        authorize only a completely readable nonterminal RUN/task set. It never
-        fabricates durable conflict evidence.
+        Recovery requires one atomic Redis/Lua boundary that includes state,
+        projection and event append. A mock result cannot prove that boundary,
+        so compatibility execution always fails closed and never writes a
+        substitute lifecycle state.
         """
 
-        run_state = _decode(await self._redis.get(RedisKey.run_state(run_id)))
-        if run_state not in {"running", "scheduled", "rescheduled"}:
-            return ["truth_conflict_evidence_store_unavailable", str(expected_reschedule_count), run_state, ""]
-        meta = _decode_mapping(await self._redis.hgetall(RedisKey.run_meta(run_id)))
-        if not meta or not task_ids:
-            return ["truth_conflict_evidence_store_unavailable", str(expected_reschedule_count), run_state, ""]
-        stored_count = _safe_int(meta.get("reschedule_count"), 0)
-        if stored_count != expected_reschedule_count:
-            return ["RUN_RECOVERY_COUNT_CONFLICT", str(stored_count), run_state, ""]
-        for task_id in task_ids:
-            task_meta = _decode_mapping(
-                await self._redis.hgetall(DagRedisKey.task_meta(task_id))
+        del requested_action, reason_code, now_ms, running_score
+        try:
+            observed_run_state = _decode(
+                await self._redis.get(RedisKey.run_state(run_id))
             )
-            task_state = _decode(await self._redis.get(DagRedisKey.task_state(task_id)))
-            if (
-                task_meta.get("task_id") != task_id
-                or task_meta.get("run_id") != run_id
-                or not task_state
-                or task_state in {"done", "failed", "blocked_by_failure", "dead_lettered", "skipped"}
-            ):
-                return ["truth_conflict_evidence_store_unavailable", str(stored_count), run_state, task_id]
-
-        if requested_action == "RESCHEDULE":
-            if stored_count >= self._config.max_reschedule_attempts:
-                return ["RUN_RECOVERY_DECISION_CONFLICT", str(stored_count), run_state, ""]
-            new_count = stored_count + 1
-            await self._redis.set(
-                RedisKey.run_state(run_id),
-                "rescheduled",
-                ex=RedisTTL.RUN_STATE,
-            )
-            await self._redis.hset(
-                RedisKey.run_meta(run_id),
-                mapping={
-                    "state": "rescheduled",
-                    "reschedule_count": str(new_count),
-                    "rescheduled_at_ms": str(now_ms),
-                    "last_recovery_reason": reason_code,
-                },
-            )
-            await self._redis.zadd(self._config.running_zset, {run_id: running_score})
-            return [RUN_RECOVERY_RESCHEDULED, str(new_count), "rescheduled", ""]
-
-        if stored_count < self._config.max_reschedule_attempts:
-            return ["RUN_RECOVERY_DECISION_CONFLICT", str(stored_count), run_state, ""]
-        await self._redis.set(
-            RedisKey.run_state(run_id),
-            "dead_lettered",
-            ex=RedisTTL.RUN_STATE,
-        )
-        await self._redis.hset(
-            RedisKey.run_meta(run_id),
-            mapping={
-                "state": "dead_lettered",
-                "reschedule_count": str(stored_count),
-                "dead_lettered_at_ms": str(now_ms),
-                "last_recovery_reason": reason_code,
-            },
-        )
-        await self._redis.zrem(self._config.running_zset, run_id)
-        return [RUN_RECOVERY_DEAD_LETTERED, str(stored_count), "dead_lettered", ""]
+        except Exception:
+            observed_run_state = ""
+        return [
+            "truth_conflict_evidence_store_unavailable",
+            str(expected_reschedule_count),
+            observed_run_state,
+            task_ids[0] if task_ids else "",
+        ]
 
     # ------------------------------------------------------------------
     # Stale run handler
@@ -434,6 +386,7 @@ class RecoveryService:
         previous_worker: str,
         reschedule_count: int,
     ) -> str:
+        del agent_type
         result = await self._commit_recovery(
             run_id=run_id,
             expected_reschedule_count=reschedule_count,
@@ -450,30 +403,6 @@ class RecoveryService:
             )
             return "conflict" if result.conflict else "skipped"
 
-        rescheduled_event = RunRescheduledEvent(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            previous_worker=previous_worker,
-            reschedule_count=result.reschedule_count,
-            reason="stale_running",
-        )
-        await self._redis.xadd(
-            self._config.control_stream,
-            serialize_event(rescheduled_event),
-            maxlen=RedisTTL.STREAM_MAXLEN,
-            approximate=True,
-        )
-        admitted_event = RunAdmittedEvent(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            agent_type=agent_type,
-        )
-        await self._redis.xadd(
-            self._config.control_stream,
-            serialize_event(admitted_event),
-            maxlen=RedisTTL.STREAM_MAXLEN,
-            approximate=True,
-        )
         logger.warning(
             "Rescheduled: run=%s tenant=%s attempt=%d/%d prev_worker=%s",
             run_id,
@@ -590,7 +519,8 @@ class RecoveryService:
 
         await self._redis.hset(
             RedisKey.run_meta(run_id),
-            mapping={"reschedule_count": "0", "state": "admitted"},
+            "reschedule_count",
+            "0",
         )
         event = RunAdmittedEvent(
             run_id=run_id,
