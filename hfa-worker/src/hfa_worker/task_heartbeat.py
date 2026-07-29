@@ -1,12 +1,7 @@
 """
 hfa_worker/task_heartbeat.py
------------------------------
-IRONCLAD Sprint 2 — Fenced heartbeat loop.
-
-Sprint 2 change: HeartbeatLoop carries claim_epoch from the TaskContext and
-passes it on every heartbeat call.  TaskHeartbeatManager rejects heartbeats
-whose claim_epoch does not match the stored value, making zombie heartbeats
-deterministically rejectable after a task has been requeued and re-claimed.
+----------------------------
+Fenced heartbeat loop carrying explicit task and RUN identity.
 """
 from __future__ import annotations
 
@@ -24,7 +19,7 @@ class HeartbeatLoop:
     tenant_id: str
     worker_instance_id: str
     interval_ms: int
-    # Sprint 2: fence token from claim — must match Redis meta on each call
+    run_id: str = ""
     claim_epoch: str = ""
     _task: asyncio.Task | None = field(default=None, repr=False, compare=False)
     _stopped: asyncio.Event | None = field(default=None, repr=False, compare=False)
@@ -45,17 +40,19 @@ class HeartbeatLoop:
             while not self._stopped.is_set():
                 result = await self.heartbeat_manager.record_heartbeat(
                     task_id=self.task_id,
+                    run_id=self.run_id,
                     tenant_id=self.tenant_id,
                     worker_id=self.worker_instance_id,
                     claim_epoch=self.claim_epoch,
                 )
                 if not result.ok:
-                    # Heartbeat rejected — stop the loop so the worker
-                    # does not keep writing liveness for a claim it no longer owns.
                     import logging
+
                     logging.getLogger(__name__).warning(
-                        "HeartbeatLoop rejected: task=%s status=%s — stopping",
-                        self.task_id, result.status,
+                        "HeartbeatLoop rejected: task=%s run=%s status=%s — stopping",
+                        self.task_id,
+                        self.run_id,
+                        result.status,
                     )
                     self._ownership_loss_status = str(result.status or "")
                     if self._ownership_lost is not None:
@@ -72,14 +69,14 @@ class HeartbeatLoop:
             raise
         except Exception as exc:
             import logging
+
             logging.getLogger(__name__).error(
-                "HeartbeatLoop failed: task=%s error=%s — failing ownership",
+                "HeartbeatLoop failed: task=%s run=%s error=%s — failing ownership",
                 self.task_id,
+                self.run_id,
                 exc,
             )
-            self._ownership_loss_status = (
-                f"heartbeat_error:{type(exc).__name__}"
-            )
+            self._ownership_loss_status = f"heartbeat_error:{type(exc).__name__}"
             if self._ownership_lost is not None:
                 self._ownership_lost.set()
 
