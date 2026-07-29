@@ -213,6 +213,8 @@ local actionable_run_states = {
     running=true, scheduled=true, rescheduled=true
 }
 local run_is_terminal = terminal_run_states[run_state] == true
+local first_task_id = ''
+local first_task_state = ''
 
 for index = 1, task_count do
     local task_id = ARGV[10 + index]
@@ -255,6 +257,10 @@ for index = 1, task_count do
     if not task_state or task_state == '' then
         return emit_truth_conflict('task_truth_corruption_conflict', 'task_state_empty_or_unreadable', run_state, task_id, task_state)
     end
+    if index == 1 then
+        first_task_id = task_id
+        first_task_state = task_state
+    end
 
     local task_is_terminal = task_state == 'done'
         or task_state == 'failed'
@@ -277,6 +283,19 @@ if actionable_run_states[run_state] ~= true then
     return emit_truth_conflict('run_truth_corruption_conflict', 'run_state_not_recovery_actionable', run_state, '', nil)
 end
 
+-- Terminalizing RUN while TASK remains nonterminal would create a new
+-- contradiction. Coordinated TASK terminalization requires an explicit
+-- reconciliation command and is deliberately outside this automatic sweep.
+if requested_action == 'DEAD_LETTER' then
+    return emit_truth_conflict(
+        'task_truth_terminal_conflict',
+        'dead_letter_requires_explicit_task_terminalization',
+        run_state,
+        first_task_id,
+        first_task_state
+    )
+end
+
 local raw_count = redis.call('HGET', run_meta_key, 'reschedule_count')
 local stored_count = tonumber(raw_count or '0')
 if not stored_count or stored_count < 0 or stored_count % 1 ~= 0 then
@@ -286,33 +305,17 @@ if stored_count ~= expected_reschedule_count then
     return failure('RUN_RECOVERY_COUNT_CONFLICT', run_state, '')
 end
 
-if requested_action == 'RESCHEDULE' then
-    if stored_count >= max_reschedule_attempts then
-        return failure('RUN_RECOVERY_DECISION_CONFLICT', run_state, '')
-    end
-    local new_count = stored_count + 1
-    redis.call('SET', run_state_key, 'rescheduled', 'EX', run_state_ttl)
-    redis.call('HSET', run_meta_key,
-        'state', 'rescheduled',
-        'reschedule_count', tostring(new_count),
-        'rescheduled_at_ms', now_ms,
-        'last_recovery_reason', reason_code
-    )
-    redis.call('EXPIRE', run_meta_key, run_meta_ttl)
-    redis.call('ZADD', running_zset, running_score, run_id)
-    return {'RUN_RESCHEDULED', tostring(new_count), 'rescheduled', ''}
-end
-
-if stored_count < max_reschedule_attempts then
+if stored_count >= max_reschedule_attempts then
     return failure('RUN_RECOVERY_DECISION_CONFLICT', run_state, '')
 end
-redis.call('SET', run_state_key, 'dead_lettered', 'EX', run_state_ttl)
+local new_count = stored_count + 1
+redis.call('SET', run_state_key, 'rescheduled', 'EX', run_state_ttl)
 redis.call('HSET', run_meta_key,
-    'state', 'dead_lettered',
-    'reschedule_count', tostring(stored_count),
-    'dead_lettered_at_ms', now_ms,
+    'state', 'rescheduled',
+    'reschedule_count', tostring(new_count),
+    'rescheduled_at_ms', now_ms,
     'last_recovery_reason', reason_code
 )
 redis.call('EXPIRE', run_meta_key, run_meta_ttl)
-redis.call('ZREM', running_zset, run_id)
-return {'RUN_DEAD_LETTERED', tostring(stored_count), 'dead_lettered', ''}
+redis.call('ZADD', running_zset, running_score, run_id)
+return {'RUN_RESCHEDULED', tostring(new_count), 'rescheduled', ''}
