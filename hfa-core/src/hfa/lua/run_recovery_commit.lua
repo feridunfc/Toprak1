@@ -30,11 +30,11 @@
 -- RETURN
 -- { status, reschedule_count, observed_run_state, conflict_task_id }
 
-local run_state_key        = KEYS[1]
-local run_meta_key         = KEYS[2]
-local running_zset         = KEYS[3]
-local run_tasks_set        = KEYS[4]
-local truth_conflict_index = KEYS[5]
+local run_state_key         = KEYS[1]
+local run_meta_key          = KEYS[2]
+local running_zset          = KEYS[3]
+local run_tasks_set         = KEYS[4]
+local truth_conflict_index  = KEYS[5]
 local truth_conflict_stream = KEYS[6]
 
 local run_id                    = ARGV[1] or ''
@@ -206,12 +206,13 @@ if task_count == 0 then
     return emit_truth_conflict('task_truth_missing', 'run_has_no_task_authority', run_state, '', nil)
 end
 
-local run_terminal = {
+local terminal_run_states = {
     done=true, failed=true, rejected=true, dead_lettered=true
 }
-local run_actionable = {
+local actionable_run_states = {
     running=true, scheduled=true, rescheduled=true
 }
+local run_is_terminal = terminal_run_states[run_state] == true
 
 for index = 1, task_count do
     local task_id = ARGV[10 + index]
@@ -255,24 +256,24 @@ for index = 1, task_count do
         return emit_truth_conflict('task_truth_corruption_conflict', 'task_state_empty_or_unreadable', run_state, task_id, task_state)
     end
 
-    local task_terminal = task_state == 'done'
+    local task_is_terminal = task_state == 'done'
         or task_state == 'failed'
         or task_state == 'blocked_by_failure'
         or task_state == 'dead_lettered'
         or task_state == 'skipped'
-    if run_terminal[run_state] ~= task_terminal then
-        local detail = task_terminal and 'task_terminal_run_nonterminal' or 'run_terminal_task_nonterminal'
-        local status = task_terminal and 'task_truth_terminal_conflict' or 'run_truth_terminal_conflict'
+    if run_is_terminal ~= task_is_terminal then
+        local detail = task_is_terminal and 'task_terminal_run_nonterminal' or 'run_terminal_task_nonterminal'
+        local status = task_is_terminal and 'task_truth_terminal_conflict' or 'run_truth_terminal_conflict'
         return emit_truth_conflict(status, detail, run_state, task_id, task_state)
     end
 end
 
 -- A terminal RUN in the active projection is never silently cleaned up. Even
 -- when every task is terminal, the stale projection is an explicit candidate.
-if run_terminal[run_state] then
+if run_is_terminal then
     return emit_truth_conflict('run_truth_terminal_conflict', 'terminal_run_in_running_projection', run_state, '', nil)
 end
-if not run_actionable[run_state] then
+if actionable_run_states[run_state] ~= true then
     return emit_truth_conflict('run_truth_corruption_conflict', 'run_state_not_recovery_actionable', run_state, '', nil)
 end
 
