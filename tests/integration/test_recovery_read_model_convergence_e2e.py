@@ -64,12 +64,13 @@ async def _seed(
     await redis_client.zadd(RedisKey.cp_running(), {run_id: 1})
 
 
-async def _operations(redis_client) -> list[str]:
+async def _truth_rows(redis_client) -> list[dict[str, str]]:
     rows = await redis_client.xrange(RedisKey.runtime_truth_conflict_stream())
-    return [
-        _decode_mapping(fields).get("operation", "")
-        for _entry_id, fields in rows
-    ]
+    return [_decode_mapping(fields) for _entry_id, fields in rows]
+
+
+async def _operations(redis_client) -> list[str]:
+    return [row.get("operation", "") for row in await _truth_rows(redis_client)]
 
 
 async def test_stale_task_then_run_recovery_converges_without_truth_conflict(
@@ -170,3 +171,152 @@ async def test_terminal_run_contradiction_blocks_both_recovery_callers_and_event
         item["detail_code"] == "run_terminal_task_nonterminal"
         for item in read_model["truth_conflicts"]
     )
+
+
+async def test_wrong_type_ready_queue_blocks_task_requeue_before_mutation(
+    redis_client,
+) -> None:
+    run_id = "run-ready-wrong-type"
+    task_id = "task-ready-wrong-type"
+    tenant_id = "tenant-ready-wrong-type"
+    await _seed(
+        redis_client,
+        run_id=run_id,
+        task_id=task_id,
+        tenant_id=tenant_id,
+        run_state="running",
+        task_state="running",
+    )
+    ready_key = DagRedisKey.tenant_ready_queue(tenant_id)
+    await redis_client.set(ready_key, "wrong-type")
+    before_meta = _decode_mapping(
+        await redis_client.hgetall(DagRedisKey.task_meta(task_id))
+    )
+
+    result = await TaskRecoveryManager(redis_client).requeue_stale_task(
+        task_id=task_id,
+        run_id=run_id,
+        tenant_id=tenant_id,
+        now_ms=400,
+        ready_score=400,
+    )
+
+    assert result.status == "task_truth_corruption_conflict"
+    assert _decode(await redis_client.get(DagRedisKey.task_state(task_id))) == "running"
+    assert _decode_mapping(await redis_client.hgetall(DagRedisKey.task_meta(task_id))) == before_meta
+    assert await redis_client.zscore(DagRedisKey.task_running_zset(tenant_id), task_id) == 1.0
+    assert _decode(await redis_client.get(ready_key)) == "wrong-type"
+    assert (await _truth_rows(redis_client))[0]["detail_code"] == "ready_queue_type_mismatch"
+
+
+async def test_wrong_type_completion_stream_blocks_task_requeue_before_mutation(
+    redis_client,
+) -> None:
+    run_id = "run-completion-wrong-type"
+    task_id = "task-completion-wrong-type"
+    tenant_id = "tenant-completion-wrong-type"
+    await _seed(
+        redis_client,
+        run_id=run_id,
+        task_id=task_id,
+        tenant_id=tenant_id,
+        run_state="running",
+        task_state="running",
+    )
+    completion_key = DagRedisKey.completion_stream(tenant_id)
+    await redis_client.set(completion_key, "wrong-type")
+    before_meta = _decode_mapping(
+        await redis_client.hgetall(DagRedisKey.task_meta(task_id))
+    )
+
+    result = await TaskRecoveryManager(redis_client).requeue_stale_task(
+        task_id=task_id,
+        run_id=run_id,
+        tenant_id=tenant_id,
+        now_ms=500,
+    )
+
+    assert result.status == "task_truth_corruption_conflict"
+    assert _decode(await redis_client.get(DagRedisKey.task_state(task_id))) == "running"
+    assert _decode_mapping(await redis_client.hgetall(DagRedisKey.task_meta(task_id))) == before_meta
+    assert await redis_client.zscore(DagRedisKey.task_running_zset(tenant_id), task_id) == 1.0
+    assert _decode(await redis_client.get(completion_key)) == "wrong-type"
+    assert (await _truth_rows(redis_client))[0]["detail_code"] == "completion_stream_type_mismatch"
+
+
+async def test_wrong_type_control_stream_blocks_run_recovery_before_mutation(
+    redis_client,
+) -> None:
+    run_id = "run-control-wrong-type"
+    task_id = "task-control-wrong-type"
+    tenant_id = "tenant-control-wrong-type"
+    await _seed(
+        redis_client,
+        run_id=run_id,
+        task_id=task_id,
+        tenant_id=tenant_id,
+        run_state="running",
+        task_state="running",
+    )
+    control_key = RedisKey.stream_control()
+    await redis_client.set(control_key, "wrong-type")
+    before_meta = _decode_mapping(await redis_client.hgetall(RedisKey.run_meta(run_id)))
+    recovery = RecoveryService(
+        redis_client,
+        ControlPlaneConfig(instance_id="cp-control-wrong-type"),
+    )
+
+    result = await recovery._commit_recovery(
+        run_id=run_id,
+        expected_reschedule_count=0,
+        requested_action="RESCHEDULE",
+        reason_code="stale_running",
+        now_ms=600,
+        running_score=600,
+    )
+
+    assert result.status == "run_truth_corruption_conflict"
+    assert _decode(await redis_client.get(RedisKey.run_state(run_id))) == "running"
+    assert _decode_mapping(await redis_client.hgetall(RedisKey.run_meta(run_id))) == before_meta
+    assert await redis_client.zscore(RedisKey.cp_running(), run_id) == 1.0
+    assert _decode(await redis_client.get(control_key)) == "wrong-type"
+    assert (await _truth_rows(redis_client))[0]["detail_code"] == "control_stream_type_mismatch"
+
+
+async def test_wrong_type_running_projection_blocks_run_recovery_before_mutation(
+    redis_client,
+) -> None:
+    run_id = "run-projection-wrong-type"
+    task_id = "task-projection-wrong-type"
+    tenant_id = "tenant-projection-wrong-type"
+    await _seed(
+        redis_client,
+        run_id=run_id,
+        task_id=task_id,
+        tenant_id=tenant_id,
+        run_state="running",
+        task_state="running",
+    )
+    running_key = RedisKey.cp_running()
+    await redis_client.delete(running_key)
+    await redis_client.set(running_key, "wrong-type")
+    before_meta = _decode_mapping(await redis_client.hgetall(RedisKey.run_meta(run_id)))
+    recovery = RecoveryService(
+        redis_client,
+        ControlPlaneConfig(instance_id="cp-projection-wrong-type"),
+    )
+
+    result = await recovery._commit_recovery(
+        run_id=run_id,
+        expected_reschedule_count=0,
+        requested_action="RESCHEDULE",
+        reason_code="stale_running",
+        now_ms=700,
+        running_score=700,
+    )
+
+    assert result.status == "run_truth_corruption_conflict"
+    assert _decode(await redis_client.get(RedisKey.run_state(run_id))) == "running"
+    assert _decode_mapping(await redis_client.hgetall(RedisKey.run_meta(run_id))) == before_meta
+    assert _decode(await redis_client.get(running_key)) == "wrong-type"
+    assert (await _truth_rows(redis_client))[0]["detail_code"] == "running_projection_type_mismatch"
