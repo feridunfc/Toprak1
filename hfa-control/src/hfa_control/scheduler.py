@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -222,6 +223,10 @@ def build_production_scheduler(
         raise ValueError("scheduler_reservation_ttl_seconds must be greater than zero")
 
     from hfa_control.dag_lua import DagLua
+    from hfa_control.task_admit_authority import (
+        FEATURE_FLAG,
+        parse_task_admit_binding_flag,
+    )
     from hfa_control.dag_scheduler_bridge import DagReadyQueue, DagSchedulerDispatchWriter
     from hfa_control.dag_scheduler_dispatch_controller import DagSchedulerDispatchController
     from hfa_control.dispatch_controller import DispatchController
@@ -230,7 +235,12 @@ def build_production_scheduler(
     from hfa_control.tenant_fairness import TenantFairnessTracker
     from hfa_control.worker_reservation import WorkerReservationManager
 
-    dag_lua = DagLua(redis)
+    canonical_task_admit_binding = parse_task_admit_binding_flag(
+        os.getenv(FEATURE_FLAG)
+    )
+    dag_lua = DagLua(
+        redis, canonical_task_admit_binding=canonical_task_admit_binding
+    )
     ready_queue = DagReadyQueue(redis)
     dispatch_writer = DagSchedulerDispatchWriter(ready_queue=ready_queue, dag_lua=dag_lua)
     reservation_manager = WorkerReservationManager(

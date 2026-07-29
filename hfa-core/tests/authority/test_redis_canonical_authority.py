@@ -1035,3 +1035,43 @@ async def test_different_stable_conflict_detail_code_creates_distinct_conflict(
     assert len({row["conflict_id"] for row in evidence}) == 2
     assert await redis_client.xlen(keyspace.conflicts) == 2
     await _assert_no_new_lifecycle(redis_client, keyspace, revision=1, log_len=1, outbox_len=1)
+
+@pytest.mark.asyncio
+async def test_policy_conflict_api_writes_authority_pair_atomically(store, redis_client) -> None:
+    identity = _identity(run_id="run-policy-conflict", task_id="task-policy-conflict")
+    result = await store.record_authority_conflict(
+        identity,
+        status=RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT,
+        operation_id="task-admit:v1:policy-conflict",
+        incoming_command_hash="1" * 64,
+        stored_command_hash="2" * 64,
+        observed_at_ms=1234,
+        detail_code="policy_idempotency_conflict",
+        detail="policy conflict without commit plan",
+    )
+    assert result.status is RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT
+    keyspace = store.keyspace(identity.sha256)
+    assert int(await redis_client.hget(keyspace.conflict_index, "__authority_conflict_count")) == 1
+    assert await redis_client.hlen(keyspace.conflict_index) == 2
+    assert await redis_client.xlen(keyspace.conflicts) == 1
+    assert not await redis_client.exists(keyspace.aggregate)
+    assert await redis_client.hlen(keyspace.operation_records) == 0
+    assert await redis_client.hlen(keyspace.receipts) == 0
+
+
+@pytest.mark.asyncio
+async def test_policy_conflict_api_deduplicates_same_identity(store, redis_client) -> None:
+    identity = _identity(run_id="run-policy-dedup", task_id="task-policy-dedup")
+    kwargs = dict(
+        status=RedisAuthorityCommitStatus.IDEMPOTENCY_CONFLICT,
+        operation_id="task-admit:v1:policy-dedup",
+        incoming_command_hash="3" * 64,
+        stored_command_hash="4" * 64,
+        detail_code="policy_idempotency_conflict",
+        detail="first payload wins",
+    )
+    await store.record_authority_conflict(identity, observed_at_ms=100, **kwargs)
+    await store.record_authority_conflict(identity, observed_at_ms=200, **kwargs)
+    keyspace = store.keyspace(identity.sha256)
+    assert int(await redis_client.hget(keyspace.conflict_index, "__authority_conflict_count")) == 1
+    assert await redis_client.xlen(keyspace.conflicts) == 1
