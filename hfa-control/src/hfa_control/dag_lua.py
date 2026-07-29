@@ -169,8 +169,10 @@ class DagLua:
     Sprint 2: claim returns a full fence tuple; complete enforces it.
     """
 
-    def __init__(self, redis) -> None:
+    def __init__(self, redis, *, canonical_task_admit_binding: bool = False) -> None:
         self._redis = redis
+        self._canonical_task_admit_binding_enabled = bool(canonical_task_admit_binding)
+        self._task_admit_authority_binding = None
         self._admit_loader:    Optional[LuaScriptLoader] = None
         self._dispatch_loader: Optional[LuaScriptLoader] = None
         self._claim_loader:    Optional[LuaScriptLoader] = None
@@ -199,15 +201,44 @@ class DagLua:
     # ── task_admit ────────────────────────────────────────────────────────────
 
     async def task_admit(self, seed) -> TaskAdmitResult:
+        if self._canonical_task_admit_binding_enabled:
+            if self._task_admit_authority_binding is None:
+                from hfa_control.task_admit_authority import TaskAdmitAuthorityBinding
+                self._task_admit_authority_binding = TaskAdmitAuthorityBinding(
+                    self._redis, self._task_admit_canonical_projection
+                )
+            return await self._task_admit_authority_binding.admit(seed)
+        return await self._task_admit_legacy(seed)
+
+    async def _task_admit_legacy(self, seed) -> TaskAdmitResult:
+        """Preserve the pre-Sprint-81.3 legacy argument coercion exactly."""
+        admitted_at = float(getattr(seed, "admitted_at", 0.0) or 0.0)
+        return await self._task_admit_project(
+            seed,
+            priority_text=str(getattr(seed, "priority", 0)),
+            admitted_at_text=str(admitted_at),
+            dependency_count_text=str(getattr(seed, "dependency_count", 0)),
+        )
+
+    async def _task_admit_canonical_projection(self, seed) -> TaskAdmitResult:
+        """Project already-normalized canonical values without re-reading/coercing them."""
+        return await self._task_admit_project(
+            seed,
+            priority_text=str(seed.priority),
+            admitted_at_text=str(seed.admitted_at),
+            dependency_count_text=str(seed.dependency_count),
+        )
+
+    async def _task_admit_project(
+        self, seed, *, priority_text: str, admitted_at_text: str, dependency_count_text: str
+    ) -> TaskAdmitResult:
         await self._ensure_initialised()
         assert self._admit_loader is not None
 
-        task_id   = seed.task_id
-        run_id    = seed.run_id
+        task_id = seed.task_id
+        run_id = seed.run_id
         tenant_id = seed.tenant_id
-        dep_count = getattr(seed, "dependency_count", 0)
         child_ids = list(getattr(seed, "child_task_ids", ()) or ())
-        admitted_at = float(getattr(seed, "admitted_at", 0.0) or 0.0)
 
         keys = [
             DagRedisKey.task_state(task_id),
@@ -222,12 +253,12 @@ class DagLua:
         args: list[str] = [
             task_id, run_id, tenant_id,
             getattr(seed, "agent_type", "") or "",
-            str(getattr(seed, "priority", 0)),
-            str(admitted_at),
+            priority_text,
+            admitted_at_text,
             getattr(seed, "payload_json", "") or "",
             getattr(seed, "trace_parent", "") or "",
             getattr(seed, "trace_state", "") or "",
-            str(dep_count),
+            dependency_count_text,
             str(int(getattr(RedisTTL, "RUN_STATE", 86400))),
             str(int(getattr(RedisTTL, "RUN_META", 86400))),
             str(int(getattr(RedisTTL, "RUN_META", 86400))),
@@ -236,8 +267,8 @@ class DagLua:
         ] + child_ids
 
         raw = await self._admit_loader.run(num_keys=len(keys), keys=keys, args=args)
-        status  = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])
-        ready   = status == "seeded_root"
+        status = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])
+        ready = status == "seeded_root"
         admitted = status in ("seeded_root", "seeded_waiting", "already_exists")
         return TaskAdmitResult(admitted=admitted, ready=ready, task_id=task_id, status=status)
 

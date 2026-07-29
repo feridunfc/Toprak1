@@ -34,6 +34,7 @@ from .redis_persistence import (
     RedisAuthorityCommitResult,
     RedisAuthorityCommitStatus,
     RedisAuthorityKeyspace,
+    RedisAuthorityCorruptionError,
     RedisAuthorityPersistenceError,
     RedisCanonicalAuthorityStore,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "RedisAuthorityCommitResult",
     "RedisAuthorityCommitStatus",
     "RedisAuthorityKeyspace",
+    "RedisAuthorityCorruptionError",
     "RedisAuthorityPersistenceError",
     "RedisCanonicalAuthorityStore",
     "canonical_json_bytes",
