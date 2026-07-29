@@ -94,6 +94,38 @@ def test_lua_guard_precedes_first_lifecycle_mutation():
     assert source.index("emit_truth_conflict", guard) < first_mutation
 
 
+def test_task_and_run_identity_validation_precedes_run_truth_read():
+    source = LUA_PATH.read_text(encoding="utf-8")
+    task_state_read = source.index("local current = redis.call('GET', task_state_key)")
+    task_meta_required = source.index("redis.call('EXISTS', task_meta_key)")
+    authoritative_identity = source.index("local authoritative_identity = redis.call('HMGET'")
+    explicit_run_match = source.index("if authoritative_run_id ~= run_id then")
+    run_truth_type_read = source.index("local run_kind = redis_type(run_state_key)")
+    assert task_state_read < task_meta_required < authoritative_identity
+    assert authoritative_identity < explicit_run_match < run_truth_type_read
+
+
+def test_runtime_truth_conflict_identity_binds_task_dispatch_operation_in_fixed_order():
+    source = LUA_PATH.read_text(encoding="utf-8")
+    assert "local OPERATION = 'TASK_DISPATCH'" in source
+    start = source.index("local material = length_prefix(OPERATION)")
+    end = source.index("local conflict_id = redis.sha1hex(material)", start)
+    material = source[start:end]
+    ordered_parts = (
+        "length_prefix(OPERATION)",
+        "length_prefix(run_id)",
+        "length_prefix(task_id)",
+        "length_prefix(status)",
+        "length_prefix(detail_code)",
+        "length_prefix(observed_run_state or '')",
+    )
+    positions = [material.index(part) for part in ordered_parts]
+    assert positions == sorted(positions)
+    assert "operation=OPERATION" in source
+    assert "'operation', OPERATION" in source
+    assert "existing.operation ~= OPERATION" in source
+
+
 def test_conflict_identity_is_length_prefixed_deterministic_and_first_payload_wins():
     source = LUA_PATH.read_text(encoding="utf-8")
     assert "local function length_prefix" in source

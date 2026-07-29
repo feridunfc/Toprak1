@@ -46,6 +46,7 @@ local region                = ARGV[17] or ''
 local payload_json          = ARGV[18] or '{}'
 local scheduler_epoch       = ARGV[19] or ''
 
+local OPERATION = 'TASK_DISPATCH'
 local TRUTH_COUNT_FIELD = '__runtime_truth_conflict_count'
 
 local function redis_type(key)
@@ -90,7 +91,8 @@ local function emit_truth_conflict(status, detail_code, observed_run_state)
         return {'truth_conflict_evidence_store_unavailable', pair_value}
     end
     local count = pair_value
-    local material = length_prefix(run_id)
+    local material = length_prefix(OPERATION)
+        .. length_prefix(run_id)
         .. length_prefix(task_id)
         .. length_prefix(status)
         .. length_prefix(detail_code)
@@ -99,6 +101,7 @@ local function emit_truth_conflict(status, detail_code, observed_run_state)
     local state_json = observed_run_state == nil and cjson.null or observed_run_state
     local payload = cjson.encode({
         conflict_id=conflict_id,
+        operation=OPERATION,
         conflict_type=status,
         detail_code=detail_code,
         run_id=run_id,
@@ -113,6 +116,7 @@ local function emit_truth_conflict(status, detail_code, observed_run_state)
         redis.call('HSET', truth_conflict_index, TRUTH_COUNT_FIELD, tostring(count))
         redis.call('XADD', truth_conflict_stream, '*',
             'conflict_id', conflict_id,
+            'operation', OPERATION,
             'conflict_type', status,
             'detail_code', detail_code,
             'run_id', run_id,
@@ -127,6 +131,7 @@ local function emit_truth_conflict(status, detail_code, observed_run_state)
         local expected_state = observed_run_state == nil and cjson.null or observed_run_state
         if not ok or type(existing) ~= 'table'
             or existing.conflict_id ~= conflict_id
+            or existing.operation ~= OPERATION
             or existing.conflict_type ~= status
             or existing.detail_code ~= detail_code
             or existing.run_id ~= run_id
@@ -138,8 +143,31 @@ local function emit_truth_conflict(status, detail_code, observed_run_state)
     return {status, detail_code}
 end
 
--- RUN truth is authoritative. This guard and its durable observation happen
--- before every task/queue/zset/metadata/dispatch-stream mutation below.
+-- Establish exact task/run identity before the supplied RUN key is read.
+-- These reads do not mutate lifecycle state.
+local current = redis.call('GET', task_state_key)
+if not current then return {'missing_state', ''} end
+
+if redis.call('EXISTS', task_meta_key) == 0 then return {'missing_task_meta', ''} end
+local authoritative_identity = redis.call('HMGET', task_meta_key, 'task_id', 'run_id')
+local authoritative_task_id = authoritative_identity[1]
+local authoritative_run_id  = authoritative_identity[2]
+if not authoritative_task_id or authoritative_task_id == '' then return {'identity_task_id_missing', ''} end
+if authoritative_task_id ~= task_id then return {'identity_task_id_mismatch', authoritative_task_id} end
+if not authoritative_run_id or authoritative_run_id == '' then return {'identity_run_id_missing', ''} end
+if authoritative_run_id ~= run_id then return {'identity_run_id_mismatch', authoritative_run_id} end
+
+-- Existing task guard statuses remain unchanged once exact identity is known.
+if current == 'running' then return {'already_running', current} end
+if current == 'scheduled' then return {'already_scheduled', current} end
+if current == 'done' or current == 'failed' or current == 'blocked_by_failure'
+        or current == 'dead_lettered' or current == 'skipped' then
+    return {'illegal_transition', current}
+end
+if current ~= 'ready' then return {'state_conflict', current} end
+
+-- RUN truth is authoritative after exact task/run identity validation. This
+-- guard and its durable observation happen before every lifecycle mutation.
 local run_kind = redis_type(run_state_key)
 if run_kind == 'none' then
     return emit_truth_conflict('run_truth_missing', 'run_state_missing', nil)
@@ -163,26 +191,6 @@ end
 if not nonterminal[run_state] then
     return emit_truth_conflict('run_truth_corruption_conflict', 'run_state_unknown', run_state)
 end
-
--- Existing task guard semantics are preserved after RUN truth is accepted.
-local current = redis.call('GET', task_state_key)
-if not current then return {'missing_state', ''} end
-if current == 'running' then return {'already_running', current} end
-if current == 'scheduled' then return {'already_scheduled', current} end
-if current == 'done' or current == 'failed' or current == 'blocked_by_failure'
-        or current == 'dead_lettered' or current == 'skipped' then
-    return {'illegal_transition', current}
-end
-if current ~= 'ready' then return {'state_conflict', current} end
-
-if redis.call('EXISTS', task_meta_key) == 0 then return {'missing_task_meta', ''} end
-local authoritative_identity = redis.call('HMGET', task_meta_key, 'task_id', 'run_id')
-local authoritative_task_id = authoritative_identity[1]
-local authoritative_run_id  = authoritative_identity[2]
-if not authoritative_task_id or authoritative_task_id == '' then return {'identity_task_id_missing', ''} end
-if authoritative_task_id ~= task_id then return {'identity_task_id_mismatch', authoritative_task_id} end
-if not authoritative_run_id or authoritative_run_id == '' then return {'identity_run_id_missing', ''} end
-if authoritative_run_id ~= run_id then return {'identity_run_id_mismatch', authoritative_run_id} end
 
 redis.call('ZREM', tenant_ready_queue, task_id)
 redis.call('SET', task_state_key, 'scheduled', 'EX', task_state_ttl)

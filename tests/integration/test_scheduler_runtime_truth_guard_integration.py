@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 
 import pytest
 
@@ -68,6 +70,43 @@ async def _lifecycle_snapshot(redis_client, dispatch: Dispatch) -> dict:
         "control_len": await redis_client.xlen(RedisKey.stream_control()),
         "shard_len": await redis_client.xlen(RedisKey.stream_shard(dispatch.shard)),
     }
+
+
+def _length_prefix(value: str) -> str:
+    return f"{len(value)}:{value}"
+
+
+def _conflict_id(
+    operation: str,
+    run_id: str,
+    task_id: str,
+    status: str,
+    detail_code: str,
+    observed_run_state: str,
+) -> str:
+    material = "".join(
+        _length_prefix(value)
+        for value in (
+            operation,
+            run_id,
+            task_id,
+            status,
+            detail_code,
+            observed_run_state,
+        )
+    )
+    return hashlib.sha1(material.encode("utf-8")).hexdigest()
+
+
+async def _single_truth_observation(redis_client) -> tuple[str, dict, dict]:
+    index = await redis_client.hgetall(RedisKey.runtime_truth_conflict_index())
+    conflict_ids = [key for key in index if key != "__runtime_truth_conflict_count"]
+    assert len(conflict_ids) == 1
+    conflict_id = conflict_ids[0]
+    payload = json.loads(index[conflict_id])
+    rows = await redis_client.xrange(RedisKey.runtime_truth_conflict_stream())
+    assert len(rows) == 1
+    return conflict_id, payload, rows[0][1]
 
 
 async def _assert_one_truth_observation(redis_client) -> None:
@@ -166,7 +205,65 @@ async def test_duplicate_same_truth_conflict_is_deduplicated_first_payload_wins(
 
     assert first.status == second.status == "run_truth_missing"
     assert first_index == second_index
+    conflict_id, payload, stream = await _single_truth_observation(redis_client)
+    assert payload["operation"] == "TASK_DISPATCH"
+    assert stream["operation"] == "TASK_DISPATCH"
+    assert conflict_id == _conflict_id(
+        "TASK_DISPATCH",
+        dispatch.run_id,
+        dispatch.task_id,
+        "run_truth_missing",
+        "run_state_missing",
+        "",
+    )
+    assert conflict_id != _conflict_id(
+        "TASK_CLAIM",
+        dispatch.run_id,
+        dispatch.task_id,
+        "run_truth_missing",
+        "run_state_missing",
+        "",
+    )
     await _assert_one_truth_observation(redis_client)
+
+
+@pytest.mark.parametrize("wrong_truth", ["terminal", "missing", "corrupt", "unknown"])
+async def test_wrong_explicit_run_id_is_rejected_before_wrong_run_truth_is_read_or_observed(
+    redis_client, wrong_truth
+):
+    authoritative_run_id = f"run-authoritative-{wrong_truth}"
+    dispatch = Dispatch(
+        task_id=f"task-identity-mismatch-{wrong_truth}",
+        run_id=f"run-explicit-wrong-{wrong_truth}",
+    )
+    await redis_client.set(DagRedisKey.task_state(dispatch.task_id), "ready")
+    await redis_client.hset(
+        DagRedisKey.task_meta(dispatch.task_id),
+        mapping={"task_id": dispatch.task_id, "run_id": authoritative_run_id},
+    )
+    await redis_client.zadd(
+        DagRedisKey.tenant_ready_queue(dispatch.tenant_id),
+        {dispatch.task_id: float(dispatch.admitted_at)},
+    )
+    wrong_run_key = RedisKey.run_state(dispatch.run_id)
+    if wrong_truth == "terminal":
+        await redis_client.set(wrong_run_key, "done")
+    elif wrong_truth == "corrupt":
+        await redis_client.hset(wrong_run_key, mapping={"state": "running"})
+    elif wrong_truth == "unknown":
+        await redis_client.set(wrong_run_key, "mystery")
+
+    dag = await _dag(redis_client)
+    before = await _lifecycle_snapshot(redis_client, dispatch)
+    result = await dag.task_dispatch_commit(dispatch)
+    after = await _lifecycle_snapshot(redis_client, dispatch)
+
+    assert result.committed is False
+    assert result.status == "identity_run_id_mismatch"
+    assert result.reason == authoritative_run_id
+    assert after == before
+    assert await redis_client.exists(RedisKey.runtime_truth_conflict_index()) == 0
+    assert await redis_client.exists(RedisKey.runtime_truth_conflict_stream()) == 0
 
 
 @pytest.mark.parametrize(
