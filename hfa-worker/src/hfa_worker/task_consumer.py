@@ -1,13 +1,7 @@
 """
 hfa_worker/task_consumer.py
-----------------------------
-IRONCLAD Sprint 2 — Task consumer with fence tuple propagation.
-
-Sprint 2 change: after a successful claim_start(), the fence tuple
-(claim_epoch, scheduler_epoch) is extracted from the TaskClaimResult and:
-  1. Injected into the HeartbeatLoop so heartbeats carry claim_epoch.
-  2. Available via ConsumedTaskResult so the execution plane can pass all
-     three fence values to task_complete().
+---------------------------
+Canonical task consumer with explicit RUN identity and fence propagation.
 """
 from __future__ import annotations
 
@@ -58,14 +52,6 @@ class TaskConsumer:
         claim: TaskClaimResult,
         executed: TaskExecutionResult,
     ) -> Any:
-        """
-        Complete the task through the authoritative Lua completion fence.
-
-        Sprint 63 scope:
-        - pass task_id, worker_instance_id, scheduler_epoch, and claim_epoch
-        - preserve default TaskConsumer behavior when completion_manager is None
-        - do not redesign WorkerConsumer legacy completion, ack, retry, or reclaim
-        """
         if self._completion_manager is None:
             return None
 
@@ -76,9 +62,7 @@ class TaskConsumer:
             sort_keys=True,
             separators=(",", ":"),
         )
-
         scheduler_epoch = claim.scheduler_epoch or ctx.scheduler_epoch
-
         return await self._completion_manager.task_complete(
             task_id=ctx.task_id,
             run_id=ctx.run_id,
@@ -109,25 +93,25 @@ class TaskConsumer:
 
         claim = await self._claim_manager.claim_start(
             task_id=ctx.task_id,
+            run_id=ctx.run_id,
             tenant_id=ctx.tenant_id,
             worker_instance_id=ctx.worker_instance_id,
             claimed_at_ms=claimed_at_ms,
-            # Pass scheduler_epoch from context if present (set during dispatch)
             scheduler_epoch=ctx.scheduler_epoch,
         )
         if not claim.ok:
             return ConsumedTaskResult(claimed=claim)
 
-        # Sprint 2: start heartbeat loop with the claim_epoch just issued.
         loop = None
         if self._heartbeat_manager is not None:
             loop = HeartbeatLoop(
                 heartbeat_manager=self._heartbeat_manager,
                 task_id=ctx.task_id,
+                run_id=ctx.run_id,
                 tenant_id=ctx.tenant_id,
                 worker_instance_id=ctx.worker_instance_id,
                 interval_ms=self._heartbeat_interval_ms,
-                claim_epoch=claim.claim_epoch,   # Sprint 2: fence token
+                claim_epoch=claim.claim_epoch,
             )
             await loop.start()
 
@@ -153,20 +137,14 @@ class TaskConsumer:
                 if ownership_task in done:
                     status = ownership_task.result()
                     execution_task.cancel()
-                    await asyncio.gather(
-                        execution_task,
-                        return_exceptions=True,
-                    )
+                    await asyncio.gather(execution_task, return_exceptions=True)
                     raise RuntimeError(
                         "Task ownership lost during execution: "
-                        f"task_id={ctx.task_id} status={status}"
+                        f"task_id={ctx.task_id} run_id={ctx.run_id} status={status}"
                     )
 
                 ownership_task.cancel()
-                await asyncio.gather(
-                    ownership_task,
-                    return_exceptions=True,
-                )
+                await asyncio.gather(ownership_task, return_exceptions=True)
                 executed = execution_task.result()
 
             completed = await self._complete_with_fence(ctx, claim, executed)
@@ -178,15 +156,9 @@ class TaskConsumer:
         finally:
             if ownership_task is not None and not ownership_task.done():
                 ownership_task.cancel()
-                await asyncio.gather(
-                    ownership_task,
-                    return_exceptions=True,
-                )
+                await asyncio.gather(ownership_task, return_exceptions=True)
             if execution_task is not None and not execution_task.done():
                 execution_task.cancel()
-                await asyncio.gather(
-                    execution_task,
-                    return_exceptions=True,
-                )
+                await asyncio.gather(execution_task, return_exceptions=True)
             if loop is not None:
                 await loop.stop()

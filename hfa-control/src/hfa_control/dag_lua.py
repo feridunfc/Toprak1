@@ -1,15 +1,7 @@
 """
 hfa_control/dag_lua.py
 ----------------------
-IRONCLAD Sprint 2 — Lua CAS gateway with epoch fencing.
-
-Sprint 2 changes:
-  - TaskClaimResult now carries claim_epoch, scheduler_epoch, worker_instance_id
-    parsed from the Lua 5-tuple return.
-  - task_complete() now accepts and passes expected_scheduler_epoch and
-    expected_claim_epoch so task_complete.lua can enforce the full fence.
-  - task_claim_start() parses the extended return from task_claim_start.lua.
-  - scheduled_at uses milliseconds (from blocker-fix patch).
+Lua CAS gateway with epoch fencing and Sprint 82 runtime-truth guards.
 """
 from __future__ import annotations
 
@@ -20,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from hfa.config.keys import RedisTTL
+from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.schema import DagRedisKey
 from hfa.dag.states import DagTaskState
 from hfa.lua.loader import LuaScriptLoader
@@ -39,9 +31,34 @@ def _legacy_direct_claim_arg(allow_legacy_direct_claim: bool | None) -> str:
     return "1" if allow_legacy_direct_claim else "0"
 
 
+def _decode_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
-# ── Lua path resolution ───────────────────────────────────────────────────────
+async def _maybe_await(value):
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
+async def _resolve_run_id_compat(redis, *, task_id: str, run_id: str | None) -> str:
+    """Compatibility-only pre-read; Lua remains the identity authority."""
+    explicit = str(run_id or "").strip()
+    if explicit:
+        return explicit
+    hget = getattr(redis, "hget", None)
+    if not callable(hget):
+        return ""
+    try:
+        raw = await _maybe_await(hget(DagRedisKey.task_meta(task_id), "run_id"))
+    except Exception:
+        return ""
+    return _decode_text(raw).strip()
+
 
 def _lua_path(filename: str) -> Path:
     here = Path(__file__).resolve()
@@ -49,18 +66,16 @@ def _lua_path(filename: str) -> Path:
         here.parent.parent.parent.parent / "hfa-core" / "src" / "hfa" / "lua" / filename,
         here.parent.parent.parent / "hfa" / "lua" / filename,
     ]
-    for p in candidates:
-        if p.exists():
-            return p
+    for path in candidates:
+        if path.exists():
+            return path
     for parent in here.parents:
         for subdir in ("hfa-core/src/hfa/lua", "hfa/lua"):
-            p = parent / subdir / filename
-            if p.exists():
-                return p
+            path = parent / subdir / filename
+            if path.exists():
+                return path
     raise FileNotFoundError(f"Lua script not found: {filename}")
 
-
-# ── Result dataclasses ────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class TaskAdmitResult:
@@ -86,6 +101,17 @@ TASK_CLAIM_STATUS_RESERVATION_MISSING = "reservation_missing"
 TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH = "reservation_worker_mismatch"
 TASK_CLAIM_STATUS_RESERVATION_TASK_MISMATCH = "reservation_task_mismatch"
 TASK_CLAIM_STATUS_RESERVATION_EPOCH_MISMATCH = "reservation_epoch_mismatch"
+TASK_CLAIM_STATUS_MISSING_TASK_META = "missing_task_meta"
+TASK_CLAIM_STATUS_IDENTITY_TASK_ID_MISSING = "identity_task_id_missing"
+TASK_CLAIM_STATUS_IDENTITY_TASK_ID_MISMATCH = "identity_task_id_mismatch"
+TASK_CLAIM_STATUS_IDENTITY_RUN_ID_MISSING = "identity_run_id_missing"
+TASK_CLAIM_STATUS_IDENTITY_RUN_ID_MISMATCH = "identity_run_id_mismatch"
+TASK_CLAIM_STATUS_RUN_TRUTH_MISSING = "run_truth_missing"
+TASK_CLAIM_STATUS_RUN_TRUTH_TERMINAL_CONFLICT = "run_truth_terminal_conflict"
+TASK_CLAIM_STATUS_RUN_TRUTH_CORRUPTION_CONFLICT = "run_truth_corruption_conflict"
+TASK_CLAIM_STATUS_TRUTH_CONFLICT_EVIDENCE_STORE_UNAVAILABLE = (
+    "truth_conflict_evidence_store_unavailable"
+)
 
 TASK_CLAIM_SUCCESS_STATUSES: frozenset[str] = frozenset({
     TASK_CLAIM_STATUS_TASK_CLAIMED,
@@ -99,6 +125,15 @@ TASK_CLAIM_FAILURE_STATUSES: frozenset[str] = frozenset({
     TASK_CLAIM_STATUS_RESERVATION_WORKER_MISMATCH,
     TASK_CLAIM_STATUS_RESERVATION_TASK_MISMATCH,
     TASK_CLAIM_STATUS_RESERVATION_EPOCH_MISMATCH,
+    TASK_CLAIM_STATUS_MISSING_TASK_META,
+    TASK_CLAIM_STATUS_IDENTITY_TASK_ID_MISSING,
+    TASK_CLAIM_STATUS_IDENTITY_TASK_ID_MISMATCH,
+    TASK_CLAIM_STATUS_IDENTITY_RUN_ID_MISSING,
+    TASK_CLAIM_STATUS_IDENTITY_RUN_ID_MISMATCH,
+    TASK_CLAIM_STATUS_RUN_TRUTH_MISSING,
+    TASK_CLAIM_STATUS_RUN_TRUTH_TERMINAL_CONFLICT,
+    TASK_CLAIM_STATUS_RUN_TRUTH_CORRUPTION_CONFLICT,
+    TASK_CLAIM_STATUS_TRUTH_CONFLICT_EVIDENCE_STORE_UNAVAILABLE,
 })
 
 TASK_CLAIM_STATUSES: frozenset[str] = (
@@ -112,30 +147,24 @@ class TaskClaimResult:
     status: str
     task_id: str
     worker_id: str
-    # Sprint 2: fence tuple returned from task_claim_start.lua
     claim_epoch: str = ""
     scheduler_epoch: str = ""
 
     @staticmethod
     def from_lua(raw: list, task_id: str, worker_id: str) -> "TaskClaimResult":
-        """
-        Parse the 5-element return from task_claim_start.lua:
-          [status, claim_epoch, scheduler_epoch, worker_instance_id, task_id]
-        """
-        def _d(v) -> str:
-            return v.decode() if isinstance(v, bytes) else (str(v) if v else "")
+        def _decode(value) -> str:
+            return value.decode() if isinstance(value, bytes) else (str(value) if value else "")
 
-        status       = _d(raw[0]) if raw else "unknown"
-        claim_epoch  = _d(raw[1]) if len(raw) > 1 else ""
-        sched_epoch  = _d(raw[2]) if len(raw) > 2 else ""
-        ok           = status in TASK_CLAIM_SUCCESS_STATUSES
+        status = _decode(raw[0]) if raw else "unknown"
+        claim_epoch = _decode(raw[1]) if len(raw) > 1 else ""
+        scheduler_epoch = _decode(raw[2]) if len(raw) > 2 else ""
         return TaskClaimResult(
-            ok=ok,
+            ok=status in TASK_CLAIM_SUCCESS_STATUSES,
             status=status,
             task_id=task_id,
             worker_id=worker_id,
             claim_epoch=claim_epoch,
-            scheduler_epoch=sched_epoch,
+            scheduler_epoch=scheduler_epoch,
         )
 
 
@@ -148,44 +177,38 @@ class TaskCompleteResult:
 
     @staticmethod
     def from_lua(raw: list) -> "TaskCompleteResult":
-        ok             = bool(int(raw[0]))
-        status         = raw[1].decode() if isinstance(raw[1], bytes) else str(raw[1])
-        unlocked       = int(raw[2])
+        completed = bool(int(raw[0]))
+        status = raw[1].decode() if isinstance(raw[1], bytes) else str(raw[1])
+        unlocked = int(raw[2])
         already_terminal = bool(int(raw[3]))
         return TaskCompleteResult(
-            completed=ok,
+            completed=completed,
             status=status,
             unlocked_count=unlocked,
             already_terminal=already_terminal,
         )
 
 
-# ── DagLua gateway ────────────────────────────────────────────────────────────
-
 class DagLua:
-    """
-    Lua CAS gateway for all DAG task state transitions.
-
-    Sprint 2: claim returns a full fence tuple; complete enforces it.
-    """
+    """Lua CAS gateway for DAG task state transitions."""
 
     def __init__(self, redis, *, canonical_task_admit_binding: bool = False) -> None:
         self._redis = redis
         self._canonical_task_admit_binding_enabled = bool(canonical_task_admit_binding)
         self._task_admit_authority_binding = None
-        self._admit_loader:    Optional[LuaScriptLoader] = None
+        self._admit_loader: Optional[LuaScriptLoader] = None
         self._dispatch_loader: Optional[LuaScriptLoader] = None
-        self._claim_loader:    Optional[LuaScriptLoader] = None
+        self._claim_loader: Optional[LuaScriptLoader] = None
         self._complete_loader: Optional[LuaScriptLoader] = None
-        self._requeue_loader:  Optional[LuaScriptLoader] = None
+        self._requeue_loader: Optional[LuaScriptLoader] = None
 
     async def initialise(self) -> None:
         scripts = {
-            "task_admit.lua":           "_admit_loader",
+            "task_admit.lua": "_admit_loader",
             "task_dispatch_commit.lua": "_dispatch_loader",
-            "task_claim_start.lua":     "_claim_loader",
-            "task_complete.lua":        "_complete_loader",
-            "task_requeue.lua":         "_requeue_loader",
+            "task_claim_start.lua": "_claim_loader",
+            "task_complete.lua": "_complete_loader",
+            "task_requeue.lua": "_requeue_loader",
         }
         for filename, attr in scripts.items():
             loader = LuaScriptLoader(self._redis, _lua_path(filename))
@@ -198,12 +221,11 @@ class DagLua:
         if self._admit_loader is None:
             await self.initialise()
 
-    # ── task_admit ────────────────────────────────────────────────────────────
-
     async def task_admit(self, seed) -> TaskAdmitResult:
         if self._canonical_task_admit_binding_enabled:
             if self._task_admit_authority_binding is None:
                 from hfa_control.task_admit_authority import TaskAdmitAuthorityBinding
+
                 self._task_admit_authority_binding = TaskAdmitAuthorityBinding(
                     self._redis, self._task_admit_canonical_projection
                 )
@@ -211,7 +233,6 @@ class DagLua:
         return await self._task_admit_legacy(seed)
 
     async def _task_admit_legacy(self, seed) -> TaskAdmitResult:
-        """Preserve the pre-Sprint-81.3 legacy argument coercion exactly."""
         admitted_at = float(getattr(seed, "admitted_at", 0.0) or 0.0)
         return await self._task_admit_project(
             seed,
@@ -221,7 +242,6 @@ class DagLua:
         )
 
     async def _task_admit_canonical_projection(self, seed) -> TaskAdmitResult:
-        """Project already-normalized canonical values without re-reading/coercing them."""
         return await self._task_admit_project(
             seed,
             priority_text=str(seed.priority),
@@ -230,7 +250,12 @@ class DagLua:
         )
 
     async def _task_admit_project(
-        self, seed, *, priority_text: str, admitted_at_text: str, dependency_count_text: str
+        self,
+        seed,
+        *,
+        priority_text: str,
+        admitted_at_text: str,
+        dependency_count_text: str,
     ) -> TaskAdmitResult:
         await self._ensure_initialised()
         assert self._admit_loader is not None
@@ -239,7 +264,6 @@ class DagLua:
         run_id = seed.run_id
         tenant_id = seed.tenant_id
         child_ids = list(getattr(seed, "child_task_ids", ()) or ())
-
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),
@@ -251,7 +275,9 @@ class DagLua:
             DagRedisKey.tenant_active_set(),
         ]
         args: list[str] = [
-            task_id, run_id, tenant_id,
+            task_id,
+            run_id,
+            tenant_id,
             getattr(seed, "agent_type", "") or "",
             priority_text,
             admitted_at_text,
@@ -265,44 +291,32 @@ class DagLua:
             getattr(seed, "region", "") or "",
             getattr(seed, "policy", "") or "",
         ] + child_ids
-
         raw = await self._admit_loader.run(num_keys=len(keys), keys=keys, args=args)
         status = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])
         ready = status == "seeded_root"
         admitted = status in ("seeded_root", "seeded_waiting", "already_exists")
         return TaskAdmitResult(admitted=admitted, ready=ready, task_id=task_id, status=status)
 
-    # ── task_dispatch_commit ──────────────────────────────────────────────────
-
     async def task_dispatch_commit(self, dispatch) -> TaskDispatchCommitResult:
         await self._ensure_initialised()
         assert self._dispatch_loader is not None
 
-        from hfa.config.keys import RedisKey
-
-        task_id   = dispatch.task_id
+        task_id = dispatch.task_id
         tenant_id = dispatch.tenant_id
-        run_id = str(
-            getattr(dispatch, "run_id", "") or ""
-        ).strip()
-        shard     = getattr(dispatch, "shard", 0)
-        # milliseconds — from blocker-fix patch
+        run_id = str(getattr(dispatch, "run_id", "") or "").strip()
+        shard = getattr(dispatch, "shard", 0)
         scheduled_at = getattr(dispatch, "scheduled_at", None) or int(time.time() * 1000)
-        scheduler_epoch = str(
-            getattr(dispatch, "scheduler_epoch", "") or ""
-        ).strip()
-
+        scheduler_epoch = str(getattr(dispatch, "scheduler_epoch", "") or "").strip()
         scheduled_zset = (
-            getattr(dispatch, "scheduled_zset", "") or
-            DagRedisKey.task_scheduled_zset(tenant_id)
+            getattr(dispatch, "scheduled_zset", "")
+            or DagRedisKey.task_scheduled_zset(tenant_id)
         )
         running_zset = (
-            getattr(dispatch, "running_zset", "") or
-            DagRedisKey.task_running_zset(tenant_id)
+            getattr(dispatch, "running_zset", "")
+            or DagRedisKey.task_running_zset(tenant_id)
         )
         control_stream = getattr(dispatch, "control_stream", "") or RedisKey.stream_control()
-        shard_stream   = getattr(dispatch, "shard_stream", "") or RedisKey.stream_shard(shard)
-
+        shard_stream = getattr(dispatch, "shard_stream", "") or RedisKey.stream_shard(shard)
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),
@@ -316,7 +330,9 @@ class DagLua:
             RedisKey.runtime_truth_conflict_stream(),
         ]
         args = [
-            task_id, run_id, tenant_id,
+            task_id,
+            run_id,
+            tenant_id,
             getattr(dispatch, "agent_type", "") or "",
             getattr(dispatch, "worker_group", "") or "",
             str(shard),
@@ -325,7 +341,8 @@ class DagLua:
             str(scheduled_at),
             str(int(getattr(RedisTTL, "RUN_STATE", 86400))),
             str(int(getattr(RedisTTL, "RUN_META", 86400))),
-            "10000", "10000",
+            "10000",
+            "10000",
             getattr(dispatch, "trace_parent", "") or "",
             getattr(dispatch, "trace_state", "") or "",
             getattr(dispatch, "policy", "") or "LEAST_LOADED",
@@ -333,14 +350,20 @@ class DagLua:
             getattr(dispatch, "payload_json", "") or "{}",
             scheduler_epoch,
         ]
-
         raw = await self._dispatch_loader.run(num_keys=len(keys), keys=keys, args=args)
-        status    = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])
+        status = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])
         committed = status == "committed"
-        reason    = raw[1].decode() if len(raw) > 1 and isinstance(raw[1], bytes) else (str(raw[1]) if len(raw) > 1 else "")
-        return TaskDispatchCommitResult(committed=committed, status=status, task_id=task_id, reason=reason)
-
-    # ── task_claim_start ──────────────────────────────────────────────────────
+        reason = (
+            raw[1].decode()
+            if len(raw) > 1 and isinstance(raw[1], bytes)
+            else (str(raw[1]) if len(raw) > 1 else "")
+        )
+        return TaskDispatchCommitResult(
+            committed=committed,
+            status=status,
+            task_id=task_id,
+            reason=reason,
+        )
 
     async def task_claim_start(
         self,
@@ -350,17 +373,15 @@ class DagLua:
         worker_instance_id: str,
         claimed_at_ms: int,
         scheduler_epoch: str = "",
+        run_id: str = "",
         allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
-        """
-        Atomically claim a scheduled task.
-
-        Sprint 2: parses claim_epoch and scheduler_epoch from the Lua return.
-        Returns TaskClaimResult with full fence tuple for downstream use.
-        """
         await self._ensure_initialised()
         assert self._claim_loader is not None
 
+        resolved_run_id = await _resolve_run_id_compat(
+            self._redis, task_id=task_id, run_id=run_id
+        )
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),
@@ -368,6 +389,9 @@ class DagLua:
             DagRedisKey.task_running_zset(tenant_id),
             DagRedisKey.worker_reservation(worker_instance_id),
             DagRedisKey.task_reservation_owner(task_id),
+            RedisKey.run_state(resolved_run_id),
+            RedisKey.runtime_truth_conflict_index(),
+            RedisKey.runtime_truth_conflict_stream(),
         ]
         args = [
             task_id,
@@ -378,12 +402,10 @@ class DagLua:
             str(float(claimed_at_ms)),
             scheduler_epoch,
             _legacy_direct_claim_arg(allow_legacy_direct_claim),
+            resolved_run_id,
         ]
-
         raw = await self._claim_loader.run(num_keys=len(keys), keys=keys, args=args)
         return TaskClaimResult.from_lua(raw, task_id=task_id, worker_id=worker_instance_id)
-
-    # ── task_complete ─────────────────────────────────────────────────────────
 
     async def task_complete(
         self,
@@ -396,23 +418,18 @@ class DagLua:
         reason_code: str = "completed",
         worker_instance_id: str = "",
         output_data: str | None = None,
-        # Sprint 2: full fence tuple — must be supplied by worker
         expected_scheduler_epoch: str = "",
         expected_claim_epoch: str = "",
     ) -> TaskCompleteResult:
-        """
-        Atomically complete a task.
-
-        Sprint 2: passes expected_scheduler_epoch and expected_claim_epoch to
-        task_complete.lua.  A stale worker with an older claim_epoch is rejected.
-        """
         await self._ensure_initialised()
         assert self._complete_loader is not None
 
-        child_state_pfx   = DagRedisKey.task_state_prefix()
-        child_rem_pfx     = DagRedisKey.task_remaining_deps_prefix()
+        resolved_run_id = await _resolve_run_id_compat(
+            self._redis, task_id=task_id, run_id=run_id
+        )
+        child_state_pfx = DagRedisKey.task_state_prefix()
+        child_rem_pfx = DagRedisKey.task_remaining_deps_prefix()
         child_emitted_pfx = DagRedisKey.task_ready_emitted_prefix()
-
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),
@@ -420,10 +437,13 @@ class DagLua:
             DagRedisKey.task_output(task_id),
             DagRedisKey.tenant_ready_queue(tenant_id),
             DagRedisKey.task_running_zset(tenant_id),
+            RedisKey.run_state(resolved_run_id),
+            RedisKey.runtime_truth_conflict_index(),
+            RedisKey.runtime_truth_conflict_stream(),
         ]
         args = [
             task_id,
-            run_id or "",
+            resolved_run_id,
             tenant_id,
             terminal_state,
             str(finished_at_ms),
@@ -434,18 +454,17 @@ class DagLua:
             reason_code,
             worker_instance_id or "",
             output_data or "",
-            child_state_pfx,   ":state",
-            child_rem_pfx,     ":remaining_deps",
-            child_emitted_pfx, ":ready_emitted",
-            # Sprint 2: fence args (ARGV[19], ARGV[20])
+            child_state_pfx,
+            ":state",
+            child_rem_pfx,
+            ":remaining_deps",
+            child_emitted_pfx,
+            ":ready_emitted",
             expected_scheduler_epoch,
             expected_claim_epoch,
         ]
-
         raw = await self._complete_loader.run(num_keys=len(keys), keys=keys, args=args)
         return TaskCompleteResult.from_lua(raw)
-
-    # ── backward-compat alias ─────────────────────────────────────────────────
 
     async def claim_task(
         self,
@@ -455,6 +474,7 @@ class DagLua:
         claimed_at_ms: int,
         tenant_id: str = "",
         scheduler_epoch: str = "",
+        run_id: str = "",
         allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
         return await self.task_claim_start(
@@ -463,5 +483,6 @@ class DagLua:
             worker_instance_id=worker_instance_id,
             claimed_at_ms=claimed_at_ms,
             scheduler_epoch=scheduler_epoch,
+            run_id=run_id,
             allow_legacy_direct_claim=allow_legacy_direct_claim,
         )
