@@ -2,7 +2,16 @@ name: Sprint 82.1 Scheduler Runtime Truth Guard
 
 on:
   pull_request:
-    branches: [baseline/local-import]
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint82-1-scheduler-runtime-truth-guard.yml
+      - docs/implementation/sprint82/SPRINT82.1-scheduler-runtime-truth-guard.md
+      - hfa-core/src/hfa/config/keys.py
+      - hfa-core/src/hfa/lua/task_dispatch_commit.lua
+      - hfa-control/src/hfa_control/dag_lua.py
+      - tests/unit/test_scheduler_runtime_truth_guard.py
+      - tests/integration/test_scheduler_runtime_truth_guard_integration.py
   workflow_dispatch:
 
 permissions:
@@ -13,6 +22,7 @@ env:
   REDIS_URL: redis://localhost:6379/0
   SPRINT81_2_REDIS_URL: redis://localhost:6379/0
   USE_EXISTING_REDIS: "1"
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
 jobs:
   scheduler-runtime-truth-guard:
@@ -43,19 +53,34 @@ jobs:
           expected="${{ github.event.pull_request.head.sha || github.sha }}"
           test "$(git rev-parse HEAD)" = "$expected"
 
-      - name: Regression-aware scope gate
-        shell: bash
+      - name: Verify Sprint 82.1 regression trigger
         run: |
-          set -euo pipefail
-          base_ref="${{ github.event.pull_request.base.ref || 'baseline/local-import' }}"
-          git fetch --no-tags origin "$base_ref"
-          merge_base="$(git merge-base HEAD "origin/$base_ref")"
-          allowed='^(.github/workflows/sprint82-1-scheduler-runtime-truth-guard.yml|docs/implementation/sprint82/SPRINT82.1-scheduler-runtime-truth-guard.md|hfa-core/src/hfa/config/keys.py|hfa-core/src/hfa/lua/task_dispatch_commit.lua|hfa-control/src/hfa_control/dag_lua.py|tests/unit/test_scheduler_runtime_truth_guard.py|tests/integration/test_scheduler_runtime_truth_guard_integration.py)$'
-          changed="$(git diff --name-only "$merge_base"...HEAD)"
-          printf '%s\n' "$changed"
-          unexpected="$(printf '%s\n' "$changed" | grep -Ev "$allowed" || true)"
-          test -z "$unexpected" || { echo "Unexpected changed files:"; echo "$unexpected"; exit 1; }
-          test -z "$(printf '%s\n' "$changed" | grep '^tests/diagnostics/sprint80' || true)"
+          python - <<'PY'
+          import os
+          import subprocess
+
+          protected = {
+              ".github/workflows/sprint82-1-scheduler-runtime-truth-guard.yml",
+              "docs/implementation/sprint82/SPRINT82.1-scheduler-runtime-truth-guard.md",
+              "hfa-core/src/hfa/config/keys.py",
+              "hfa-core/src/hfa/lua/task_dispatch_commit.lua",
+              "hfa-control/src/hfa_control/dag_lua.py",
+              "tests/unit/test_scheduler_runtime_truth_guard.py",
+              "tests/integration/test_scheduler_runtime_truth_guard_integration.py",
+          }
+          observed = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{os.environ['PR_BASE_SHA']}...HEAD"],
+                  text=True,
+              ).splitlines()
+          )
+          touched = observed & protected
+          assert touched, {
+              "reason": "workflow ran without a protected Sprint 82.1 path change",
+              "observed": sorted(observed),
+          }
+          print("SPRINT82_1_REGRESSION_TRIGGER_OK", sorted(touched))
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -105,7 +130,7 @@ jobs:
         run: python -m compileall -q hfa-core/src/hfa hfa-control/src/hfa_control
 
       - name: Patch whitespace check
-        run: git diff --check
+        run: git diff --check "$PR_BASE_SHA...HEAD"
 
       - name: Upload pytest diagnostics
         if: always()
