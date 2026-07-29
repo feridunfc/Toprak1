@@ -1,72 +1,163 @@
 name: Sprint 81.3 TASK_ADMIT Runtime Binding
+
 on:
   pull_request:
-    branches: [baseline/local-import]
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint81-3-task-admit-runtime-binding.yml
+      - docs/implementation/sprint81/SPRINT81.3-task-admit-runtime-binding.md
+      - hfa-core/src/hfa/authority/__init__.py
+      - hfa-core/src/hfa/authority/redis_persistence.py
+      - hfa-core/src/hfa/lua/authority_conflict_record.lua
+      - hfa-core/src/hfa/lua/authority_head_validate.lua
+      - hfa-core/tests/authority/test_redis_canonical_authority.py
+      - hfa-control/src/hfa_control/task_admit_authority.py
+      - hfa-control/src/hfa_control/dag_lua.py
+      - hfa-control/src/hfa_control/scheduler.py
+      - tests/integration/test_task_admit_authority_binding_integration.py
+      - tests/unit/test_task_admit_authority_binding.py
+
 permissions:
   contents: read
+
+env:
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+
     services:
       redis:
         image: redis:7
-        ports: [6389:6379]
+        ports:
+          - 6389:6379
         options: >-
-          --health-cmd "redis-cli ping" --health-interval 5s
-          --health-timeout 5s --health-retries 20
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
+
       - name: Verify exact PR head
-        run: test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
-      - name: Verify allowed file scope
         run: |
-          git diff --name-only origin/baseline/local-import...HEAD | sort > /tmp/actual
-          printf '%s\n' \
-            .github/workflows/sprint81-3-task-admit-runtime-binding.yml \
-            docs/implementation/sprint81/SPRINT81.3-task-admit-runtime-binding.md \
-            hfa-core/src/hfa/authority/__init__.py \
-            hfa-core/src/hfa/authority/redis_persistence.py \
-            hfa-core/src/hfa/lua/authority_conflict_record.lua \
-            hfa-core/src/hfa/lua/authority_head_validate.lua \
-            hfa-core/tests/authority/test_redis_canonical_authority.py \
-            hfa-control/src/hfa_control/task_admit_authority.py \
-            hfa-control/src/hfa_control/dag_lua.py \
-            hfa-control/src/hfa_control/scheduler.py \
-            tests/integration/test_task_admit_authority_binding_integration.py \
-            tests/unit/test_task_admit_authority_binding.py | sort > /tmp/expected
-          diff -u /tmp/expected /tmp/actual
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+
+      - name: Verify Sprint 81.3 regression trigger
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+
+          protected = {
+              ".github/workflows/sprint81-3-task-admit-runtime-binding.yml",
+              "docs/implementation/sprint81/SPRINT81.3-task-admit-runtime-binding.md",
+              "hfa-core/src/hfa/authority/__init__.py",
+              "hfa-core/src/hfa/authority/redis_persistence.py",
+              "hfa-core/src/hfa/lua/authority_conflict_record.lua",
+              "hfa-core/src/hfa/lua/authority_head_validate.lua",
+              "hfa-core/tests/authority/test_redis_canonical_authority.py",
+              "hfa-control/src/hfa_control/task_admit_authority.py",
+              "hfa-control/src/hfa_control/dag_lua.py",
+              "hfa-control/src/hfa_control/scheduler.py",
+              "tests/integration/test_task_admit_authority_binding_integration.py",
+              "tests/unit/test_task_admit_authority_binding.py",
+          }
+
+          observed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          touched = observed & protected
+
+          assert touched, {
+              "reason": "workflow ran without a protected Sprint 81.3 path change",
+              "observed": sorted(observed),
+          }
+
+          print("SPRINT81_3_REGRESSION_TRIGGER_OK", sorted(touched))
+          PY
+
       - name: Install test dependencies
-        run: pip install -e hfa-core -e hfa-control pytest pytest-asyncio redis
+        run: |
+          python -m pip install -e hfa-core -e hfa-control
+          python -m pip install pytest pytest-asyncio redis
+
       - name: Run authority regressions
         env:
           SPRINT81_2_REDIS_URL: redis://localhost:6389/0
         run: |
           mkdir -p test-results
-          pytest hfa-core/tests/authority/test_canonical_transition.py -q --tb=short | tee test-results/s81_1.txt
-          grep -Eq "([7-9][7-9]|[89][0-9]|[1-9][0-9]{2,}) passed" test-results/s81_1.txt
-          pytest hfa-core/tests/authority/test_redis_canonical_authority.py -q --tb=short | tee test-results/s81_2.txt
-          grep -Eq "(5[6-9]|[6-9][0-9]|[1-9][0-9]{2,}) passed" test-results/s81_2.txt
-          ! grep -q "skipped" test-results/s81_2.txt
+          set -o pipefail
+
+          python -m pytest \
+            hfa-core/tests/authority/test_canonical_transition.py \
+            -q --tb=short | tee test-results/s81_1.txt
+
+          grep -Eq \
+            "([7-9][7-9]|[89][0-9]|[1-9][0-9]{2,}) passed" \
+            test-results/s81_1.txt
+
+          python -m pytest \
+            hfa-core/tests/authority/test_redis_canonical_authority.py \
+            -q --tb=short | tee test-results/s81_2.txt
+
+          grep -Eq \
+            "(5[6-9]|[6-9][0-9]|[1-9][0-9]{2,}) passed" \
+            test-results/s81_2.txt
+
+          ! grep -Eqi "skipped|deselected" test-results/s81_2.txt
+
       - name: Run TASK_ADMIT tests
         env:
           REDIS_URL: redis://127.0.0.1:6389/0
           USE_EXISTING_REDIS: "1"
         run: |
           mkdir -p test-results
-          pytest tests/integration/test_dag_task_admit_integration.py -q --tb=short | tee test-results/legacy-task-admit.txt
-          pytest tests/unit/test_task_admit_authority_binding.py -q --tb=short | tee test-results/s81_3-unit.txt
-          pytest tests/integration/test_task_admit_authority_binding_integration.py -q --tb=short | tee test-results/s81_3-integration.txt
-          ! grep -q "skipped" test-results/s81_3-integration.txt
+          set -o pipefail
+
+          python -m pytest \
+            tests/integration/test_dag_task_admit_integration.py \
+            -q --tb=short | tee test-results/legacy-task-admit.txt
+
+          python -m pytest \
+            tests/unit/test_task_admit_authority_binding.py \
+            -q --tb=short | tee test-results/s81_3-unit.txt
+
+          python -m pytest \
+            tests/integration/test_task_admit_authority_binding_integration.py \
+            -q --tb=short | tee test-results/s81_3-integration.txt
+
+          ! grep -Eqi "skipped|deselected" test-results/s81_3-integration.txt
+
       - name: Compile and whitespace
         run: |
-          python -m compileall -q hfa-core/src/hfa/authority hfa-control/src/hfa_control
-          git diff --check
+          python -m compileall -q \
+            hfa-core/src/hfa/authority \
+            hfa-control/src/hfa_control
+
+          git diff --check "$PR_BASE_SHA...HEAD"
+
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
