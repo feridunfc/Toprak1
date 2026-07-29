@@ -68,6 +68,30 @@ def test_run_recovery_commit_revalidates_dynamic_task_contract_before_mutation()
     assert cardinality < task_index < task_loop < count_check < first_state_write
 
 
+def test_run_recovery_state_projection_and_events_share_one_lua_commit() -> None:
+    lua = _source("hfa-core/src/hfa/lua/run_recovery_commit.lua")
+    python_source = inspect.getsource(RecoveryService._commit_recovery)
+    reschedule_source = inspect.getsource(RecoveryService._reschedule)
+
+    state_write = lua.index("redis.call('SET', run_state_key, 'rescheduled'")
+    projection_write = lua.index("redis.call('ZADD', running_zset", state_write)
+    rescheduled_event = lua.index("'event_type', 'RunRescheduled'", projection_write)
+    admitted_event = lua.index("'event_type', 'RunAdmitted'", rescheduled_event)
+    final_return = lua.index("return {'RUN_RESCHEDULED'", admitted_event)
+    assert state_write < projection_write < rescheduled_event < admitted_event < final_return
+    assert "self._config.control_stream" in python_source
+    assert "RedisTTL.STREAM_MAXLEN" in python_source
+    assert ".xadd(" not in reschedule_source
+
+
+def test_mock_run_recovery_fallback_is_mutation_free() -> None:
+    source = inspect.getsource(RecoveryService._commit_recovery_fallback)
+
+    assert "truth_conflict_evidence_store_unavailable" in source
+    for forbidden in (".set(", ".hset(", ".zadd(", ".zrem(", ".xadd(", ".delete("):
+        assert forbidden not in source
+
+
 def test_stale_discovery_is_read_only_and_does_not_choose_truth_winner() -> None:
     source = inspect.getsource(RecoveryService._find_stale_runs)
 
