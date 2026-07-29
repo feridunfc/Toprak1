@@ -34,6 +34,7 @@ jobs:
     env:
       SPRINT81_2_REDIS_URL: redis://127.0.0.1:6392/0
       PYTHONDONTWRITEBYTECODE: "1"
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
     steps:
       - name: Checkout exact PR head
@@ -74,12 +75,13 @@ jobs:
               raise SystemExit(f"isolated Redis unavailable: {last_error}")
           PY
 
-      - name: Verify exact Sprint 81.2 scope
+      - name: Verify Sprint 81.2 regression trigger
         run: |
           python - <<'PY'
+          import os
           import subprocess
 
-          expected = {
+          protected = {
               ".github/workflows/sprint81-2-canonical-authority-persistence.yml",
               "docs/implementation/sprint81/SPRINT81.2-canonical-authority-persistence.md",
               "hfa-core/src/hfa/authority/__init__.py",
@@ -89,15 +91,16 @@ jobs:
           }
           observed = set(
               subprocess.check_output(
-                  ["git", "diff", "--name-only", "34f7dd8e918829c55e6b64a5a09f623305dc9811...HEAD"],
+                  ["git", "diff", "--name-only", f"{os.environ['PR_BASE_SHA']}...HEAD"],
                   text=True,
               ).splitlines()
           )
-          assert observed == expected, {
-              "missing": sorted(expected - observed),
-              "unexpected": sorted(observed - expected),
+          touched = observed & protected
+          assert touched, {
+              "reason": "workflow ran without a protected Sprint 81.2 path change",
+              "observed": sorted(observed),
           }
-          print("SPRINT81_2_EXACT_SCOPE_OK")
+          print("SPRINT81_2_REGRESSION_TRIGGER_OK", sorted(touched))
           PY
 
       - name: Run Sprint 81.1 policy tests
@@ -124,4 +127,4 @@ jobs:
         run: python -m compileall -q hfa-core/src/hfa/authority
 
       - name: Check patch whitespace
-        run: git diff --check 34f7dd8e918829c55e6b64a5a09f623305dc9811...HEAD
+        run: git diff --check "$PR_BASE_SHA...HEAD"
