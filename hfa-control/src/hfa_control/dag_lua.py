@@ -311,6 +311,9 @@ class DagLua:
             shard_stream,
             DagRedisKey.tenant_ready_queue(tenant_id),
             running_zset,
+            RedisKey.run_state(run_id),
+            RedisKey.runtime_truth_conflict_index(),
+            RedisKey.runtime_truth_conflict_stream(),
         ]
         args = [
             task_id, run_id, tenant_id,

@@ -194,6 +194,16 @@ class RedisKey:
         return f"{cls.PREFIX}:cp:fence"
 
     @classmethod
+    def runtime_truth_conflict_index(cls) -> str:
+        """hfa:runtime-truth:v1:conflicts:index — durable global conflict HASH."""
+        return f"{cls.PREFIX}:runtime-truth:v1:conflicts:index"
+
+    @classmethod
+    def runtime_truth_conflict_stream(cls) -> str:
+        """hfa:runtime-truth:v1:conflicts:stream — append-only conflict STREAM."""
+        return f"{cls.PREFIX}:runtime-truth:v1:conflicts:stream"
+
+    @classmethod
     def cp_dlq_meta(cls, run_id: str) -> str:
         """hfa:cp:dlq:meta:{run_id}"""
         return f"{cls.PREFIX}:cp:dlq:meta:{run_id}"

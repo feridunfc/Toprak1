@@ -1,0 +1,122 @@
+name: Sprint 82.1 Scheduler Runtime Truth Guard
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  REDIS_URL: redis://localhost:6379/0
+  SPRINT81_2_REDIS_URL: redis://localhost:6379/0
+  USE_EXISTING_REDIS: "1"
+
+jobs:
+  scheduler-runtime-truth-guard:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact checked-out HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected"
+
+      - name: Regression-aware scope gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref="${{ github.event.pull_request.base.ref || 'baseline/local-import' }}"
+          git fetch --no-tags origin "$base_ref"
+          merge_base="$(git merge-base HEAD "origin/$base_ref")"
+          allowed='^(.github/workflows/sprint82-1-scheduler-runtime-truth-guard.yml|docs/implementation/sprint82/SPRINT82.1-scheduler-runtime-truth-guard.md|hfa-core/src/hfa/config/keys.py|hfa-core/src/hfa/lua/task_dispatch_commit.lua|hfa-control/src/hfa_control/dag_lua.py|tests/unit/test_scheduler_runtime_truth_guard.py|tests/integration/test_scheduler_runtime_truth_guard_integration.py)$'
+          changed="$(git diff --name-only "$merge_base"...HEAD)"
+          printf '%s\n' "$changed"
+          unexpected="$(printf '%s\n' "$changed" | grep -Ev "$allowed" || true)"
+          test -z "$unexpected" || { echo "Unexpected changed files:"; echo "$unexpected"; exit 1; }
+          test -z "$(printf '%s\n' "$changed" | grep '^tests/diagnostics/sprint80' || true)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control
+          python -m pip install pytest pytest-asyncio redis rfc8785
+
+      - name: Sprint 81.1 regression
+        run: |
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q --tb=short | tee sprint81_1.txt
+          grep -Eq '([7-9][7-9]|[89][0-9]|[1-9][0-9]{2,}) passed' sprint81_1.txt
+
+      - name: Sprint 81.2 real Redis regression
+        run: |
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_redis_canonical_authority.py -q --tb=short | tee sprint81_2.txt
+          ! grep -Eqi 'skipped|deselected' sprint81_2.txt
+          passed="$(grep -Eo '[0-9]+ passed' sprint81_2.txt | tail -1 | awk '{print $1}')"
+          test "${passed:-0}" -ge 56
+
+      - name: Sprint 81.3 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_task_admit_authority_binding.py -q --tb=short | tee sprint81_3_unit.txt
+          python -m pytest tests/integration/test_task_admit_authority_binding_integration.py -q --tb=short | tee sprint81_3_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint81_3_integration.txt
+
+      - name: Sprint 82.1 unit tests
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_scheduler_runtime_truth_guard.py -q --tb=short | tee sprint82_1_unit.txt
+
+      - name: Sprint 82.1 real Redis integration tests
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_scheduler_runtime_truth_guard_integration.py -q --tb=short | tee sprint82_1_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_1_integration.txt
+          grep -Eq '[1-9][0-9]* passed' sprint82_1_integration.txt
+
+      - name: Compile authority and control packages
+        run: python -m compileall -q hfa-core/src/hfa hfa-control/src/hfa_control
+
+      - name: Patch whitespace check
+        run: git diff --check
+
+      - name: Upload pytest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint82-1-pytest-diagnostics-${{ github.run_id }}
+          path: |
+            sprint81_1.txt
+            sprint81_2.txt
+            sprint81_3_unit.txt
+            sprint81_3_integration.txt
+            sprint82_1_unit.txt
+            sprint82_1_integration.txt
+          if-no-files-found: warn
