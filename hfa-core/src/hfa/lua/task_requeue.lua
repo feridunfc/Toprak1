@@ -1,7 +1,7 @@
 -- hfa-core/src/hfa/lua/task_requeue.lua
 -- Sprint 82.3 — Monotonic requeue with atomic TASK/RUN truth convergence.
 --
--- claim_epoch is a lifetime generation counter and is never reset.  Requeue
+-- claim_epoch is a lifetime generation counter and is never reset. Requeue
 -- clears worker/scheduler ownership only; the next claim increments the stored
 -- epoch so stale worker heartbeats and completions remain fenced.
 --
@@ -12,8 +12,9 @@
 -- 4  task_running_zset
 -- 5  completion_stream
 -- 6  run_state_key
--- 7  global_runtime_truth_conflict_index
--- 8  global_runtime_truth_conflict_stream
+-- 7  run_tasks_set
+-- 8  global_runtime_truth_conflict_index
+-- 9  global_runtime_truth_conflict_stream
 --
 -- ARGV
 -- 1  task_id
@@ -28,22 +29,16 @@
 --
 -- RETURN
 -- { status, value }
---   TASK_REQUEUED        value = requeue_count
---   TASK_RETRY_EXHAUSTED value = requeue_count
---   TASK_ALREADY_REQUEUED value = requeue_count
---   TASK_TERMINAL        value = current state
---   TASK_STATE_CONFLICT  value = current state/detail
---   run_truth_*          value = 0
---   task_truth_*         value = 0
 
-local task_state_key       = KEYS[1]
-local task_meta_key        = KEYS[2]
-local tenant_ready_queue   = KEYS[3]
-local task_running_zset    = KEYS[4]
-local completion_stream    = KEYS[5]
-local run_state_key        = KEYS[6]
-local truth_conflict_index = KEYS[7]
-local truth_conflict_stream = KEYS[8]
+local task_state_key        = KEYS[1]
+local task_meta_key         = KEYS[2]
+local tenant_ready_queue    = KEYS[3]
+local task_running_zset     = KEYS[4]
+local completion_stream     = KEYS[5]
+local run_state_key         = KEYS[6]
+local run_tasks_set         = KEYS[7]
+local truth_conflict_index  = KEYS[8]
+local truth_conflict_stream = KEYS[9]
 
 local task_id           = ARGV[1]
 local run_id            = ARGV[2] or ''
@@ -173,33 +168,41 @@ local function emit_truth_conflict(status, detail_code, observed_run_state, obse
     return failure(status)
 end
 
--- Identity is authoritative before any RUN key is read or conflict is recorded.
-local meta_kind = redis_type(task_meta_key)
-if meta_kind == 'none' then
-    return failure('TASK_STATE_CONFLICT', 'missing_task_meta')
-end
-if meta_kind ~= 'hash' then
-    return failure('TASK_STATE_CONFLICT', 'task_meta_type_mismatch')
-end
-
-local authoritative_identity = redis.call('HMGET', task_meta_key, 'task_id', 'run_id', 'tenant_id')
-local authoritative_task_id = authoritative_identity[1]
-local authoritative_run_id = authoritative_identity[2]
-local authoritative_tenant_id = authoritative_identity[3]
-if not authoritative_task_id or authoritative_task_id == '' then
-    return failure('identity_task_id_missing')
-end
-if authoritative_task_id ~= task_id then
-    return failure('identity_task_id_mismatch')
-end
-if not authoritative_run_id or authoritative_run_id == '' then
+if run_id == '' then
     return failure('identity_run_id_missing')
 end
-if authoritative_run_id ~= run_id then
-    return failure('identity_run_id_mismatch')
-end
-if authoritative_tenant_id and authoritative_tenant_id ~= '' and authoritative_tenant_id ~= tenant_id then
-    return failure('identity_tenant_id_mismatch')
+
+-- Resolve a trustworthy task/run binding before RUN truth or conflict evidence.
+local meta_kind = redis_type(task_meta_key)
+local binding_from_membership = false
+if meta_kind == 'none' then
+    local membership_kind = redis_type(run_tasks_set)
+    if membership_kind ~= 'set' or redis.call('SISMEMBER', run_tasks_set, task_id) ~= 1 then
+        return failure('identity_run_membership_missing')
+    end
+    binding_from_membership = true
+elseif meta_kind ~= 'hash' then
+    return failure('TASK_STATE_CONFLICT', 'task_meta_type_mismatch')
+else
+    local authoritative_identity = redis.call('HMGET', task_meta_key, 'task_id', 'run_id', 'tenant_id')
+    local authoritative_task_id = authoritative_identity[1]
+    local authoritative_run_id = authoritative_identity[2]
+    local authoritative_tenant_id = authoritative_identity[3]
+    if not authoritative_task_id or authoritative_task_id == '' then
+        return failure('identity_task_id_missing')
+    end
+    if authoritative_task_id ~= task_id then
+        return failure('identity_task_id_mismatch')
+    end
+    if not authoritative_run_id or authoritative_run_id == '' then
+        return failure('identity_run_id_missing')
+    end
+    if authoritative_run_id ~= run_id then
+        return failure('identity_run_id_mismatch')
+    end
+    if authoritative_tenant_id and authoritative_tenant_id ~= '' and authoritative_tenant_id ~= tenant_id then
+        return failure('identity_tenant_id_mismatch')
+    end
 end
 
 local run_kind = redis_type(run_state_key)
@@ -221,6 +224,9 @@ local current_state = redis.call('GET', task_state_key)
 if not current_state or current_state == '' then
     return emit_truth_conflict('task_truth_corruption_conflict', 'task_state_empty_or_unreadable', observed_run_state, current_state)
 end
+if binding_from_membership then
+    return emit_truth_conflict('task_truth_corruption_conflict', 'task_meta_missing', observed_run_state, current_state)
+end
 
 if task_terminal(current_state) then
     return {'TASK_TERMINAL', current_state}
@@ -235,7 +241,6 @@ if current_state ~= expected_state then
     return {'TASK_STATE_CONFLICT', current_state}
 end
 
--- A new requeue is authorized only by a known nonterminal RUN truth.
 if run_kind == 'none' then
     return emit_truth_conflict('run_truth_missing', 'run_state_missing', nil, current_state)
 end
