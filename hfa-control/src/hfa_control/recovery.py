@@ -357,7 +357,15 @@ class RecoveryService:
     # ------------------------------------------------------------------
 
     async def _handle_stale(self, run_id: str) -> str:
-        meta = _decode_mapping(await self._redis.hgetall(RedisKey.run_meta(run_id)))
+        """Classify a stale candidate without trusting a pre-read as authority."""
+
+        meta_key = RedisKey.run_meta(run_id)
+        try:
+            meta_kind = _decode(await self._redis.type(meta_key))
+            raw_meta = await self._redis.hgetall(meta_key) if meta_kind == "hash" else {}
+        except Exception:
+            raw_meta = {}
+        meta = _decode_mapping(raw_meta)
         tenant_id = meta.get("tenant_id", "")
         agent_type = meta.get("agent_type", "")
         previous_worker = meta.get("worker_group", "")
