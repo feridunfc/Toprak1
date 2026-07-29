@@ -320,3 +320,34 @@ async def test_wrong_type_running_projection_blocks_run_recovery_before_mutation
     assert _decode_mapping(await redis_client.hgetall(RedisKey.run_meta(run_id))) == before_meta
     assert _decode(await redis_client.get(running_key)) == "wrong-type"
     assert (await _truth_rows(redis_client))[0]["detail_code"] == "running_projection_type_mismatch"
+
+
+async def test_wrong_type_run_meta_reaches_atomic_recovery_classifier(
+    redis_client,
+) -> None:
+    run_id = "run-meta-wrong-type-handler"
+    task_id = "task-meta-wrong-type-handler"
+    tenant_id = "tenant-meta-wrong-type-handler"
+    await _seed(
+        redis_client,
+        run_id=run_id,
+        task_id=task_id,
+        tenant_id=tenant_id,
+        run_state="running",
+        task_state="running",
+    )
+    meta_key = RedisKey.run_meta(run_id)
+    await redis_client.delete(meta_key)
+    await redis_client.set(meta_key, "wrong-type")
+    recovery = RecoveryService(
+        redis_client,
+        ControlPlaneConfig(instance_id="cp-meta-wrong-type-handler"),
+    )
+
+    result = await recovery._handle_stale(run_id)
+
+    assert result == "conflict"
+    assert _decode(await redis_client.get(RedisKey.run_state(run_id))) == "running"
+    assert await redis_client.zscore(RedisKey.cp_running(), run_id) == 1.0
+    assert _decode(await redis_client.get(meta_key)) == "wrong-type"
+    assert (await _truth_rows(redis_client))[0]["detail_code"] == "run_meta_type_mismatch"
