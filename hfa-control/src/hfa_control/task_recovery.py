@@ -79,12 +79,12 @@ async def _maybe_await(value):
 
 
 async def _resolve_run_id_compat(redis, *, task_id: str, run_id: str) -> str:
-    """Resolve a compatibility run ID only to construct the Lua RUN key.
+    """Resolve a compatibility run ID only to construct Lua keys.
 
-    Production callers should pass explicit ``run_id``.  Legacy tests and tools
-    may omit it; in that case this pre-read is never treated as authority.  The
-    Lua script revalidates the exact task/run identity before reading RUN truth
-    or writing conflict evidence.
+    Production callers should pass explicit ``run_id``. Legacy tests and tools
+    may omit it; in that case this pre-read is never treated as authority. Lua
+    revalidates the exact task/run identity before reading RUN truth, recording
+    a conflict, or mutating lifecycle state.
     """
 
     explicit = str(run_id or "").strip()
@@ -337,10 +337,11 @@ class TaskRecoveryManager:
     ) -> TaskRequeueResult:
         """Atomically requeue one stale task only when both truth planes agree.
 
-        ``run_id`` is explicit on the production path.  Compatibility callers
-        may omit it; the manager then pre-reads task metadata solely to build the
-        RUN key.  ``task_requeue.lua`` revalidates task ID, run ID and tenant ID
-        before it reads RUN truth, records conflict evidence or mutates state.
+        ``run_id`` is explicit on the production path. Compatibility callers
+        may omit it; the manager then pre-reads task metadata solely to build
+        RUN and run-membership keys. ``task_requeue.lua`` revalidates task ID,
+        run ID and tenant ID before it reads RUN truth, records conflict
+        evidence, or mutates state.
         """
 
         if self._requeue_loader is None:
@@ -359,6 +360,7 @@ class TaskRecoveryManager:
             DagRedisKey.task_running_zset(tenant_id),
             DagRedisKey.completion_stream(tenant_id),
             RedisKey.run_state(resolved_run_id),
+            DagRedisKey.run_tasks(resolved_run_id),
             RedisKey.runtime_truth_conflict_index(),
             RedisKey.runtime_truth_conflict_stream(),
         ]
