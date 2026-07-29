@@ -1,12 +1,7 @@
 """
 hfa_control/task_recovery.py
------------------------------
-IRONCLAD Sprint 2 patch — Atomic Lua heartbeat + monotonic claim_epoch.
-
-Sprint 6 addition: proof-enforcement helpers classify replay/runtime evidence
-before recovery auto-resume.  Gaps, duplicates, dirty replay, or deterministic
-replay failure imply ambiguous authority and block automatic resume when
-IRON_V3_PROOF_ENFORCEMENT is enabled.
+----------------------------
+Atomic Lua heartbeat, monotonic claim_epoch, and recovery proof helpers.
 """
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 from unittest.mock import Mock
 
-from hfa.config.keys import RedisTTL
+from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.heartbeat import HeartbeatPolicy
 from hfa.dag.reasons import (
     TASK_HEARTBEAT_OWNER_MISMATCH,
@@ -38,31 +33,32 @@ def is_proof_enforcement_enabled() -> bool:
 
 def _lua_path(filename: str):
     from pathlib import Path
+
     here = Path(__file__).resolve()
     candidates = [
         here.parent.parent.parent.parent / "hfa-core" / "src" / "hfa" / "lua" / filename,
         here.parent.parent.parent / "hfa" / "lua" / filename,
     ]
-    for p in candidates:
-        if p.exists():
-            return p
+    for path in candidates:
+        if path.exists():
+            return path
     for parent in here.parents:
         for subdir in ("hfa-core/src/hfa/lua", "hfa/lua"):
-            p = parent / subdir / filename
-            if p.exists():
-                return p
+            path = parent / subdir / filename
+            if path.exists():
+                return path
     raise FileNotFoundError(f"Lua script not found: {filename}")
 
 
-def _decode(v) -> str:
-    if isinstance(v, bytes):
-        return v.decode("utf-8", errors="replace")
-    return str(v) if v is not None else ""
+def _decode(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value) if value is not None else ""
 
 
-def _safe_int(v, default: int = 0) -> int:
+def _safe_int(value, default: int = 0) -> int:
     try:
-        return int(_decode(v))
+        return int(_decode(value))
     except (ValueError, TypeError):
         return default
 
@@ -73,6 +69,26 @@ def _is_mock_lua_result(raw) -> bool:
     if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], Mock):
         return True
     return False
+
+
+async def _maybe_await(value):
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
+async def _resolve_run_id_compat(redis, *, task_id: str, run_id: str) -> str:
+    explicit = str(run_id or "").strip()
+    if explicit:
+        return explicit
+    hget = getattr(redis, "hget", None)
+    if not callable(hget):
+        return ""
+    try:
+        raw = await _maybe_await(hget(DagRedisKey.task_meta(task_id), "run_id"))
+    except Exception:
+        return ""
+    return _decode(raw).strip()
 
 
 @dataclass(frozen=True)
@@ -106,12 +122,6 @@ def recovery_proof_decision(
     duplicates_detected: bool = False,
     critical_drift: bool = False,
 ) -> RecoveryProofDecision:
-    """Return the Sprint 6 recovery proof verdict.
-
-    Detection-only recovery is not sufficient under the Sprint 6 flag.  Any gap,
-    duplicate, replay integrity failure, deterministic replay failure, or critical
-    drift is ambiguous and must block auto-resume.
-    """
     reasons: list[str] = []
     if gaps_detected:
         reasons.append("gaps_detected")
@@ -160,17 +170,33 @@ class TaskHeartbeatManager:
         self,
         *,
         task_id: str,
+        run_id: str,
         tenant_id: str,
         worker_id: str,
         claim_epoch: str,
         now_ms: int,
     ) -> list[str]:
-        """Unit/fakeredis-compatible heartbeat path mirroring task_heartbeat.lua."""
+        """Mock/fakeredis compatibility path; conflict cases fail closed."""
         state = _decode(await self._redis.get(DagRedisKey.task_state(task_id)))
         if state != "running":
             return ["illegal_transition"]
 
         meta_key = DagRedisKey.task_meta(task_id)
+        authoritative_task_id = _decode(await self._redis.hget(meta_key, "task_id"))
+        authoritative_run_id = _decode(await self._redis.hget(meta_key, "run_id"))
+        if not authoritative_task_id:
+            return ["identity_task_id_missing"]
+        if authoritative_task_id != task_id:
+            return ["identity_task_id_mismatch"]
+        if not authoritative_run_id:
+            return ["identity_run_id_missing"]
+        if authoritative_run_id != run_id:
+            return ["identity_run_id_mismatch"]
+
+        run_state = _decode(await self._redis.get(RedisKey.run_state(run_id)))
+        if run_state not in {"admitted", "queued", "scheduled", "running", "rescheduled"}:
+            return ["truth_conflict_evidence_store_unavailable"]
+
         stored_worker = _decode(
             await self._redis.hget(meta_key, TaskMetaField.WORKER_INSTANCE_ID)
         )
@@ -207,23 +233,38 @@ class TaskHeartbeatManager:
         tenant_id: str,
         worker_id: str,
         claim_epoch: str = "",
+        run_id: str = "",
         now_ms: int | None = None,
     ) -> TaskHeartbeatResult:
         await self._ensure_loaded()
         assert self._heartbeat_loader is not None
 
         now_ms = now_ms or int(time.time() * 1000)
+        resolved_run_id = await _resolve_run_id_compat(
+            self._redis, task_id=task_id, run_id=run_id
+        )
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),
             DagRedisKey.task_running_zset(tenant_id),
+            RedisKey.run_state(resolved_run_id),
+            RedisKey.runtime_truth_conflict_index(),
+            RedisKey.runtime_truth_conflict_stream(),
         ]
-        args = [task_id, tenant_id, worker_id, claim_epoch, str(now_ms)]
+        args = [
+            task_id,
+            resolved_run_id,
+            tenant_id,
+            worker_id,
+            claim_epoch,
+            str(now_ms),
+        ]
 
         raw = await self._heartbeat_loader.run(num_keys=len(keys), keys=keys, args=args)
         if _is_mock_lua_result(raw):
             raw = await self._record_heartbeat_fallback(
                 task_id=task_id,
+                run_id=resolved_run_id,
                 tenant_id=tenant_id,
                 worker_id=worker_id,
                 claim_epoch=claim_epoch,
@@ -250,7 +291,9 @@ class TaskRecoveryManager:
         self._requeue_loader = LuaScriptLoader(self._redis, path)
         await self._requeue_loader.load()
 
-    async def find_stale_tasks(self, *, tenant_id: str, now_ms: int | None = None) -> list[str]:
+    async def find_stale_tasks(
+        self, *, tenant_id: str, now_ms: int | None = None
+    ) -> list[str]:
         now_ms = now_ms or int(time.time() * 1000)
         running_key = DagRedisKey.task_running_zset(tenant_id)
         raw_ids = await self._redis.zrange(running_key, 0, -1)
@@ -296,8 +339,11 @@ class TaskRecoveryManager:
             DagRedisKey.completion_stream(tenant_id),
         ]
         args = [
-            task_id, tenant_id, expected_state,
-            str(now_ms), str(ready_score),
+            task_id,
+            tenant_id,
+            expected_state,
+            str(now_ms),
+            str(ready_score),
             str(self._policy.max_requeue_count),
             reason_code,
             str(int(getattr(RedisTTL, "STREAM_MAXLEN", 10000))),
@@ -306,7 +352,11 @@ class TaskRecoveryManager:
         status = _decode(raw[0]) if raw else "TASK_STATE_CONFLICT"
         count_raw = raw[1] if len(raw) > 1 else b"0"
         count = _safe_int(count_raw, default=0)
-        return TaskRequeueResult(ok=(status == TASK_REQUEUED), status=status, requeue_count=count)
+        return TaskRequeueResult(
+            ok=(status == TASK_REQUEUED),
+            status=status,
+            requeue_count=count,
+        )
 
     def proof_allows_auto_resume(
         self,
