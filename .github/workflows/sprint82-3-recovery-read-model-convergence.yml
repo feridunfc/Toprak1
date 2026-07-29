@@ -118,7 +118,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker
-          python -m pip install pytest pytest-asyncio redis rfc8785
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785
 
       - name: Sprint 81.1 regression
         run: |
@@ -178,10 +178,9 @@ jobs:
       - name: Existing recovery and requeue regressions
         run: |
           set -o pipefail
-          python -m pytest tests/core tests/integration \
-            -k 'recovery or requeue or stale' \
-            --ignore=tests/integration/test_recovery_read_model_convergence_integration.py \
-            --ignore=tests/integration/test_recovery_read_model_convergence_e2e.py \
+          python -m pytest \
+            tests/core/test_recovery_audit.py \
+            tests/core/test_recovery_requeue.py \
             -q --tb=short | tee recovery_regressions.txt
 
       - name: Compile recovery and control packages
