@@ -1,0 +1,196 @@
+name: Sprint 82.4 Nine-Observation Closure
+
+on:
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint82-4-nine-observation-closure.yml
+      - docs/implementation/sprint82/SPRINT82.4-nine-observation-closure.md
+      - tests/integration/test_nine_observation_truth_closure.py
+      - hfa-control/src/hfa_control/service.py
+      - hfa-worker/src/hfa_worker/runtime/terminal_duplicate_delivery.py
+      - hfa-worker/src/hfa_worker/consumer.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  REDIS_URL: redis://127.0.0.1:6389/0
+  SPRINT81_2_REDIS_URL: redis://127.0.0.1:6379/0
+  USE_EXISTING_REDIS: "1"
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+jobs:
+  nine-observation-closure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact checked-out HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected"
+
+      - name: Verify bounded Sprint 82.4 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import subprocess
+
+          mandatory = {
+              ".github/workflows/sprint82-4-nine-observation-closure.yml",
+              "docs/implementation/sprint82/SPRINT82.4-nine-observation-closure.md",
+              "tests/integration/test_nine_observation_truth_closure.py",
+          }
+          optional_runtime = {
+              "hfa-control/src/hfa_control/service.py",
+              "hfa-worker/src/hfa_worker/runtime/terminal_duplicate_delivery.py",
+              "hfa-worker/src/hfa_worker/consumer.py",
+          }
+          allowed = mandatory | optional_runtime
+          base = os.environ["PR_BASE_SHA"]
+          changed = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{base}...HEAD"],
+                  text=True,
+              ).splitlines()
+          )
+          assert mandatory <= changed, {
+              "reason": "mandatory Sprint 82.4 files missing",
+              "missing": sorted(mandatory - changed),
+          }
+          assert changed <= allowed, {
+              "reason": "unexpected Sprint 82.4 scope",
+              "unexpected": sorted(changed - allowed),
+          }
+          print("SPRINT82_4_SCOPE_OK", sorted(changed))
+          PY
+
+      - name: Verify frozen Sprint 80 diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object tests/diagnostics/sprint80/test_80_06_truth_contradictions.py)" = \
+            "ba3e1b8e89c64d3aa78de7aa5144a31e031850de"
+          test -z "$(git diff --name-only "$PR_BASE_SHA...HEAD" -- tests/diagnostics/sprint80)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785
+
+      - name: Sprint 81.1 regression
+        run: |
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q --tb=short | tee sprint81_1.txt
+          grep -Eq '([7-9][7-9]|[89][0-9]|[1-9][0-9]{2,}) passed' sprint81_1.txt
+
+      - name: Sprint 81.2 real Redis regression
+        run: |
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_redis_canonical_authority.py -q --tb=short | tee sprint81_2.txt
+          ! grep -Eqi 'skipped|deselected' sprint81_2.txt
+          passed="$(grep -Eo '[0-9]+ passed' sprint81_2.txt | tail -1 | awk '{print $1}')"
+          test "${passed:-0}" -ge 56
+
+      - name: Sprint 81.3 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_task_admit_authority_binding.py -q --tb=short | tee sprint81_3_unit.txt
+          python -m pytest tests/integration/test_task_admit_authority_binding_integration.py -q --tb=short | tee sprint81_3_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint81_3_integration.txt
+
+      - name: Sprint 82.1 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_scheduler_runtime_truth_guard.py -q --tb=short | tee sprint82_1_unit.txt
+          python -m pytest tests/integration/test_scheduler_runtime_truth_guard_integration.py -q --tb=short | tee sprint82_1_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_1_integration.txt
+
+      - name: Sprint 82.2 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_worker_runtime_truth_guards.py -q --tb=short | tee sprint82_2_unit.txt
+          python -m pytest tests/integration/test_worker_runtime_truth_guards_integration.py -q --tb=short | tee sprint82_2_integration.txt
+          python -m pytest tests/integration/test_worker_runtime_truth_guard_e2e.py -q --tb=short | tee sprint82_2_e2e.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_2_integration.txt sprint82_2_e2e.txt
+
+      - name: Sprint 82.3 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_recovery_read_model_convergence.py -q --tb=short | tee sprint82_3_unit.txt
+          python -m pytest tests/integration/test_recovery_read_model_convergence_integration.py -q --tb=short | tee sprint82_3_integration.txt
+          python -m pytest tests/integration/test_recovery_read_model_convergence_e2e.py -q --tb=short | tee sprint82_3_e2e.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_3_integration.txt sprint82_3_e2e.txt
+
+      - name: Sprint 82.4 exact nine-observation closure
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_nine_observation_truth_closure.py -q --tb=short | tee sprint82_4_closure.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint82_4_closure.txt
+          grep -Eq '(^|[^0-9])9 passed' sprint82_4_closure.txt
+
+      - name: Compile lifecycle packages
+        run: |
+          python -m compileall -q \
+            hfa-core/src/hfa \
+            hfa-control/src/hfa_control \
+            hfa-worker/src/hfa_worker
+
+      - name: Patch whitespace check
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload closure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint82-4-nine-observation-${{ github.run_id }}
+          path: |
+            sprint81_1.txt
+            sprint81_2.txt
+            sprint81_3_unit.txt
+            sprint81_3_integration.txt
+            sprint82_1_unit.txt
+            sprint82_1_integration.txt
+            sprint82_2_unit.txt
+            sprint82_2_integration.txt
+            sprint82_2_e2e.txt
+            sprint82_3_unit.txt
+            sprint82_3_integration.txt
+            sprint82_3_e2e.txt
+            sprint82_4_closure.txt
+          if-no-files-found: warn
