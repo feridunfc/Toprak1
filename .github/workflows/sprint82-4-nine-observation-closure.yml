@@ -157,9 +157,122 @@ jobs:
       - name: Sprint 82.4 exact nine-observation closure
         run: |
           set -o pipefail
-          python -m pytest tests/integration/test_nine_observation_truth_closure.py -q --tb=short | tee sprint82_4_closure.txt
+          python -m pytest tests/integration/test_nine_observation_truth_closure.py \
+            -q --tb=short --junitxml=sprint82_4_closure.xml | tee sprint82_4_closure.txt
           ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint82_4_closure.txt
           grep -Eq '(^|[^0-9])9 passed' sprint82_4_closure.txt
+
+      - name: Generate deterministic closure evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          expected = {
+              "test_observation_01_api_run_done_task_running": {
+                  "observation": 1,
+                  "caller": "control_api_run_state",
+                  "scenario": "api_run_done_task_running",
+              },
+              "test_observation_02_api_run_running_task_done": {
+                  "observation": 2,
+                  "caller": "control_api_run_state",
+                  "scenario": "api_run_running_task_done",
+              },
+              "test_observation_03_run_recovery_missing_run_task_terminal": {
+                  "observation": 3,
+                  "caller": "run_recovery_missing_state",
+                  "scenario": "run_missing_task_terminal",
+              },
+              "test_observation_04_run_recovery_terminal_run_task_running": {
+                  "observation": 4,
+                  "caller": "run_recovery_terminal_guard",
+                  "scenario": "run_terminal_task_running_recovery",
+              },
+              "test_observation_05_task_recovery_missing_task_run_terminal": {
+                  "observation": 5,
+                  "caller": "task_recovery_missing_state",
+                  "scenario": "task_missing_run_terminal",
+              },
+              "test_observation_06_worker_nonterminal_task_terminal_run_blocks_claim": {
+                  "observation": 6,
+                  "caller": "worker_task_duplicate_guard_nonterminal",
+                  "scenario": "run_done_task_running_duplicate_guard",
+              },
+              "test_observation_07_worker_terminal_task_nonterminal_run_transport_cleanup": {
+                  "observation": 7,
+                  "caller": "worker_task_duplicate_guard_terminal",
+                  "scenario": "run_running_task_done_worker_guard",
+              },
+              "test_observation_08_legacy_worker_terminal_run_suppresses_execution": {
+                  "observation": 8,
+                  "caller": "legacy_worker_run_guard",
+                  "scenario": "run_done_task_running_legacy_worker_guard",
+              },
+              "test_observation_09_scheduler_terminal_run_ready_task_blocks_dispatch": {
+                  "observation": 9,
+                  "caller": "scheduler_dag_dispatch",
+                  "scenario": "run_terminal_task_ready_scheduler",
+              },
+          }
+
+          root = ET.parse("sprint82_4_closure.xml").getroot()
+          cases = list(root.iter("testcase"))
+          names = [case.attrib["name"] for case in cases]
+          assert len(cases) == 9, {"reason": "unexpected test count", "names": names}
+          assert set(names) == set(expected), {
+              "reason": "unexpected observation identities",
+              "missing": sorted(set(expected) - set(names)),
+              "unexpected": sorted(set(names) - set(expected)),
+          }
+          for case in cases:
+              assert case.find("failure") is None
+              assert case.find("error") is None
+              assert case.find("skipped") is None
+
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          frozen_blob = subprocess.check_output(
+              ["git", "hash-object", "tests/diagnostics/sprint80/test_80_06_truth_contradictions.py"],
+              text=True,
+          ).strip()
+          observations = []
+          for name, metadata in sorted(expected.items(), key=lambda item: item[1]["observation"]):
+              observations.append({
+                  **metadata,
+                  "test_name": name,
+                  "status": "PASS",
+              })
+
+          payload = {
+              "schema_version": 1,
+              "sprint": "82.4",
+              "closure_status": "PASS",
+              "global_truth_policy": "OPERATION_SCOPED_FAIL_CLOSED",
+              "base_sha": os.environ["PR_BASE_SHA"],
+              "head_sha": head,
+              "frozen_sprint80_diagnostic_blob": frozen_blob,
+              "observation_count": len(observations),
+              "caller_count": len({row["caller"] for row in observations}),
+              "observations": observations,
+              "production_runtime_files_changed": [],
+              "automatic_repair_authorized": False,
+              "production_cutover_authorized": False,
+              "production_ready_claim": False,
+          }
+          assert payload["observation_count"] == 9
+          assert payload["caller_count"] == 8
+          assert frozen_blob == "ba3e1b8e89c64d3aa78de7aa5144a31e031850de"
+          Path("sprint82_4_nine_observation_closure.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
 
       - name: Compile lifecycle packages
         run: |
@@ -193,4 +306,6 @@ jobs:
             sprint82_3_integration.txt
             sprint82_3_e2e.txt
             sprint82_4_closure.txt
+            sprint82_4_closure.xml
+            sprint82_4_nine_observation_closure.json
           if-no-files-found: warn
