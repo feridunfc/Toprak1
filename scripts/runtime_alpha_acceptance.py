@@ -395,7 +395,8 @@ async def _terminal_dispatch_conflict_scenario(
     no_lifecycle_mutation = before == after
     explained = any(
         row.get("operation") == "TASK_DISPATCH"
-        and row.get("status") == "run_truth_terminal_conflict"
+        and (row.get("status") or row.get("conflict_type"))
+        == "run_truth_terminal_conflict"
         and row.get("detail_code") == "run_state_terminal"
         for row in matching_conflicts
     )
