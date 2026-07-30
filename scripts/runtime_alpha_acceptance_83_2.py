@@ -183,12 +183,23 @@ async def _healthy_finalization_scenario(
     run_result = _decode_mapping(await redis_client.hgetall(RedisKey.run_result(run_id)))
     if run_result.get("payload"):
         run_result["payload"] = json.loads(run_result["payload"])
+    run_result_report = {
+        key: value
+        for key, value in run_result.items()
+        if key not in {"completed_at", "finalized_at_ms"}
+    }
 
     result_events: list[dict[str, str]] = []
     for _event_id, fields in await redis_client.xrange(RedisKey.stream_results()):
         decoded = _decode_mapping(fields)
         if decoded.get("run_id") == run_id:
-            result_events.append(decoded)
+            result_events.append(
+                {
+                    key: value
+                    for key, value in decoded.items()
+                    if key not in {"completed_at", "finalized_at_ms"}
+                }
+            )
 
     control = ControlPlaneService(
         redis_client,
@@ -263,7 +274,7 @@ async def _healthy_finalization_scenario(
         "run_truth_conflicts": run_view.get("truth_conflicts", []),
         "run_finalized": run_finalized,
         "run_result_visible": result_visible,
-        "run_result": run_result,
+        "run_result": run_result_report,
         "run_terminal_event_visible": event_visible,
         "run_terminal_events": result_events,
         "running_projection_cleared": running_projection_cleared,
