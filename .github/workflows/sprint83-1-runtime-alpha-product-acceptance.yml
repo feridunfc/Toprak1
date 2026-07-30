@@ -1,0 +1,244 @@
+name: Sprint 83.1 Runtime Alpha Product Acceptance
+
+on:
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint83-1-runtime-alpha-product-acceptance.yml
+      - docs/implementation/sprint83/SPRINT83.1-runtime-alpha-product-acceptance.md
+      - scripts/runtime_alpha_acceptance.py
+      - tests/integration/test_runtime_alpha_product_acceptance.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  REDIS_URL: redis://127.0.0.1:6389/15
+  SPRINT81_2_REDIS_URL: redis://127.0.0.1:6379/0
+  USE_EXISTING_REDIS: "1"
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+jobs:
+  runtime-alpha-product-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact checked-out HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected"
+
+      - name: Verify Sprint 83.1 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import subprocess
+
+          if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+              print("SPRINT83_1_MANUAL_DISPATCH_SCOPE_CHECK_NOT_APPLICABLE")
+              raise SystemExit(0)
+
+          workflow = ".github/workflows/sprint83-1-runtime-alpha-product-acceptance.yml"
+          protected = {
+              workflow,
+              "docs/implementation/sprint83/SPRINT83.1-runtime-alpha-product-acceptance.md",
+              "scripts/runtime_alpha_acceptance.py",
+              "tests/integration/test_runtime_alpha_product_acceptance.py",
+          }
+          base = os.environ["PR_BASE_SHA"]
+          changed = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{base}...HEAD"],
+                  text=True,
+              ).splitlines()
+          )
+          workflow_existed = subprocess.run(
+              ["git", "cat-file", "-e", f"{base}:{workflow}"],
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+          ).returncode == 0
+
+          if workflow_existed:
+              touched = changed & protected
+              assert touched, {
+                  "reason": "workflow ran without a protected Sprint 83.1 path change",
+                  "changed": sorted(changed),
+              }
+              print("SPRINT83_1_REGRESSION_TRIGGER_OK", sorted(touched))
+          else:
+              assert changed == protected, {
+                  "reason": "Sprint 83.1 bootstrap scope mismatch",
+                  "missing": sorted(protected - changed),
+                  "unexpected": sorted(changed - protected),
+              }
+              print("SPRINT83_1_BOOTSTRAP_EXACT_SCOPE_OK", sorted(changed))
+          PY
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Sprint 81 authority regressions
+        run: |
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q --tb=short | tee sprint81_1.txt
+          python -m pytest hfa-core/tests/authority/test_redis_canonical_authority.py -q --tb=short | tee sprint81_2.txt
+          ! grep -Eqi 'skipped|deselected' sprint81_2.txt
+
+      - name: Sprint 82.1 scheduler truth regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_scheduler_runtime_truth_guard.py -q --tb=short | tee sprint82_1_unit.txt
+          python -m pytest tests/integration/test_scheduler_runtime_truth_guard_integration.py -q --tb=short | tee sprint82_1_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_1_integration.txt
+
+      - name: Sprint 82.2 worker truth regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_worker_runtime_truth_guards.py -q --tb=short | tee sprint82_2_unit.txt
+          python -m pytest tests/integration/test_worker_runtime_truth_guards_integration.py -q --tb=short | tee sprint82_2_integration.txt
+          python -m pytest tests/integration/test_worker_runtime_truth_guard_e2e.py -q --tb=short | tee sprint82_2_e2e.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_2_integration.txt sprint82_2_e2e.txt
+
+      - name: Sprint 82.3 recovery truth regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_recovery_read_model_convergence.py -q --tb=short | tee sprint82_3_unit.txt
+          python -m pytest tests/integration/test_recovery_read_model_convergence_integration.py -q --tb=short | tee sprint82_3_integration.txt
+          python -m pytest tests/integration/test_recovery_read_model_convergence_e2e.py -q --tb=short | tee sprint82_3_e2e.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_3_integration.txt sprint82_3_e2e.txt
+
+      - name: Sprint 82.4 closure regression
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_nine_observation_truth_closure.py -q --tb=short | tee sprint82_4.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint82_4.txt
+          grep -Eq '(^|[^0-9])9 passed' sprint82_4.txt
+
+      - name: Existing product surface regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_thin_product_task_cli.py -q --tb=short | tee product_cli.txt
+          python -m pytest tests/integration/test_minimal_product_task_http_api.py -q --tb=short | tee product_http.txt
+          ! grep -Eqi 'skipped|deselected' product_cli.txt product_http.txt
+
+      - name: Sprint 83.1 real Redis acceptance tests
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_runtime_alpha_product_acceptance.py -q --tb=short | tee sprint83_1.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint83_1.txt
+          grep -Eq '(^|[^0-9])3 passed' sprint83_1.txt
+
+      - name: Generate runtime alpha acceptance artifact
+        run: |
+          python scripts/runtime_alpha_acceptance.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id ci-s83-1 \
+            --reset-test-db \
+            --out local_out/sprint83/runtime_alpha_acceptance.json \
+            --json | tee runtime_alpha_acceptance_stdout.json
+
+      - name: Verify runtime alpha acceptance artifact
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("local_out/sprint83/runtime_alpha_acceptance.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          assert data["schema_version"] == 1
+          assert data["sprint"] == "83.1"
+          assert data["status"] == "PASS_WITH_LIMITATIONS"
+          assert data["runtime_alpha_testable"] is True
+          assert data["product_alpha_ready"] is False
+          assert data["production_ready"] is False
+          assert data["global_truth_policy"] == "OPERATION_SCOPED_FAIL_CLOSED"
+          assert data["real_redis_used"] is True
+          assert data["canonical_task_admit_used"] is True
+          assert data["runtime_truth_guarded_dispatch_used"] is True
+          assert data["worker_consumer_used"] is True
+          assert data["task_consumer_used"] is True
+          assert data["task_output_readable"] is True
+          assert data["conflict_explanation_available"] is True
+          assert data["run_finalization_supported"] is False
+          assert data["cancel_command_supported"] is False
+          assert data["retry_command_supported"] is False
+          assert data["external_executor_enabled"] is False
+          assert data["automatic_repair_authorized"] is False
+          assert data["production_cutover_authorized"] is False
+          assert [row["name"] for row in data["scenarios"]] == [
+              "canonical_task_success",
+              "terminal_run_blocks_dispatch",
+          ]
+          assert all(row["status"] == "PASS" for row in data["scenarios"])
+          print(json.dumps(data, indent=2, sort_keys=True))
+          PY
+
+      - name: Compile acceptance and lifecycle packages
+        run: |
+          python -m py_compile scripts/runtime_alpha_acceptance.py
+          python -m compileall -q hfa-core/src/hfa hfa-control/src/hfa_control hfa-worker/src/hfa_worker
+
+      - name: Patch whitespace check
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload runtime alpha diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint83-1-runtime-alpha-${{ github.run_id }}
+          path: |
+            sprint81_1.txt
+            sprint81_2.txt
+            sprint82_1_unit.txt
+            sprint82_1_integration.txt
+            sprint82_2_unit.txt
+            sprint82_2_integration.txt
+            sprint82_2_e2e.txt
+            sprint82_3_unit.txt
+            sprint82_3_integration.txt
+            sprint82_3_e2e.txt
+            sprint82_4.txt
+            product_cli.txt
+            product_http.txt
+            sprint83_1.txt
+            runtime_alpha_acceptance_stdout.json
+            local_out/sprint83/runtime_alpha_acceptance.json
+          if-no-files-found: warn
