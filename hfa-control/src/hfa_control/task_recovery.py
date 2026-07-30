@@ -1,7 +1,8 @@
 """
 hfa_control/task_recovery.py
 ----------------------------
-Atomic Lua heartbeat, monotonic claim_epoch, and recovery proof helpers.
+Atomic Lua heartbeat, monotonic claim_epoch, runtime-truth guarded requeue,
+and recovery proof helpers.
 """
 from __future__ import annotations
 
@@ -78,6 +79,14 @@ async def _maybe_await(value):
 
 
 async def _resolve_run_id_compat(redis, *, task_id: str, run_id: str) -> str:
+    """Resolve a compatibility run ID only to construct Lua keys.
+
+    Production callers should pass explicit ``run_id``. Legacy tests and tools
+    may omit it; in that case this pre-read is never treated as authority. Lua
+    revalidates the exact task/run identity before reading RUN truth, recording
+    a conflict, or mutating lifecycle state.
+    """
+
     explicit = str(run_id or "").strip()
     if explicit:
         return explicit
@@ -320,26 +329,44 @@ class TaskRecoveryManager:
         *,
         task_id: str,
         tenant_id: str,
+        run_id: str = "",
         expected_state: str = "running",
         now_ms: int | None = None,
         ready_score: int | None = None,
         reason_code: str = "TASK_STALE_DETECTED",
     ) -> TaskRequeueResult:
+        """Atomically requeue one stale task only when both truth planes agree.
+
+        ``run_id`` is explicit on the production path. Compatibility callers
+        may omit it; the manager then pre-reads task metadata solely to build
+        RUN and run-membership keys. ``task_requeue.lua`` revalidates task ID,
+        run ID and tenant ID before it reads RUN truth, records conflict
+        evidence, or mutates state.
+        """
+
         if self._requeue_loader is None:
             await self.initialise()
         assert self._requeue_loader is not None
 
         now_ms = now_ms or int(time.time() * 1000)
         ready_score = ready_score if ready_score is not None else now_ms
+        resolved_run_id = await _resolve_run_id_compat(
+            self._redis, task_id=task_id, run_id=run_id
+        )
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),
             DagRedisKey.tenant_ready_queue(tenant_id),
             DagRedisKey.task_running_zset(tenant_id),
             DagRedisKey.completion_stream(tenant_id),
+            RedisKey.run_state(resolved_run_id),
+            DagRedisKey.run_tasks(resolved_run_id),
+            RedisKey.runtime_truth_conflict_index(),
+            RedisKey.runtime_truth_conflict_stream(),
         ]
         args = [
             task_id,
+            resolved_run_id,
             tenant_id,
             expected_state,
             str(now_ms),

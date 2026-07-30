@@ -1,55 +1,35 @@
 """
 hfa-control/src/hfa_control/recovery.py
-IRONCLAD Sprint 10 — Recovery Service
+---------------------------------------
+Leader-owned recovery service with Sprint 82.3 TASK/RUN truth convergence.
 
-Runs as a background task inside the Control Plane.
-Every recovery_sweep_interval seconds:
-  1. Sweep running ZSET for stale runs (score + stale_run_timeout < now)
-  2. For each stale run:
-       - reschedule_count < max  →  reschedule (bump count, re-emit RunAdmittedEvent)
-       - reschedule_count >= max →  dead-letter (RunDeadLetteredEvent + DLQ meta)
-  3. Scan for runs stuck in 'scheduled' state (not yet claimed by a worker)
-  4. Emit RunRescheduledEvent for audit trail
-
-Running ZSET
-------------
-  hfa:cp:running    ZSET   run_id → admitted_at timestamp
-  Scheduler adds entries on placement.
-  RecoveryService removes entries on done/failed/dead_lettered.
-  Stale entries are those where score + stale_run_timeout < now.
-
-DLQ replay
-----------
-  replay_dlq_run() re-emits a RunAdmittedEvent and resets reschedule_count.
-  Called by /control/v1/dlq/{run_id}/replay API endpoint.
-
-IRONCLAD rules
---------------
-* No print() — logging only.
-* No asyncio.get_event_loop() — get_running_loop().
-* close() always safe.
-* cost_cents: int — no float USD.
+Stale detection is read-only. A stale candidate may mutate RUN state, metadata,
+the running projection and scheduler-facing events only through
+``run_recovery_commit.lua`` after the RUN authority, run-task index and every
+task identity/state have been checked. Contradictions produce durable
+runtime-truth evidence and never trigger silent projection cleanup or automatic
+repair.
 """
-
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+from unittest.mock import Mock
 
-from hfa.events.schema import (
-    RunAdmittedEvent,
-    RunRescheduledEvent,
-    RunDeadLetteredEvent,
-)
-from hfa.events.codec import serialize_event
 from hfa.config.keys import RedisKey, RedisTTL
-from hfa_control.models import ControlPlaneConfig
-from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
-from hfa_control.state_machine import transition_state, is_terminal
+from hfa.dag.schema import DagRedisKey
+from hfa.events.codec import serialize_event
+from hfa.events.schema import RunAdmittedEvent, RunDeadLetteredEvent
+from hfa.lua.loader import LuaScriptLoader
 from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
+from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
+from hfa_control.models import ControlPlaneConfig
+from hfa_control.state_machine import transition_state
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -66,11 +46,78 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
+RUN_RECOVERY_RESCHEDULED = "RUN_RESCHEDULED"
+RUN_RECOVERY_DEAD_LETTERED = "RUN_DEAD_LETTERED"
+_RUN_RECOVERY_CONFLICT_STATUSES = {
+    "run_truth_missing",
+    "run_truth_terminal_conflict",
+    "run_truth_corruption_conflict",
+    "task_truth_missing",
+    "task_truth_terminal_conflict",
+    "task_truth_corruption_conflict",
+    "truth_conflict_evidence_store_unavailable",
+}
+
+
+def _decode(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value) if value is not None else ""
+
+
+def _decode_mapping(raw: dict) -> dict[str, str]:
+    return {_decode(key): _decode(value) for key, value in (raw or {}).items()}
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(_decode(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_mock_lua_result(raw) -> bool:
+    if isinstance(raw, Mock):
+        return True
+    return bool(isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], Mock))
+
+
+def _lua_path(filename: str) -> Path:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent.parent.parent / "hfa-core" / "src" / "hfa" / "lua" / filename,
+        here.parent.parent.parent / "hfa" / "lua" / filename,
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    for parent in here.parents:
+        for subdir in ("hfa-core/src/hfa/lua", "hfa/lua"):
+            path = parent / subdir / filename
+            if path.exists():
+                return path
+    raise FileNotFoundError(f"Lua script not found: {filename}")
+
+
+@dataclass(frozen=True)
+class RunRecoveryCommitResult:
+    committed: bool
+    status: str
+    reschedule_count: int = 0
+    observed_run_state: str = ""
+    conflict_task_id: str = ""
+
+    @property
+    def conflict(self) -> bool:
+        return self.status in _RUN_RECOVERY_CONFLICT_STATUSES
+
+
 class RecoveryService:
     def __init__(self, redis, config: ControlPlaneConfig) -> None:
         self._redis = redis
         self._config = config
         self._task: Optional[asyncio.Task] = None
+        self._recovery_loader: Optional[LuaScriptLoader] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -91,7 +138,16 @@ class RecoveryService:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            self._task = None
         logger.info("RecoveryService closed")
+
+    async def _ensure_recovery_loaded(self) -> None:
+        if self._recovery_loader is None:
+            self._recovery_loader = LuaScriptLoader(
+                self._redis,
+                _lua_path("run_recovery_commit.lua"),
+            )
+            await self._recovery_loader.load()
 
     # ------------------------------------------------------------------
     # Sweep loop
@@ -111,6 +167,7 @@ class RecoveryService:
         stale_runs = await self._find_stale_runs()
         rescheduled = 0
         dlq_count = 0
+        conflict_count = 0
 
         if stale_runs and _M:
             _M.recovery_stale_detected_total.inc(len(stale_runs))
@@ -125,67 +182,194 @@ class RecoveryService:
                 dlq_count += 1
                 if _M:
                     _M.recovery_dlq_total.inc()
+            elif result == "conflict":
+                conflict_count += 1
 
         if stale_runs:
             logger.info(
-                "Recovery sweep: stale=%d rescheduled=%d dlq=%d",
+                "Recovery sweep: stale=%d rescheduled=%d dlq=%d conflicts=%d",
                 len(stale_runs),
                 rescheduled,
                 dlq_count,
+                conflict_count,
             )
 
     # ------------------------------------------------------------------
-    # Stale run detection
+    # Stale run detection — read-only
     # ------------------------------------------------------------------
 
     async def _find_stale_runs(self) -> list[str]:
+        """Return every stale running-projection member without mutation.
+
+        Missing, terminal and corrupt RUN truth must reach the atomic recovery
+        classifier. This method therefore never removes a ZSET member and never
+        selects a caller-local winner.
         """
-        Return run_ids from running ZSET whose score (admitted_at)
-        + stale_run_timeout is older than now.
-        Only consider runs still in 'running' or 'scheduled' state.
-        """
+
         cutoff = time.time() - self._config.stale_run_timeout
         try:
             stale_raw = await self._redis.zrangebyscore(
-                self._config.running_zset, 0, cutoff
+                self._config.running_zset,
+                0,
+                cutoff,
             )
         except Exception as exc:
             logger.error(
-                "RecoveryService._find_stale_runs zrangebyscore error: %s", exc
+                "RecoveryService._find_stale_runs zrangebyscore error: %s",
+                exc,
             )
             return []
+        return sorted({_decode(run_id) for run_id in stale_raw if _decode(run_id)})
 
-        result: list[str] = []
-        for run_id_b in stale_raw:
-            run_id = run_id_b.decode() if isinstance(run_id_b, bytes) else run_id_b
-            state = await self._redis.get(RedisKey.run_state(run_id))
-            if state:
-                s = state.decode() if isinstance(state, bytes) else state
-                if s in ("running", "scheduled"):
-                    result.append(run_id)
-                elif s in ("done", "failed", "dead_lettered"):
-                    # Clean up ZSET entry
-                    await self._redis.zrem(self._config.running_zset, run_id)
-        return result
+    # ------------------------------------------------------------------
+    # Atomic recovery commit
+    # ------------------------------------------------------------------
+
+    async def _load_task_ids_for_keys(self, run_id: str) -> list[str]:
+        """Pre-read task IDs only to construct dynamic Lua KEYS.
+
+        The Lua script revalidates type, cardinality, membership and task
+        identity. A missing/wrong-type index intentionally returns an empty
+        pre-read so the script can classify it atomically.
+        """
+
+        key = DagRedisKey.run_tasks(run_id)
+        try:
+            key_type = _decode(await self._redis.type(key))
+            if key_type != "set":
+                return []
+            raw_ids = await self._redis.smembers(key)
+        except Exception:
+            return []
+        return sorted({_decode(task_id) for task_id in raw_ids if _decode(task_id)})
+
+    async def _commit_recovery(
+        self,
+        *,
+        run_id: str,
+        expected_reschedule_count: int,
+        requested_action: str,
+        reason_code: str,
+        now_ms: int | None = None,
+        running_score: float | None = None,
+    ) -> RunRecoveryCommitResult:
+        await self._ensure_recovery_loaded()
+        assert self._recovery_loader is not None
+
+        now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+        running_score = float(running_score if running_score is not None else time.time())
+        task_ids = await self._load_task_ids_for_keys(run_id)
+
+        keys = [
+            RedisKey.run_state(run_id),
+            RedisKey.run_meta(run_id),
+            self._config.running_zset,
+            DagRedisKey.run_tasks(run_id),
+            RedisKey.runtime_truth_conflict_index(),
+            RedisKey.runtime_truth_conflict_stream(),
+            self._config.control_stream,
+        ]
+        for task_id in task_ids:
+            keys.extend(
+                [
+                    DagRedisKey.task_state(task_id),
+                    DagRedisKey.task_meta(task_id),
+                ]
+            )
+
+        args = [
+            run_id,
+            str(now_ms),
+            str(running_score),
+            str(self._config.max_reschedule_attempts),
+            str(expected_reschedule_count),
+            requested_action,
+            str(RedisTTL.RUN_STATE),
+            str(RedisTTL.RUN_META),
+            str(len(task_ids)),
+            reason_code,
+            str(RedisTTL.STREAM_MAXLEN),
+            *task_ids,
+        ]
+        raw = await self._recovery_loader.run(
+            num_keys=len(keys),
+            keys=keys,
+            args=args,
+        )
+        if _is_mock_lua_result(raw):
+            raw = await self._commit_recovery_fallback(
+                run_id=run_id,
+                task_ids=task_ids,
+                expected_reschedule_count=expected_reschedule_count,
+                requested_action=requested_action,
+                reason_code=reason_code,
+                now_ms=now_ms,
+                running_score=running_score,
+            )
+
+        status = _decode(raw[0]) if raw else "RUN_RECOVERY_EMPTY_RESULT"
+        count = _safe_int(raw[1] if len(raw) > 1 else 0)
+        observed = _decode(raw[2]) if len(raw) > 2 else ""
+        conflict_task_id = _decode(raw[3]) if len(raw) > 3 else ""
+        return RunRecoveryCommitResult(
+            committed=status in {RUN_RECOVERY_RESCHEDULED, RUN_RECOVERY_DEAD_LETTERED},
+            status=status,
+            reschedule_count=count,
+            observed_run_state=observed,
+            conflict_task_id=conflict_task_id,
+        )
+
+    async def _commit_recovery_fallback(
+        self,
+        *,
+        run_id: str,
+        task_ids: list[str],
+        expected_reschedule_count: int,
+        requested_action: str,
+        reason_code: str,
+        now_ms: int,
+        running_score: float,
+    ) -> list[str]:
+        """Mutation-free compatibility path.
+
+        Recovery requires one atomic Redis/Lua boundary that includes state,
+        projection and event append. A mock result cannot prove that boundary,
+        so compatibility execution always fails closed and never writes a
+        substitute lifecycle state.
+        """
+
+        del requested_action, reason_code, now_ms, running_score
+        try:
+            observed_run_state = _decode(
+                await self._redis.get(RedisKey.run_state(run_id))
+            )
+        except Exception:
+            observed_run_state = ""
+        return [
+            "truth_conflict_evidence_store_unavailable",
+            str(expected_reschedule_count),
+            observed_run_state,
+            task_ids[0] if task_ids else "",
+        ]
 
     # ------------------------------------------------------------------
     # Stale run handler
     # ------------------------------------------------------------------
 
     async def _handle_stale(self, run_id: str) -> str:
-        meta = await self._redis.hgetall(RedisKey.run_meta(run_id))
-        if not meta:
-            await self._redis.zrem(self._config.running_zset, run_id)
-            return "skipped"
+        """Classify a stale candidate without trusting a pre-read as authority."""
 
-        def _s(k: str) -> str:
-            v = meta.get(k.encode()) or meta.get(k)
-            return (v.decode() if isinstance(v, bytes) else v) or ""
-
-        tenant_id = _s("tenant_id")
-        agent_type = _s("agent_type")
-        prev_worker = _s("worker_group")
-        reschedule_count = int(_s("reschedule_count") or "0")
+        meta_key = RedisKey.run_meta(run_id)
+        try:
+            meta_kind = _decode(await self._redis.type(meta_key))
+            raw_meta = await self._redis.hgetall(meta_key) if meta_kind == "hash" else {}
+        except Exception:
+            raw_meta = {}
+        meta = _decode_mapping(raw_meta)
+        tenant_id = meta.get("tenant_id", "")
+        agent_type = meta.get("agent_type", "")
+        previous_worker = meta.get("worker_group", "")
+        reschedule_count = _safe_int(meta.get("reschedule_count"), 0)
 
         if reschedule_count >= self._config.max_reschedule_attempts:
             return await self._dead_letter(
@@ -194,12 +378,11 @@ class RecoveryService:
                 reschedule_count,
                 "max_reschedule_exceeded",
             )
-
         return await self._reschedule(
             run_id,
             tenant_id,
             agent_type,
-            prev_worker,
+            previous_worker,
             reschedule_count,
         )
 
@@ -208,76 +391,33 @@ class RecoveryService:
         run_id: str,
         tenant_id: str,
         agent_type: str,
-        prev_worker: str,
+        previous_worker: str,
         reschedule_count: int,
     ) -> str:
-        new_count = reschedule_count + 1
-
-        # Update metadata
-        await self._redis.hset(
-            RedisKey.run_meta(run_id), "reschedule_count", str(new_count)
+        del agent_type
+        result = await self._commit_recovery(
+            run_id=run_id,
+            expected_reschedule_count=reschedule_count,
+            requested_action="RESCHEDULE",
+            reason_code="stale_running",
         )
-        # CAS: only reschedule if run is still running or scheduled
-        # (prevents zombie resurrection of already-done/cancelled runs)
-        state_key = RedisKey.run_state(run_id)
-        raw_state = await self._redis.get(state_key)
-        current = raw_state.decode() if isinstance(raw_state, bytes) else raw_state
-        if current not in ("running", "scheduled"):
+        if not result.committed:
             logger.warning(
-                "Recovery._reschedule CAS miss: run=%s expected running/scheduled, got %r — skipping",
-                run_id, current,
-            )
-            return "skipped"
-        ok = await transition_state(
-            self._redis, run_id, "rescheduled",
-            state_key=state_key, state_ttl=RedisTTL.RUN_STATE,
-            expected_state=current,
-        )
-        if not ok:
-            logger.warning(
-                "Recovery._reschedule CAS conflict: run=%s — another actor changed state, skipping",
+                "Recovery reschedule blocked: run=%s status=%s state=%s task=%s",
                 run_id,
+                result.status,
+                result.observed_run_state,
+                result.conflict_task_id,
             )
-            return "skipped"
-
-        # Audit event
-        resched_evt = RunRescheduledEvent(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            previous_worker=prev_worker,
-            reschedule_count=new_count,
-            reason="stale_running",
-        )
-        await self._redis.xadd(
-            self._config.control_stream,
-            serialize_event(resched_evt),
-            maxlen=100_000,
-            approximate=True,
-        )
-
-        # Re-admit (Scheduler will re-place)
-        admitted_evt = RunAdmittedEvent(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            agent_type=agent_type,
-        )
-        await self._redis.xadd(
-            self._config.control_stream,
-            serialize_event(admitted_evt),
-            maxlen=100_000,
-            approximate=True,
-        )
-
-        # Reset ZSET score to now so we don't immediately re-detect as stale
-        await self._redis.zadd(self._config.running_zset, {run_id: time.time()})
+            return "conflict" if result.conflict else "skipped"
 
         logger.warning(
             "Rescheduled: run=%s tenant=%s attempt=%d/%d prev_worker=%s",
             run_id,
             tenant_id,
-            new_count,
+            result.reschedule_count,
             self._config.max_reschedule_attempts,
-            prev_worker,
+            previous_worker,
         )
         return "rescheduled"
 
@@ -288,43 +428,46 @@ class RecoveryService:
         reschedule_count: int,
         reason: str,
     ) -> str:
-        # CAS: only dead-letter if not already terminal
-        _dl_key = RedisKey.run_state(run_id)
-        _raw = await self._redis.get(_dl_key)
-        _cur = _raw.decode() if isinstance(_raw, bytes) else _raw
-        if _cur not in ("running", "scheduled", "rescheduled"):
+        result = await self._commit_recovery(
+            run_id=run_id,
+            expected_reschedule_count=reschedule_count,
+            requested_action="DEAD_LETTER",
+            reason_code=reason,
+        )
+        if not result.committed:
             logger.warning(
-                "Recovery._dead_letter CAS skip: run=%s state=%r not actionable",
-                run_id, _cur,
+                "Recovery dead-letter blocked: run=%s status=%s state=%s task=%s",
+                run_id,
+                result.status,
+                result.observed_run_state,
+                result.conflict_task_id,
             )
-        else:
-            _dlr = await transition_state(
-                self._redis, run_id, "dead_lettered",
-                state_key=_dl_key, state_ttl=RedisTTL.DLQ_META,
-                expected_state=_cur,
-            )
+            return "conflict" if result.conflict else "skipped"
+
+        dead_lettered_at = time.time()
         await self._redis.hset(
             RedisKey.cp_dlq_meta(run_id),
             mapping={
                 "run_id": run_id,
                 "tenant_id": tenant_id,
                 "reason": reason,
-                "reschedule_count": str(reschedule_count),
-                "dead_lettered_at": str(time.time()),
+                "reschedule_count": str(result.reschedule_count),
+                "dead_lettered_at": str(dead_lettered_at),
             },
         )
-        await self._redis.expire(RedisKey.cp_dlq_meta(run_id), RedisTTL.DLQ_META)
-        await self._redis.zrem(self._config.running_zset, run_id)
-
-        dlq_evt = RunDeadLetteredEvent(
+        await self._redis.expire(
+            RedisKey.cp_dlq_meta(run_id),
+            RedisTTL.DLQ_META,
+        )
+        dead_letter_event = RunDeadLetteredEvent(
             run_id=run_id,
             tenant_id=tenant_id,
             reason=reason,
-            reschedule_count=reschedule_count,
+            reschedule_count=result.reschedule_count,
         )
         await self._redis.xadd(
             self._config.dlq_stream,
-            serialize_event(dlq_evt),
+            serialize_event(dead_letter_event),
             maxlen=10_000,
             approximate=True,
         )
@@ -334,78 +477,60 @@ class RecoveryService:
             run_id,
             tenant_id,
             reason,
-            reschedule_count,
+            result.reschedule_count,
         )
         return "dlq"
 
     # ------------------------------------------------------------------
-    # DLQ replay (called by /control/v1/dlq/{run_id}/replay)
+    # Explicit operator DLQ replay — not automatic reconciliation
     # ------------------------------------------------------------------
 
     async def replay_dlq_run(self, run_id: str, requesting_tenant: str) -> None:
-        """
-        Re-enqueue a DLQ run to the Scheduler.
-        Raises DLQEntryNotFoundError if not found.
-        Raises TenantMismatchError if tenant does not match.
-        """
+        """Re-enqueue a DLQ run through the existing explicit operator path."""
+
         meta = await self._redis.hgetall(RedisKey.cp_dlq_meta(run_id))
         if not meta:
             raise DLQEntryNotFoundError(f"DLQ entry not found: {run_id!r}")
-
-        def _s(k: str) -> str:
-            v = meta.get(k.encode()) or meta.get(k)
-            return (v.decode() if isinstance(v, bytes) else v) or ""
-
-        dlq_tenant = _s("tenant_id")
+        decoded = _decode_mapping(meta)
+        dlq_tenant = decoded.get("tenant_id", "")
         if dlq_tenant != requesting_tenant:
             raise TenantMismatchError(
                 f"DLQ run {run_id!r} belongs to tenant {dlq_tenant!r}, "
                 f"not {requesting_tenant!r}"
             )
 
-        agent_type = _s("agent_type") or ""
+        agent_type = decoded.get("agent_type", "")
         raw_payload = await self._redis.get(RedisKey.run_payload(run_id))
         payload: dict = {}
         if raw_payload:
             try:
-                payload = json.loads(
-                    raw_payload.decode()
-                    if isinstance(raw_payload, bytes)
-                    else raw_payload
-                )
+                payload = json.loads(_decode(raw_payload))
             except json.JSONDecodeError:
                 pass
 
-        # Reset state via CAS (only valid from dead_lettered)
-
-
-            # MİMARİYE SADIK REPLAY: Terminal state'den geri dönülemez.
-            # Anahtar silinerek iş sıfırdan sisteme (admitted) alınır.
-                # MİMARİYE SADIK REPLAY:
-                # dead_lettered terminal bir durumdur ve CAS ile üzerinden geçilemez.
-                # Bu yüzden eski durumu tamamen silip, işi sıfırdan (expected_state=None) kabul ediyoruz.
-        _replay_key = RedisKey.run_state(run_id)
-        await self._redis.delete(_replay_key)
-
+        # Existing explicit replay behavior is preserved. It remains an
+        # operator command and is not invoked by the recovery sweep.
+        replay_key = RedisKey.run_state(run_id)
+        await self._redis.delete(replay_key)
         replay_ok = await transition_state(
-            self._redis, run_id, "admitted",
-            state_key=_replay_key, state_ttl=RedisTTL.RUN_STATE,
+            self._redis,
+            run_id,
+            "admitted",
+            state_key=replay_key,
+            state_ttl=RedisTTL.RUN_STATE,
             expected_state=None,
         )
-
         if not replay_ok:
-            logger.warning(
-                "DLQ replay CAS miss: run=%s not in dead_lettered state — skipping",
-                run_id,
+            raise DLQEntryNotFoundError(
+                f"DLQ run {run_id!r} could not be re-admitted"
             )
-            raise DLQEntryNotFoundError(f"DLQ run {run_id!r} could not be re-admitted")
 
-        await self._redis.hset(RedisKey.run_meta(run_id), "reschedule_count", "0")
-        # Note: do NOT add to running_zset here — run is admitted, not running.
-        # It will enter running_zset when the scheduler dispatches it.
-
-        # Re-emit to Scheduler
-        evt = RunAdmittedEvent(
+        await self._redis.hset(
+            RedisKey.run_meta(run_id),
+            "reschedule_count",
+            "0",
+        )
+        event = RunAdmittedEvent(
             run_id=run_id,
             tenant_id=dlq_tenant,
             agent_type=agent_type,
@@ -413,14 +538,11 @@ class RecoveryService:
         )
         await self._redis.xadd(
             self._config.control_stream,
-            serialize_event(evt),
+            serialize_event(event),
             maxlen=RedisTTL.STREAM_MAXLEN,
             approximate=True,
         )
-
-        # Remove from DLQ
         await self._redis.delete(RedisKey.cp_dlq_meta(run_id))
-
         logger.info("DLQ replay: run=%s tenant=%s", run_id, dlq_tenant)
 
     async def dlq_depth(self) -> int:
@@ -430,43 +552,38 @@ class RecoveryService:
             return 0
 
     async def list_dlq(self, tenant_id: str, limit: int = 50) -> list[dict]:
-        """
-        Return DLQ entries.
-        If tenant_id == "__all__", returns entries for all tenants.
-        Otherwise filters to the specified tenant.
-        Scans hfa:cp:dlq:meta:* keys (bounded by 7-day TTL).
-        """
-        _all = tenant_id == "__all__"
-        # Build the scan pattern from the canonical key prefix
-        dlq_scan_pattern = RedisKey.cp_dlq_meta("*")
+        """Return retained DLQ projections, optionally tenant-filtered."""
+
+        include_all = tenant_id == "__all__"
+        scan_pattern = RedisKey.cp_dlq_meta("*")
         try:
             cursor = 0
-            entries = []
+            entries: list[dict] = []
             while True:
                 cursor, keys = await self._redis.scan(
-                    cursor, match=dlq_scan_pattern, count=100
+                    cursor,
+                    match=scan_pattern,
+                    count=100,
                 )
                 for key in keys:
-                    meta = await self._redis.hgetall(key)
-                    if not meta:
+                    decoded = _decode_mapping(await self._redis.hgetall(key))
+                    if not decoded:
                         continue
-
-                    def _s(k: str) -> str:
-                        v = meta.get(k.encode()) or meta.get(k)
-                        return (v.decode() if isinstance(v, bytes) else v) or ""
-
-                    if _all or _s("tenant_id") == tenant_id:
+                    if include_all or decoded.get("tenant_id", "") == tenant_id:
                         entries.append(
                             {
-                                "run_id": _s("run_id"),
-                                "tenant_id": _s("tenant_id"),
-                                "reason": _s("reason"),
-                                "reschedule_count": int(_s("reschedule_count") or "0"),
-                                "dead_lettered_at": float(
-                                    _s("dead_lettered_at") or "0"
+                                "run_id": decoded.get("run_id", ""),
+                                "tenant_id": decoded.get("tenant_id", ""),
+                                "reason": decoded.get("reason", ""),
+                                "reschedule_count": _safe_int(
+                                    decoded.get("reschedule_count"),
+                                    0,
                                 ),
-                                "original_error": _s("original_error"),
-                                "cost_cents": int(_s("cost_cents") or "0"),
+                                "dead_lettered_at": float(
+                                    decoded.get("dead_lettered_at") or 0
+                                ),
+                                "original_error": decoded.get("original_error", ""),
+                                "cost_cents": _safe_int(decoded.get("cost_cents"), 0),
                             }
                         )
                     if len(entries) >= limit:

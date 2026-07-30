@@ -1,0 +1,218 @@
+name: Sprint 82.3 Recovery Read-Model Convergence
+
+on:
+  pull_request:
+    branches:
+      - baseline/local-import
+    paths:
+      - .github/workflows/sprint82-3-recovery-read-model-convergence.yml
+      - docs/implementation/sprint82/SPRINT82.3-recovery-read-model-convergence.md
+      - hfa-core/src/hfa/lua/task_requeue.lua
+      - hfa-core/src/hfa/lua/run_recovery_commit.lua
+      - hfa-control/src/hfa_control/task_recovery.py
+      - hfa-control/src/hfa_control/recovery.py
+      - hfa-control/src/hfa_control/service.py
+      - hfa-control/src/hfa_control/api/models.py
+      - tests/unit/test_recovery_read_model_convergence.py
+      - tests/integration/test_recovery_read_model_convergence_integration.py
+      - tests/integration/test_recovery_read_model_convergence_e2e.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  REDIS_URL: redis://127.0.0.1:6389/0
+  SPRINT81_2_REDIS_URL: redis://127.0.0.1:6379/0
+  USE_EXISTING_REDIS: "1"
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+jobs:
+  recovery-read-model-convergence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact checked-out HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected"
+
+      - name: Bootstrap exact scope or later regression trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import subprocess
+
+          workflow = ".github/workflows/sprint82-3-recovery-read-model-convergence.yml"
+          protected = {
+              workflow,
+              "docs/implementation/sprint82/SPRINT82.3-recovery-read-model-convergence.md",
+              "hfa-core/src/hfa/lua/task_requeue.lua",
+              "hfa-core/src/hfa/lua/run_recovery_commit.lua",
+              "hfa-control/src/hfa_control/task_recovery.py",
+              "hfa-control/src/hfa_control/recovery.py",
+              "hfa-control/src/hfa_control/service.py",
+              "hfa-control/src/hfa_control/api/models.py",
+              "tests/unit/test_recovery_read_model_convergence.py",
+              "tests/integration/test_recovery_read_model_convergence_integration.py",
+              "tests/integration/test_recovery_read_model_convergence_e2e.py",
+          }
+          base = os.environ["PR_BASE_SHA"]
+          changed = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{base}...HEAD"],
+                  text=True,
+              ).splitlines()
+          )
+          workflow_existed = subprocess.run(
+              ["git", "cat-file", "-e", f"{base}:{workflow}"],
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+          ).returncode == 0
+          if workflow_existed:
+              touched = changed & protected
+              assert touched, {
+                  "reason": "workflow ran without a protected Sprint 82.3 path change",
+                  "changed": sorted(changed),
+              }
+              print("SPRINT82_3_REGRESSION_TRIGGER_OK", sorted(touched))
+          else:
+              assert changed == protected, {
+                  "reason": "Sprint 82.3 bootstrap scope mismatch",
+                  "missing": sorted(protected - changed),
+                  "unexpected": sorted(changed - protected),
+              }
+              print("SPRINT82_3_BOOTSTRAP_EXACT_SCOPE_OK", sorted(changed))
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785
+
+      - name: Sprint 81.1 regression
+        run: |
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_canonical_transition.py -q --tb=short | tee sprint81_1.txt
+          grep -Eq '([7-9][7-9]|[89][0-9]|[1-9][0-9]{2,}) passed' sprint81_1.txt
+
+      - name: Sprint 81.2 real Redis regression
+        run: |
+          set -o pipefail
+          python -m pytest hfa-core/tests/authority/test_redis_canonical_authority.py -q --tb=short | tee sprint81_2.txt
+          ! grep -Eqi 'skipped|deselected' sprint81_2.txt
+          passed="$(grep -Eo '[0-9]+ passed' sprint81_2.txt | tail -1 | awk '{print $1}')"
+          test "${passed:-0}" -ge 56
+
+      - name: Sprint 81.3 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_task_admit_authority_binding.py -q --tb=short | tee sprint81_3_unit.txt
+          python -m pytest tests/integration/test_task_admit_authority_binding_integration.py -q --tb=short | tee sprint81_3_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint81_3_integration.txt
+
+      - name: Sprint 82.1 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_scheduler_runtime_truth_guard.py -q --tb=short | tee sprint82_1_unit.txt
+          python -m pytest tests/integration/test_scheduler_runtime_truth_guard_integration.py -q --tb=short | tee sprint82_1_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_1_integration.txt
+
+      - name: Sprint 82.2 regressions
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_worker_runtime_truth_guards.py -q --tb=short | tee sprint82_2_unit.txt
+          python -m pytest tests/integration/test_worker_runtime_truth_guards_integration.py -q --tb=short | tee sprint82_2_integration.txt
+          python -m pytest tests/integration/test_worker_runtime_truth_guard_e2e.py -q --tb=short | tee sprint82_2_e2e.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_2_integration.txt sprint82_2_e2e.txt
+
+      - name: Sprint 82.3 unit contracts
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_recovery_read_model_convergence.py -q --tb=short | tee sprint82_3_unit.txt
+
+      - name: Sprint 82.3 real Redis integration
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_recovery_read_model_convergence_integration.py -q --tb=short | tee sprint82_3_integration.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_3_integration.txt
+          grep -Eq '[1-9][0-9]* passed' sprint82_3_integration.txt
+
+      - name: Sprint 82.3 convergence E2E
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_recovery_read_model_convergence_e2e.py -q --tb=short | tee sprint82_3_e2e.txt
+          ! grep -Eqi 'skipped|deselected' sprint82_3_e2e.txt
+          grep -Eq '[1-9][0-9]* passed' sprint82_3_e2e.txt
+
+      - name: Existing recovery and requeue regressions
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/core/test_recovery_audit.py \
+            tests/core/test_recovery_requeue.py \
+            -q --tb=short | tee recovery_regressions.txt
+
+      - name: Compile recovery and control packages
+        run: |
+          python -m compileall -q \
+            hfa-core/src/hfa \
+            hfa-control/src/hfa_control \
+            hfa-worker/src/hfa_worker
+
+      - name: Patch whitespace check
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload pytest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint82-3-pytest-diagnostics-${{ github.run_id }}
+          path: |
+            sprint81_1.txt
+            sprint81_2.txt
+            sprint81_3_unit.txt
+            sprint81_3_integration.txt
+            sprint82_1_unit.txt
+            sprint82_1_integration.txt
+            sprint82_2_unit.txt
+            sprint82_2_integration.txt
+            sprint82_2_e2e.txt
+            sprint82_3_unit.txt
+            sprint82_3_integration.txt
+            sprint82_3_e2e.txt
+            recovery_regressions.txt
+          if-no-files-found: warn
