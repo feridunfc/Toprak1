@@ -15,15 +15,148 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+
+      - name: Verify exact PR head and scope
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          python - <<'PY'
+          import os, subprocess
+          allowed = {
+              '.github/workflows/loop-plane-shadow.yml',
+              'docs/architecture/loop-plane-product-boundary.md',
+              'hfa-core/src/hfa/loop_plane/__init__.py',
+              'hfa-core/src/hfa/loop_plane/decision.py',
+              'hfa-core/src/hfa/loop_plane/errors.py',
+              'hfa-core/src/hfa/loop_plane/model.py',
+              'hfa-core/src/hfa/loop_plane/reducer.py',
+              'hfa-core/src/hfa/loop_plane/service.py',
+              'hfa-core/src/hfa/loop_plane/state.py',
+              'hfa-core/src/hfa/loop_plane/store.py',
+              'hfa-core/src/hfa/loop_plane/translation.py',
+              'hfa-core/src/hfa/loop_plane/verification.py',
+              'tests/loop_plane/test_loop_plane.py',
+          }
+          changed = set(subprocess.check_output(['git','diff','--name-only',f"{os.environ['PR_BASE_SHA']}...HEAD"], text=True).splitlines())
+          assert changed == allowed, {'missing': sorted(allowed-changed), 'unexpected': sorted(changed-allowed)}
+          assert not any('__pycache__' in p or '.pytest_cache' in p or p.endswith('.pyc') for p in changed)
+          print('LOOP_PLANE_EXACT_SCOPE_OK')
+          PY
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -e hfa-core pytest
-      - run: python -m pytest tests/loop_plane -q --tb=short
-      - run: python -m compileall hfa-core/src/hfa/loop_plane
-      - run: git diff --check '${{ github.event.pull_request.base.sha }}...HEAD'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Dedicated behavioral tests
+        run: |
+          set -o pipefail
+          python -m pytest tests/loop_plane -q --tb=short | tee loop_plane_tests.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' loop_plane_tests.txt
+          grep -Eq '(^|[^0-9])22 passed' loop_plane_tests.txt
+
+      - name: Forbidden import and runtime mutation AST scan
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          roots = [Path('hfa-core/src/hfa/loop_plane')]
+          forbidden_modules = ('hfa_worker', 'hfa_control.scheduler', 'hfa.lua', 'redis')
+          forbidden_calls = ('enqueue', 'requeue', 'claim', 'heartbeat', 'complete', 'fail', 'cancel', 'run_terminate')
+          for root in roots:
+              for path in root.rglob('*.py'):
+                  tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+                  for node in ast.walk(tree):
+                      if isinstance(node, ast.Import):
+                          for alias in node.names:
+                              assert not alias.name.startswith(forbidden_modules), (path, alias.name)
+                      if isinstance(node, ast.ImportFrom):
+                          module = node.module or ''
+                          assert not module.startswith(forbidden_modules), (path, module)
+                      if isinstance(node, ast.Call):
+                          name = getattr(node.func, 'attr', getattr(node.func, 'id', ''))
+                          assert name not in forbidden_calls, (path, name)
+          print('LOOP_PLANE_FORBIDDEN_SURFACE_SCAN_OK')
+          PY
+
+      - name: Compatibility contract validation
+        run: |
+          python - <<'PY'
+          from hfa.loop_plane.translation import RUNTIME_EVENT_COMPATIBILITY
+          assert set(RUNTIME_EVENT_COMPATIBILITY) == {'TaskAdmitted','TaskClaimed','TaskCompleted','TaskFailed','RunCompleted','RunFailed'}
+          assert RUNTIME_EVENT_COMPATIBILITY['TaskCompleted']['loop_event_type'] == 'RuntimeObservationRecorded'
+          assert RUNTIME_EVENT_COMPATIBILITY['RunCompleted']['loop_event_type'] == 'RuntimeObservationRecorded'
+          print('LOOP_PLANE_COMPATIBILITY_MATRIX_OK')
+          PY
+
+      - name: Relevant Sprint 83.2 regression
+        env:
+          REDIS_URL: redis://127.0.0.1:6379/15
+          USE_EXISTING_REDIS: '1'
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_terminal_task_run_finalization.py -q --tb=short | tee sprint83_2_regression.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint83_2_regression.txt
+          grep -Eq '(^|[^0-9])11 passed' sprint83_2_regression.txt
+
+      - name: Compile and deterministic evidence
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python -m compileall -q hfa-core/src/hfa/loop_plane
+          mkdir -p local_out/loop_plane
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = {
+              'schema_version': 1,
+              'base_sha': os.environ['PR_BASE_SHA'],
+              'head_sha': os.environ['PR_HEAD_SHA'],
+              'mode_enforcement': True,
+              'runtime_effect': 'NONE',
+              'automatic_command_submission': False,
+              'durable_store': False,
+              'dedicated_test_count': 22,
+              'production_runtime_files_changed': [],
+          }
+          Path('local_out/loop_plane/loop_plane_shadow_evidence.json').write_text(json.dumps(result, sort_keys=True, indent=2)+'\n', encoding='utf-8')
+          print(json.dumps(result, sort_keys=True))
+          PY
+
+      - name: Patch whitespace check
+        run: git diff --check '${{ github.event.pull_request.base.sha }}...HEAD'
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loop-plane-shadow-${{ github.run_id }}
+          path: |
+            loop_plane_tests.txt
+            sprint83_2_regression.txt
+            local_out/loop_plane/loop_plane_shadow_evidence.json
+          if-no-files-found: error
