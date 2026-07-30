@@ -1,0 +1,29 @@
+name: Loop Plane Shadow
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-core/src/hfa/loop_plane/**'
+      - 'tests/loop_plane/**'
+      - 'docs/architecture/loop-plane-product-boundary.md'
+      - '.github/workflows/loop-plane-shadow.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e hfa-core pytest
+      - run: python -m pytest tests/loop_plane -q --tb=short
+      - run: python -m compileall hfa-core/src/hfa/loop_plane
+      - run: git diff --check '${{ github.event.pull_request.base.sha }}...HEAD'
