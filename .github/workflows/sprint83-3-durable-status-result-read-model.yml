@@ -1,0 +1,166 @@
+name: Sprint 83.3 Durable Status Result Read Model
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-control/src/hfa_control/run_status_read_model.py'
+      - 'hfa-control/src/hfa_control/service.py'
+      - 'tests/unit/test_run_status_result_read_model.py'
+      - 'tests/integration/test_run_status_result_read_model_integration.py'
+      - 'docs/implementation/sprint83/SPRINT83.3-durable-status-result-read-model.md'
+      - '.github/workflows/sprint83-3-durable-status-result-read-model.yml'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact HEAD and changed-file allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          python - <<'PY'
+          import os, subprocess
+          allowed = {
+              '.github/workflows/sprint83-3-durable-status-result-read-model.yml',
+              'docs/implementation/sprint83/SPRINT83.3-durable-status-result-read-model.md',
+              'hfa-control/src/hfa_control/run_status_read_model.py',
+              'hfa-control/src/hfa_control/service.py',
+              'tests/unit/test_run_status_result_read_model.py',
+              'tests/integration/test_run_status_result_read_model_integration.py',
+          }
+          changed = set(subprocess.check_output(
+              ['git','diff','--name-only',f"{os.environ['PR_BASE_SHA']}...HEAD"],
+              text=True,
+          ).splitlines())
+          assert changed == allowed, {'missing': sorted(allowed-changed), 'unexpected': sorted(changed-allowed)}
+          assert not any('__pycache__' in p or '.pytest_cache' in p or p.endswith('.pyc') for p in changed)
+          print('SPRINT83_3_EXACT_SCOPE_OK', sorted(changed))
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Dedicated read-model tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            -q --tb=short | tee sprint83_3_tests.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint83_3_tests.txt
+          grep -Eq '(^|[^0-9])30 passed' sprint83_3_tests.txt
+
+      - name: Read-only and Loop Plane dependency scan
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          paths = [
+              Path('hfa-control/src/hfa_control/run_status_read_model.py'),
+              Path('hfa-control/src/hfa_control/service.py'),
+          ]
+          forbidden_import_prefixes = ('hfa.loop_plane', 'hfa_control.scheduler')
+          forbidden_calls = {'set','hset','delete','expire','zadd','zrem','xadd','transition_state','mark_completed','store_result'}
+          reader = paths[0]
+          tree = ast.parse(reader.read_text(encoding='utf-8'), filename=str(reader))
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      assert not alias.name.startswith(forbidden_import_prefixes), (reader, alias.name)
+              if isinstance(node, ast.ImportFrom):
+                  module = node.module or ''
+                  assert not module.startswith(forbidden_import_prefixes), (reader, module)
+              if isinstance(node, ast.Call):
+                  name = getattr(node.func, 'attr', getattr(node.func, 'id', ''))
+                  assert name not in forbidden_calls, (reader, name)
+          all_text = '\n'.join(path.read_text(encoding='utf-8') for path in paths)
+          assert 'loop_plane' not in all_text
+          assert 'get_run_status_result' in paths[1].read_text(encoding='utf-8')
+          print('SPRINT83_3_READ_ONLY_SCAN_OK runtime_mutation_calls=0 Loop_Plane_dependencies=0')
+          PY
+
+      - name: Sprint 83.2 RUN_TERMINATE regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_terminal_task_run_finalization.py -q --tb=short | tee sprint83_2_regression.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint83_2_regression.txt
+          grep -Eq '(^|[^0-9])11 passed' sprint83_2_regression.txt
+
+      - name: Deterministic evidence and compileall
+        run: |
+          python -m compileall -q hfa-control/src/hfa_control tests/unit/test_run_status_result_read_model.py tests/integration/test_run_status_result_read_model_integration.py
+          mkdir -p local_out/sprint83
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence = {
+              'schema_version': 1,
+              'sprint': '83.3',
+              'base_sha': os.environ['PR_BASE_SHA'],
+              'head_sha': os.environ['PR_HEAD_SHA'],
+              'dedicated_test_count': 30,
+              'Sprint_83_2_regression_count': 11,
+              'status_vocabulary': ['QUEUED','RUNNING','COMPLETED','FAILED','CANCELLED','UNKNOWN'],
+              'projection_store': 'EXISTING_RUN_STATE_META_RESULT_READER_ONLY',
+              'runtime_mutation_calls': 0,
+              'Loop_Plane_dependencies': 0,
+              'canonical_lifecycle_authority_changed': False,
+              'new_lifecycle_writer': False,
+          }
+          path = Path('local_out/sprint83/sprint83_3_read_model_evidence.json')
+          path.write_text(json.dumps(evidence, sort_keys=True, indent=2)+'\n', encoding='utf-8')
+          assert path.read_text(encoding='utf-8') == json.dumps(evidence, sort_keys=True, indent=2)+'\n'
+          print(json.dumps(evidence, sort_keys=True))
+          PY
+
+      - name: Patch whitespace check
+        run: git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint83-3-status-result-${{ github.run_id }}
+          path: |
+            sprint83_3_tests.txt
+            sprint83_2_regression.txt
+            local_out/sprint83/sprint83_3_read_model_evidence.json
+          if-no-files-found: error
