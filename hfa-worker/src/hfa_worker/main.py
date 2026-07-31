@@ -11,12 +11,17 @@ from hfa.events.schema import RunRequestedEvent
 from hfa_control.dag_lua import DagLua
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.task_recovery import TaskHeartbeatManager
+from hfa_control.run_termination import RunTerminationCoordinator
 from hfa_control.shard import OWNER_TTL, ShardOwnershipManager
 from hfa_worker.consumer import WorkerConsumer
 from hfa_worker.drain import DrainManager
 from hfa_worker.executor import BaseExecutor
 from hfa_worker.executor_factory import build_executor
 from hfa_worker.heartbeat import WorkerHeartbeatPublisher
+from hfa_worker.run_finalizing_runtime import (
+    RunFinalizingTaskConsumer,
+    RunFinalizingWorkerConsumer,
+)
 from hfa_worker.task_consumer import TaskConsumer
 from hfa_worker.task_executor import TaskExecutionResult, TaskExecutor
 
@@ -59,6 +64,20 @@ class WorkerService:
     def __init__(self, redis, config: Dict[str, Any]) -> None:
         self._redis = redis
         self._production = bool(config.get("production", False))
+
+        run_termination_binding = config.get(
+            "run_termination_binding_enabled",
+            False,
+        )
+        if not isinstance(run_termination_binding, bool):
+            raise ValueError(
+                "run_termination_binding_enabled must be a boolean"
+            )
+        self._run_termination_binding_enabled = run_termination_binding
+        if self._run_termination_binding_enabled and not self._production:
+            raise ValueError(
+                "run_termination_binding_enabled requires production=True"
+            )
 
         configured_worker_id = str(config.get("worker_id") or "").strip()
         if self._production and not configured_worker_id:
@@ -138,6 +157,8 @@ class WorkerService:
         self._task_claim_manager: TaskClaimManager | None = None
         self._task_heartbeat_manager: TaskHeartbeatManager | None = None
         self._task_consumer: TaskConsumer | None = None
+        self._run_termination_coordinator: RunTerminationCoordinator | None = None
+        worker_consumer_type = WorkerConsumer
 
         if self._production:
             task_executor = config.get("task_executor")
@@ -161,6 +182,19 @@ class WorkerService:
                 )
 
             self._dag_lua = DagLua(redis)
+            completion_manager: Any = self._dag_lua
+            task_consumer_type = TaskConsumer
+
+            if self._run_termination_binding_enabled:
+                self._run_termination_coordinator = RunTerminationCoordinator(
+                    redis,
+                    self._dag_lua,
+                    enabled=True,
+                )
+                completion_manager = self._run_termination_coordinator
+                task_consumer_type = RunFinalizingTaskConsumer
+                worker_consumer_type = RunFinalizingWorkerConsumer
+
             self._task_claim_manager = TaskClaimManager(self._dag_lua)
             self._task_heartbeat_manager = TaskHeartbeatManager(
                 redis,
@@ -169,16 +203,16 @@ class WorkerService:
                     heartbeat_interval_ms=task_heartbeat_interval_ms,
                 ),
             )
-            self._task_consumer = TaskConsumer(
+            self._task_consumer = task_consumer_type(
                 claim_manager=self._task_claim_manager,
                 executor=task_executor,
                 worker_capabilities=self._capabilities,
                 heartbeat_manager=self._task_heartbeat_manager,
                 heartbeat_interval_ms=task_heartbeat_interval_ms,
-                completion_manager=self._dag_lua,
+                completion_manager=completion_manager,
             )
 
-        self._consumer = WorkerConsumer(
+        self._consumer = worker_consumer_type(
             redis=redis,
             worker_id=self._worker_id,
             worker_group=self._worker_group,
@@ -222,6 +256,10 @@ class WorkerService:
     @property
     def worker_id(self) -> str:
         return self._worker_id
+
+    @property
+    def run_termination_binding_enabled(self) -> bool:
+        return self._run_termination_binding_enabled
 
     def _refresh_background_health(self) -> None:
         for component, task in (
@@ -529,6 +567,9 @@ class WorkerService:
             try:
                 if self._production and self._dag_lua is not None:
                     await self._dag_lua.initialise()
+
+                if self._run_termination_coordinator is not None:
+                    await self._run_termination_coordinator.initialise()
 
                 await self._prepare_consumer_groups()
                 await self._confirm_shard_leases()

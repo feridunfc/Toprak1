@@ -1,0 +1,412 @@
+name: Sprint 83.4 Production RUN Finalization Binding
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-worker/src/hfa_worker/main.py'
+      - 'hfa-worker/src/hfa_worker/process_root.py'
+      - 'hfa-worker/src/hfa_worker/run_finalizing_runtime.py'
+      - 'hfa-control/src/hfa_control/run_termination.py'
+      - 'hfa-core/src/hfa/lua/run_terminate_from_tasks.lua'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify HEAD and regression-aware scope
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = (
+              "sprint/83-4-production-run-finalization-binding"
+          )
+
+          feature_allowlist = {
+              ".github/workflows/"
+              "sprint83-4-production-run-finalization-binding.yml",
+              "docs/implementation/sprint83/"
+              "SPRINT83.4-production-run-finalization-binding.md",
+              "hfa-worker/src/hfa_worker/main.py",
+              "hfa-worker/src/hfa_worker/process_root.py",
+              "scripts/runtime_alpha_acceptance_83_4.py",
+              "tests/core/"
+              "test_production_run_finalization_binding.py",
+              "tests/integration/"
+              "test_production_run_finalization_binding_integration.py",
+          }
+
+          protected_runtime_paths = {
+              "hfa-worker/src/hfa_worker/main.py",
+              "hfa-worker/src/hfa_worker/process_root.py",
+              "hfa-worker/src/hfa_worker/"
+              "run_finalizing_runtime.py",
+              "hfa-control/src/hfa_control/run_termination.py",
+              "hfa-core/src/hfa/lua/"
+              "run_terminate_from_tasks.lua",
+          }
+
+          changed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          head_branch = os.environ["PR_HEAD_BRANCH"]
+
+          if head_branch == feature_branch:
+              assert changed == feature_allowlist, {
+                  "mode": "feature_exact_scope",
+                  "missing": sorted(
+                      feature_allowlist - changed
+                  ),
+                  "unexpected": sorted(
+                      changed - feature_allowlist
+                  ),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              assert changed & protected_runtime_paths, {
+                  "mode": "future_runtime_regression",
+                  "changed": sorted(changed),
+                  "required_runtime_intersection": sorted(
+                      protected_runtime_paths
+                  ),
+              }
+              mode = "RUNTIME_INTERSECTION"
+
+          forbidden = [
+              path
+              for path in changed
+              if "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, {
+              "forbidden_generated_files": sorted(forbidden)
+          }
+
+          print(
+              "SPRINT83_4_SCOPE_OK",
+              mode,
+              sorted(changed),
+          )
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -e hfa-core \
+            -e hfa-control \
+            -e hfa-worker
+          python -m pip install \
+            pytest \
+            pytest-asyncio \
+            redis \
+            fakeredis \
+            rfc8785 \
+            fastapi \
+            httpx \
+            uvicorn
+
+      - name: Sprint 83.4 and 83.2 verification
+        shell: bash
+        run: |
+          set -o pipefail
+
+          python -m pytest \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/integration/test_production_run_finalization_binding_integration.py \
+            tests/integration/test_terminal_task_run_finalization.py \
+            tests/integration/test_runtime_alpha_product_acceptance_83_2.py \
+            -q --tb=short \
+            | tee sprint83_4_tests.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_4_tests.txt
+
+          grep -Eq \
+            '(^|[^0-9])41 passed' \
+            sprint83_4_tests.txt
+
+      - name: Existing production worker regressions
+        shell: bash
+        run: |
+          set -o pipefail
+
+          python -m pytest \
+            tests/core/test_production_worker_composition_contract.py \
+            tests/core/test_production_worker_process_root_contract.py \
+            tests/core/test_worker_service_lifecycle_contract.py \
+            tests/core/test_worker_startup_failure_projection_red.py \
+            tests/core/test_worker_ack_authority_contract.py \
+            -q --tb=short \
+            | tee sprint83_4_production_regressions.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_4_production_regressions.txt
+
+          grep -Eq \
+            '(^|[^0-9])31 passed' \
+            sprint83_4_production_regressions.txt
+
+      - name: Composition and boundary scan
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          main_path = Path(
+              "hfa-worker/src/hfa_worker/main.py"
+          )
+          root_path = Path(
+              "hfa-worker/src/hfa_worker/process_root.py"
+          )
+          acceptance_path = Path(
+              "scripts/runtime_alpha_acceptance_83_4.py"
+          )
+
+          main_text = main_path.read_text(encoding="utf-8")
+          root_text = root_path.read_text(encoding="utf-8")
+          acceptance_text = acceptance_path.read_text(
+              encoding="utf-8"
+          )
+
+          required_main = (
+              "RunTerminationCoordinator",
+              "RunFinalizingTaskConsumer",
+              "RunFinalizingWorkerConsumer",
+              "run_termination_binding_enabled",
+              "await self._run_termination_coordinator.initialise()",
+          )
+          for token in required_main:
+              assert token in main_text, token
+
+          required_root = (
+              "WORKER_RUN_TERMINATION_BINDING",
+              '_TRUE_ENV_VALUES = frozenset(',
+              '_FALSE_ENV_VALUES = frozenset(',
+              "default=False",
+          )
+          for token in required_root:
+              assert token in root_text, token
+
+          forbidden_dependencies = (
+              "hfa.loop_plane",
+              "LoopPlane",
+              "ProjectionCompleteness",
+              "ProjectionFreshness",
+          )
+          for path, text in (
+              (main_path, main_text),
+              (root_path, root_text),
+              (acceptance_path, acceptance_text),
+          ):
+              for token in forbidden_dependencies:
+                  assert token not in text, (path, token)
+
+          main_tree = ast.parse(
+              main_text,
+              filename=str(main_path),
+          )
+          root_tree = ast.parse(
+              root_text,
+              filename=str(root_path),
+          )
+
+          for path, tree in (
+              (main_path, main_tree),
+              (root_path, root_tree),
+          ):
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          assert not alias.name.startswith(
+                              "hfa.loop_plane"
+                          ), (path, alias.name)
+                  elif isinstance(node, ast.ImportFrom):
+                      module = node.module or ""
+                      assert not module.startswith(
+                          "hfa.loop_plane"
+                      ), (path, module)
+
+          print(
+              "SPRINT83_4_BOUNDARY_SCAN_OK",
+              "new_lifecycle_writer=0",
+              "Loop_Plane_dependencies=0",
+              "default_enabled=false",
+          )
+          PY
+
+      - name: Deterministic one-command acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p local_out/sprint83
+
+          python scripts/runtime_alpha_acceptance_83_4.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s83-4-ci \
+            --reset-test-db \
+            --out \
+              local_out/sprint83/sprint83_4_production_run_finalization_binding.json \
+            --json \
+            > sprint83_4_acceptance_stdout.json
+
+          python scripts/runtime_alpha_acceptance_83_4.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s83-4-ci \
+            --reset-test-db \
+            --out \
+              local_out/sprint83/sprint83_4_production_run_finalization_binding_repeat.json \
+            --json \
+            > sprint83_4_acceptance_repeat_stdout.json
+
+          cmp \
+            local_out/sprint83/sprint83_4_production_run_finalization_binding.json \
+            local_out/sprint83/sprint83_4_production_run_finalization_binding_repeat.json
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(
+              "local_out/sprint83/"
+              "sprint83_4_production_run_finalization_binding.json"
+          )
+          evidence = json.loads(
+              path.read_text(encoding="utf-8")
+          )
+
+          assert evidence["status"] == (
+              "PASS_WITH_LIMITATIONS"
+          )
+          assert evidence[
+              "production_worker_composition_supported"
+          ] is True
+          assert evidence[
+              "run_termination_binding_default_enabled"
+          ] is False
+          assert evidence[
+              "run_termination_binding_test_enabled"
+          ] is True
+          assert evidence[
+              "opt_in_end_to_end_run_terminalization"
+          ] is True
+          assert evidence[
+              "canonical_lifecycle_authority_changed"
+          ] is False
+          assert evidence["new_lifecycle_writer"] is False
+          assert evidence["Loop_Plane_dependencies"] == 0
+          assert evidence["product_alpha_ready"] is False
+          assert evidence["production_ready"] is False
+          assert evidence[
+              "production_cutover_authorized"
+          ] is False
+
+          evidence.update(
+              {
+                  "base_sha": os.environ["PR_BASE_SHA"],
+                  "head_sha": os.environ["PR_HEAD_SHA"],
+                  "dedicated_and_83_2_test_count": 41,
+                  "production_regression_test_count": 31,
+                  "repeated_serialization_equal": True,
+              }
+          )
+
+          expected = (
+              json.dumps(
+                  evidence,
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n"
+          )
+          path.write_text(expected, encoding="utf-8")
+          assert path.read_text(encoding="utf-8") == expected
+
+          print(
+              json.dumps(
+                  evidence,
+                  sort_keys=True,
+              )
+          )
+          PY
+
+      - name: Compile and whitespace checks
+        shell: bash
+        run: |
+          python -m compileall -q \
+            hfa-worker/src/hfa_worker \
+            scripts/runtime_alpha_acceptance_83_4.py \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/integration/test_production_run_finalization_binding_integration.py
+
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint83-4-production-binding-${{ github.run_id }}
+          path: |
+            sprint83_4_tests.txt
+            sprint83_4_production_regressions.txt
+            sprint83_4_acceptance_stdout.json
+            sprint83_4_acceptance_repeat_stdout.json
+            local_out/sprint83/sprint83_4_production_run_finalization_binding.json
+            local_out/sprint83/sprint83_4_production_run_finalization_binding_repeat.json
+          if-no-files-found: error
