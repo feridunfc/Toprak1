@@ -15,6 +15,30 @@ from hfa_worker.main import WorkerService
 RedisFactory = Callable[[str], Any]
 ShutdownWaiter = Callable[[], Awaitable[None]]
 
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_strict_bool_env(
+    name: str,
+    raw: str | None,
+    *,
+    default: bool,
+) -> bool:
+    if raw is None:
+        return default
+
+    normalized = str(raw).strip().lower()
+    if normalized in _TRUE_ENV_VALUES:
+        return True
+    if normalized in _FALSE_ENV_VALUES:
+        return False
+
+    raise RuntimeError(
+        f"{name} must be one of "
+        "1,true,yes,on,0,false,no,off"
+    )
+
 
 def _parse_shards(raw: str) -> list[int]:
     values = [part.strip() for part in raw.split(",") if part.strip()]
@@ -44,6 +68,11 @@ def config_from_env(
         "capacity": int(source.get("WORKER_CAPACITY", "10")),
         "version": source.get("WORKER_VERSION", "0.0.0"),
         "executor_mode": executor_mode,
+        "run_termination_binding_enabled": _parse_strict_bool_env(
+            "WORKER_RUN_TERMINATION_BINDING",
+            source.get("WORKER_RUN_TERMINATION_BINDING"),
+            default=False,
+        ),
         "shard_renew_interval": float(
             source.get("WORKER_SHARD_RENEW_INTERVAL", "30")
         ),
