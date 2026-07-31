@@ -1,0 +1,243 @@
+name: Sprint 83.3 Durable Status Result Read Model
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-control/src/hfa_control/run_status_read_model.py'
+      - 'hfa-control/src/hfa_control/service.py'
+      - 'tests/unit/test_run_status_result_read_model.py'
+      - 'tests/integration/test_run_status_result_read_model_integration.py'
+      - 'docs/implementation/sprint83/SPRINT83.3-durable-status-result-read-model.md'
+      - '.github/workflows/sprint83-3-durable-status-result-read-model.yml'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact HEAD and changed-file allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          python - <<'PY'
+          import os, subprocess
+          allowed = {
+              '.github/workflows/sprint83-3-durable-status-result-read-model.yml',
+              'docs/implementation/sprint83/SPRINT83.3-durable-status-result-read-model.md',
+              'hfa-control/src/hfa_control/run_status_read_model.py',
+              'hfa-control/src/hfa_control/service.py',
+              'tests/unit/test_run_status_result_read_model.py',
+              'tests/integration/test_run_status_result_read_model_integration.py',
+          }
+          changed = set(subprocess.check_output(
+              ['git','diff','--name-only',f"{os.environ['PR_BASE_SHA']}...HEAD"],
+              text=True,
+          ).splitlines())
+          assert changed == allowed, {'missing': sorted(allowed-changed), 'unexpected': sorted(changed-allowed)}
+          assert not any('__pycache__' in p or '.pytest_cache' in p or p.endswith('.pyc') for p in changed)
+          print('SPRINT83_3_EXACT_SCOPE_OK', sorted(changed))
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Dedicated read-model tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            -q --tb=short | tee sprint83_3_tests.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint83_3_tests.txt
+          grep -Eq '(^|[^0-9])30 passed' sprint83_3_tests.txt
+
+      - name: Read-only and Loop Plane dependency scan
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          reader_path = Path('hfa-control/src/hfa_control/run_status_read_model.py')
+          service_path = Path('hfa-control/src/hfa_control/service.py')
+          forbidden_import_prefixes = ('hfa.loop_plane', 'hfa_control.scheduler')
+          forbidden_write_methods = {
+              'set','hset','delete','expire','zadd','zrem','xadd',
+              'transition_state','mark_completed','store_result',
+          }
+
+          reader_tree = ast.parse(reader_path.read_text(encoding='utf-8'), filename=str(reader_path))
+          for node in ast.walk(reader_tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      assert not alias.name.startswith(forbidden_import_prefixes), (reader_path, alias.name)
+              elif isinstance(node, ast.ImportFrom):
+                  module = node.module or ''
+                  assert not module.startswith(forbidden_import_prefixes), (reader_path, module)
+              elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                  assert node.func.attr not in forbidden_write_methods, (reader_path, node.func.attr)
+
+          service_tree = ast.parse(service_path.read_text(encoding='utf-8'), filename=str(service_path))
+          target = None
+          for node in ast.walk(service_tree):
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == 'get_run_status_result':
+                  target = node
+                  break
+          assert target is not None
+          for node in ast.walk(target):
+              if isinstance(node, ast.ImportFrom):
+                  assert not (node.module or '').startswith('hfa.loop_plane')
+              elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                  assert node.func.attr not in forbidden_write_methods, (service_path, node.func.attr)
+
+          text = reader_path.read_text(encoding='utf-8')
+          assert 'loop_plane' not in text
+          assert 'ProjectionCompleteness' not in text
+          assert 'ProjectionFreshness' not in text
+          assert 'projection_revision' not in text
+          print('SPRINT83_3_READ_ONLY_SCAN_OK runtime_mutation_calls=0 Loop_Plane_dependencies=0')
+          PY
+
+      - name: Sprint 83.2 RUN_TERMINATE regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_terminal_task_run_finalization.py -q --tb=short | tee sprint83_2_regression.txt
+          ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint83_2_regression.txt
+          grep -Eq '(^|[^0-9])11 passed' sprint83_2_regression.txt
+
+      - name: Deterministic read harness and compileall
+        run: |
+          python -m compileall -q hfa-control/src/hfa_control tests/unit/test_run_status_result_read_model.py tests/integration/test_run_status_result_read_model_integration.py
+          mkdir -p local_out/sprint83
+          python - <<'PY'
+          import asyncio, hashlib, json, os
+          from pathlib import Path
+          from hfa.config.keys import RedisKey
+          from hfa_control.run_status_read_model import DurableRunStatusResultReader
+
+          class FakeRedis:
+              def __init__(self):
+                  self.values = {}
+                  self.hashes = {}
+                  self.ttls = {}
+                  self.write_calls = 0
+              async def type(self, key):
+                  if key in self.values: return 'string'
+                  if key in self.hashes: return 'hash'
+                  return 'none'
+              async def get(self, key): return self.values.get(key)
+              async def hgetall(self, key): return dict(self.hashes.get(key, {}))
+              async def ttl(self, key): return self.ttls.get(key, -2)
+              async def set(self, *args, **kwargs):
+                  self.write_calls += 1
+                  raise AssertionError('write attempted')
+              async def hset(self, *args, **kwargs):
+                  self.write_calls += 1
+                  raise AssertionError('write attempted')
+
+          def seed(redis, run_id, state, result=None):
+              redis.values[RedisKey.run_state(run_id)] = state
+              redis.hashes[RedisKey.run_meta(run_id)] = {'run_id': run_id, 'state': state}
+              redis.ttls[RedisKey.run_state(run_id)] = 3600
+              redis.ttls[RedisKey.run_meta(run_id)] = 3600
+              if result is not None:
+                  redis.hashes[RedisKey.run_result(run_id)] = result
+                  redis.ttls[RedisKey.run_result(run_id)] = 3600
+
+          async def render_samples():
+              outputs = {}
+              unknown = FakeRedis()
+              outputs['unknown'] = (await DurableRunStatusResultReader(unknown).read('unknown')).to_canonical_json()
+
+              running = FakeRedis(); seed(running, 'running', 'running')
+              outputs['running'] = (await DurableRunStatusResultReader(running).read('running')).to_canonical_json()
+
+              completed = FakeRedis(); seed(completed, 'completed', 'done', {
+                  'status': 'done', 'payload': '{"ok":true}', 'result_event_id': 'e1'
+              })
+              reader = DurableRunStatusResultReader(completed)
+              outputs['completed'] = (await reader.read('completed')).to_canonical_json()
+              repeated = (await reader.read('completed')).to_canonical_json()
+              assert outputs['completed'] == repeated
+
+              conflict = FakeRedis(); seed(conflict, 'conflict', 'running', {
+                  'status': 'done', 'payload': '{}', 'result_event_id': 'e2'
+              })
+              outputs['conflict'] = (await DurableRunStatusResultReader(conflict).read('conflict')).to_canonical_json()
+              assert unknown.write_calls + running.write_calls + completed.write_calls + conflict.write_calls == 0
+              return outputs
+
+          outputs = asyncio.run(render_samples())
+          hashes = {name + '_view_sha256': hashlib.sha256(value.encode()).hexdigest() for name, value in outputs.items()}
+          evidence = {
+              'schema_version': 1,
+              'sprint': '83.3',
+              'base_sha': os.environ['PR_BASE_SHA'],
+              'head_sha': os.environ['PR_HEAD_SHA'],
+              'dedicated_test_count': 30,
+              'Sprint_83_2_regression_count': 11,
+              'status_vocabulary': ['QUEUED','RUNNING','COMPLETED','FAILED','UNKNOWN'],
+              'read_source': 'EXISTING_RUN_STATE_META_RESULT_RECORDS',
+              'runtime_mutation_calls': 0,
+              'Loop_Plane_dependencies': 0,
+              'canonical_lifecycle_authority_changed': False,
+              'new_lifecycle_writer': False,
+              'repeated_serialization_equal': True,
+              **hashes,
+          }
+          path = Path('local_out/sprint83/sprint83_3_read_model_evidence.json')
+          expected = json.dumps(evidence, sort_keys=True, indent=2)+'\n'
+          path.write_text(expected, encoding='utf-8')
+          assert path.read_text(encoding='utf-8') == expected
+          print(json.dumps(evidence, sort_keys=True))
+          PY
+
+      - name: Patch whitespace check
+        run: git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint83-3-status-result-${{ github.run_id }}
+          path: |
+            sprint83_3_tests.txt
+            sprint83_2_regression.txt
+            local_out/sprint83/sprint83_3_read_model_evidence.json
+          if-no-files-found: error
