@@ -125,7 +125,11 @@ jobs:
               elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                   assert node.func.attr not in forbidden_write_methods, (service_path, node.func.attr)
 
-          assert 'loop_plane' not in reader_path.read_text(encoding='utf-8')
+          text = reader_path.read_text(encoding='utf-8')
+          assert 'loop_plane' not in text
+          assert 'ProjectionCompleteness' not in text
+          assert 'ProjectionFreshness' not in text
+          assert 'projection_revision' not in text
           print('SPRINT83_3_READ_ONLY_SCAN_OK runtime_mutation_calls=0 Loop_Plane_dependencies=0')
           PY
 
@@ -137,13 +141,70 @@ jobs:
           ! grep -Eqi 'skipped|deselected|xfailed|xpassed' sprint83_2_regression.txt
           grep -Eq '(^|[^0-9])11 passed' sprint83_2_regression.txt
 
-      - name: Deterministic evidence and compileall
+      - name: Deterministic read harness and compileall
         run: |
           python -m compileall -q hfa-control/src/hfa_control tests/unit/test_run_status_result_read_model.py tests/integration/test_run_status_result_read_model_integration.py
           mkdir -p local_out/sprint83
           python - <<'PY'
-          import json, os
+          import asyncio, hashlib, json, os
           from pathlib import Path
+          from hfa.config.keys import RedisKey
+          from hfa_control.run_status_read_model import DurableRunStatusResultReader
+
+          class FakeRedis:
+              def __init__(self):
+                  self.values = {}
+                  self.hashes = {}
+                  self.ttls = {}
+                  self.write_calls = 0
+              async def type(self, key):
+                  if key in self.values: return 'string'
+                  if key in self.hashes: return 'hash'
+                  return 'none'
+              async def get(self, key): return self.values.get(key)
+              async def hgetall(self, key): return dict(self.hashes.get(key, {}))
+              async def ttl(self, key): return self.ttls.get(key, -2)
+              async def set(self, *args, **kwargs):
+                  self.write_calls += 1
+                  raise AssertionError('write attempted')
+              async def hset(self, *args, **kwargs):
+                  self.write_calls += 1
+                  raise AssertionError('write attempted')
+
+          def seed(redis, run_id, state, result=None):
+              redis.values[RedisKey.run_state(run_id)] = state
+              redis.hashes[RedisKey.run_meta(run_id)] = {'run_id': run_id, 'state': state}
+              redis.ttls[RedisKey.run_state(run_id)] = 3600
+              redis.ttls[RedisKey.run_meta(run_id)] = 3600
+              if result is not None:
+                  redis.hashes[RedisKey.run_result(run_id)] = result
+                  redis.ttls[RedisKey.run_result(run_id)] = 3600
+
+          async def render_samples():
+              outputs = {}
+              unknown = FakeRedis()
+              outputs['unknown'] = (await DurableRunStatusResultReader(unknown).read('unknown')).to_canonical_json()
+
+              running = FakeRedis(); seed(running, 'running', 'running')
+              outputs['running'] = (await DurableRunStatusResultReader(running).read('running')).to_canonical_json()
+
+              completed = FakeRedis(); seed(completed, 'completed', 'done', {
+                  'status': 'done', 'payload': '{"ok":true}', 'result_event_id': 'e1'
+              })
+              reader = DurableRunStatusResultReader(completed)
+              outputs['completed'] = (await reader.read('completed')).to_canonical_json()
+              repeated = (await reader.read('completed')).to_canonical_json()
+              assert outputs['completed'] == repeated
+
+              conflict = FakeRedis(); seed(conflict, 'conflict', 'running', {
+                  'status': 'done', 'payload': '{}', 'result_event_id': 'e2'
+              })
+              outputs['conflict'] = (await DurableRunStatusResultReader(conflict).read('conflict')).to_canonical_json()
+              assert unknown.write_calls + running.write_calls + completed.write_calls + conflict.write_calls == 0
+              return outputs
+
+          outputs = asyncio.run(render_samples())
+          hashes = {name + '_view_sha256': hashlib.sha256(value.encode()).hexdigest() for name, value in outputs.items()}
           evidence = {
               'schema_version': 1,
               'sprint': '83.3',
@@ -151,12 +212,14 @@ jobs:
               'head_sha': os.environ['PR_HEAD_SHA'],
               'dedicated_test_count': 30,
               'Sprint_83_2_regression_count': 11,
-              'status_vocabulary': ['QUEUED','RUNNING','COMPLETED','FAILED','CANCELLED','UNKNOWN'],
-              'projection_store': 'EXISTING_RUN_STATE_META_RESULT_READER_ONLY',
+              'status_vocabulary': ['QUEUED','RUNNING','COMPLETED','FAILED','UNKNOWN'],
+              'read_source': 'EXISTING_RUN_STATE_META_RESULT_RECORDS',
               'runtime_mutation_calls': 0,
               'Loop_Plane_dependencies': 0,
               'canonical_lifecycle_authority_changed': False,
               'new_lifecycle_writer': False,
+              'repeated_serialization_equal': True,
+              **hashes,
           }
           path = Path('local_out/sprint83/sprint83_3_read_model_evidence.json')
           expected = json.dumps(evidence, sort_keys=True, indent=2)+'\n'
