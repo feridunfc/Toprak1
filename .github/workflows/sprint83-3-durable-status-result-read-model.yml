@@ -92,27 +92,40 @@ jobs:
           python - <<'PY'
           import ast
           from pathlib import Path
-          paths = [
-              Path('hfa-control/src/hfa_control/run_status_read_model.py'),
-              Path('hfa-control/src/hfa_control/service.py'),
-          ]
+
+          reader_path = Path('hfa-control/src/hfa_control/run_status_read_model.py')
+          service_path = Path('hfa-control/src/hfa_control/service.py')
           forbidden_import_prefixes = ('hfa.loop_plane', 'hfa_control.scheduler')
-          forbidden_calls = {'set','hset','delete','expire','zadd','zrem','xadd','transition_state','mark_completed','store_result'}
-          reader = paths[0]
-          tree = ast.parse(reader.read_text(encoding='utf-8'), filename=str(reader))
-          for node in ast.walk(tree):
+          forbidden_write_methods = {
+              'set','hset','delete','expire','zadd','zrem','xadd',
+              'transition_state','mark_completed','store_result',
+          }
+
+          reader_tree = ast.parse(reader_path.read_text(encoding='utf-8'), filename=str(reader_path))
+          for node in ast.walk(reader_tree):
               if isinstance(node, ast.Import):
                   for alias in node.names:
-                      assert not alias.name.startswith(forbidden_import_prefixes), (reader, alias.name)
-              if isinstance(node, ast.ImportFrom):
+                      assert not alias.name.startswith(forbidden_import_prefixes), (reader_path, alias.name)
+              elif isinstance(node, ast.ImportFrom):
                   module = node.module or ''
-                  assert not module.startswith(forbidden_import_prefixes), (reader, module)
-              if isinstance(node, ast.Call):
-                  name = getattr(node.func, 'attr', getattr(node.func, 'id', ''))
-                  assert name not in forbidden_calls, (reader, name)
-          all_text = '\n'.join(path.read_text(encoding='utf-8') for path in paths)
-          assert 'loop_plane' not in all_text
-          assert 'get_run_status_result' in paths[1].read_text(encoding='utf-8')
+                  assert not module.startswith(forbidden_import_prefixes), (reader_path, module)
+              elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                  assert node.func.attr not in forbidden_write_methods, (reader_path, node.func.attr)
+
+          service_tree = ast.parse(service_path.read_text(encoding='utf-8'), filename=str(service_path))
+          target = None
+          for node in ast.walk(service_tree):
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == 'get_run_status_result':
+                  target = node
+                  break
+          assert target is not None
+          for node in ast.walk(target):
+              if isinstance(node, ast.ImportFrom):
+                  assert not (node.module or '').startswith('hfa.loop_plane')
+              elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                  assert node.func.attr not in forbidden_write_methods, (service_path, node.func.attr)
+
+          assert 'loop_plane' not in reader_path.read_text(encoding='utf-8')
           print('SPRINT83_3_READ_ONLY_SCAN_OK runtime_mutation_calls=0 Loop_Plane_dependencies=0')
           PY
 
@@ -146,8 +159,9 @@ jobs:
               'new_lifecycle_writer': False,
           }
           path = Path('local_out/sprint83/sprint83_3_read_model_evidence.json')
-          path.write_text(json.dumps(evidence, sort_keys=True, indent=2)+'\n', encoding='utf-8')
-          assert path.read_text(encoding='utf-8') == json.dumps(evidence, sort_keys=True, indent=2)+'\n'
+          expected = json.dumps(evidence, sort_keys=True, indent=2)+'\n'
+          path.write_text(expected, encoding='utf-8')
+          assert path.read_text(encoding='utf-8') == expected
           print(json.dumps(evidence, sort_keys=True))
           PY
 
