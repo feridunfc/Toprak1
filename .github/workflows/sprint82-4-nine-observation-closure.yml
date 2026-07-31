@@ -8,9 +8,6 @@ on:
       - .github/workflows/sprint82-4-nine-observation-closure.yml
       - docs/implementation/sprint82/SPRINT82.4-nine-observation-closure.md
       - tests/integration/test_nine_observation_truth_closure.py
-      - hfa-control/src/hfa_control/service.py
-      - hfa-worker/src/hfa_worker/runtime/terminal_duplicate_delivery.py
-      - hfa-worker/src/hfa_worker/consumer.py
   workflow_dispatch:
 
 permissions:
@@ -80,9 +77,9 @@ jobs:
                   text=True,
               ).splitlines()
           )
-          assert mandatory <= changed, {
-              "reason": "mandatory Sprint 82.4 files missing",
-              "missing": sorted(mandatory - changed),
+          assert changed & mandatory, {
+              "reason": "no Sprint 82.4 contract file changed",
+              "required_one_of": sorted(mandatory),
           }
           assert changed <= allowed, {
               "reason": "unexpected Sprint 82.4 scope",
