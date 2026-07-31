@@ -7,8 +7,8 @@ from hfa.config.keys import RedisKey
 from hfa_control.run_status_read_model import (
     DurableRunStatusResultReader,
     ExternalRunStatus,
-    ProjectionCompleteness,
-    ProjectionFreshness,
+    ReadCompleteness,
+    ReadFreshness,
 )
 
 
@@ -58,16 +58,15 @@ def seed(redis, run_id="r1", state="running", meta=None, result=None, ttl=3600):
 async def test_unknown_run():
     view = await DurableRunStatusResultReader(FakeRedis()).read("missing")
     assert view.status is ExternalRunStatus.UNKNOWN
-    assert view.completeness is ProjectionCompleteness.UNKNOWN_RUN
+    assert view.completeness is ReadCompleteness.UNKNOWN_RUN
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["admitted", "queued", "pending", "scheduled", "rescheduled"])
-async def test_queued_vocabulary(state):
-    redis = FakeRedis(); seed(redis, state=state)
+async def test_admitted_maps_to_queued():
+    redis = FakeRedis(); seed(redis, state="admitted")
     view = await DurableRunStatusResultReader(redis).read("r1")
     assert view.status is ExternalRunStatus.QUEUED
-    assert view.completeness is ProjectionCompleteness.RUNNING_WITHOUT_RESULT
+    assert view.completeness is ReadCompleteness.RUNNING_WITHOUT_RESULT
 
 
 @pytest.mark.asyncio
@@ -85,7 +84,7 @@ async def test_completed_with_result():
     assert view.status is ExternalRunStatus.COMPLETED
     assert view.outcome == "SUCCESS"
     assert view.result.payload == {"ok": True}
-    assert view.completeness is ProjectionCompleteness.TERMINAL_WITH_RESULT
+    assert view.completeness is ReadCompleteness.TERMINAL_WITH_RESULT
 
 
 @pytest.mark.asyncio
@@ -97,60 +96,93 @@ async def test_failed_with_error():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_mapping():
-    redis = FakeRedis(); seed(redis, state="cancelled")
-    view = await DurableRunStatusResultReader(redis).read("r1")
-    assert view.status is ExternalRunStatus.CANCELLED
-
-
-@pytest.mark.asyncio
 async def test_terminal_without_result():
     redis = FakeRedis(); seed(redis, state="done")
     view = await DurableRunStatusResultReader(redis).read("r1")
-    assert view.completeness is ProjectionCompleteness.TERMINAL_WITHOUT_RESULT
+    assert view.completeness is ReadCompleteness.TERMINAL_WITHOUT_RESULT
+    assert view.completeness_reason == "RESULT_NOT_PRESENT"
 
 
 @pytest.mark.asyncio
-async def test_result_expired_is_distinct():
+async def test_expected_result_absence_is_not_proven_expiry():
     redis = FakeRedis(); seed(redis, state="done", meta={"result_event_id":"e1"})
     view = await DurableRunStatusResultReader(redis).read("r1")
-    assert view.completeness is ProjectionCompleteness.RESULT_EXPIRED
+    assert view.completeness is ReadCompleteness.TERMINAL_WITHOUT_RESULT
+    assert view.completeness_reason == "RESULT_MISSING_OR_EXPIRED"
 
 
 @pytest.mark.asyncio
 async def test_result_before_terminal_conflicts():
     redis = FakeRedis(); seed(redis, state="running", result={"status":"done","payload":"{}","result_event_id":"e1"})
     view = await DurableRunStatusResultReader(redis).read("r1")
-    assert view.completeness is ProjectionCompleteness.CONFLICTING_EVIDENCE
-    assert "TERMINAL_RESULT_BEFORE_TERMINAL_STATE" in view.conflicts
+    assert view.completeness is ReadCompleteness.CONFLICTING_EVIDENCE
+    assert "TERMINAL_RESULT_BEFORE_TERMINAL_STATE" in view.issues
 
 
 @pytest.mark.asyncio
-async def test_changed_terminal_status_conflicts():
+async def test_done_with_failed_result_conflicts():
     redis = FakeRedis(); seed(redis, state="done", result={"status":"failed","payload":"{}","result_event_id":"e1"})
     view = await DurableRunStatusResultReader(redis).read("r1")
-    assert "RUN_STATE_RESULT_STATUS_MISMATCH" in view.conflicts
+    assert view.completeness is ReadCompleteness.CONFLICTING_EVIDENCE
+    assert "RUN_STATE_RESULT_STATUS_MISMATCH" in view.issues
 
 
 @pytest.mark.asyncio
-async def test_malformed_payload_conflicts():
+async def test_failed_with_done_result_conflicts():
+    redis = FakeRedis(); seed(redis, state="failed", result={"status":"done","payload":"{}","result_event_id":"e1"})
+    view = await DurableRunStatusResultReader(redis).read("r1")
+    assert view.completeness is ReadCompleteness.CONFLICTING_EVIDENCE
+
+
+@pytest.mark.asyncio
+async def test_malformed_payload_is_incomplete_not_conflicting():
     redis = FakeRedis(); seed(redis, state="done", result={"status":"done","payload":"{","result_event_id":"e1"})
     view = await DurableRunStatusResultReader(redis).read("r1")
-    assert "RUN_RESULT_PAYLOAD_INVALID" in view.conflicts
+    assert view.completeness is ReadCompleteness.EVIDENCE_INCOMPLETE
+    assert "RUN_RESULT_PAYLOAD_INVALID" in view.issues
 
 
 @pytest.mark.asyncio
-async def test_wrong_key_type_conflicts():
+async def test_wrong_key_type_is_incomplete():
     redis = FakeRedis(); redis.hashes[RedisKey.run_state("r1")] = {"bad":"type"}
     view = await DurableRunStatusResultReader(redis).read("r1")
-    assert "RUN_STATE_WRONG_TYPE" in view.conflicts
+    assert view.completeness is ReadCompleteness.EVIDENCE_INCOMPLETE
+    assert "RUN_STATE_WRONG_TYPE" in view.issues
+
+
+@pytest.mark.asyncio
+async def test_unknown_state_is_preserved_and_incomplete():
+    redis = FakeRedis(); seed(redis, state="cancelled")
+    view = await DurableRunStatusResultReader(redis).read("r1")
+    assert view.status is ExternalRunStatus.UNKNOWN
+    assert view.internal_state == "cancelled"
+    assert view.completeness is ReadCompleteness.EVIDENCE_INCOMPLETE
+    assert "RUN_STATE_UNKNOWN" in view.issues
 
 
 @pytest.mark.asyncio
 async def test_expiring_freshness():
     redis = FakeRedis(); seed(redis, ttl=30)
     view = await DurableRunStatusResultReader(redis).read("r1")
-    assert view.freshness is ProjectionFreshness.EXPIRING
+    assert view.freshness is ReadFreshness.EXPIRING
+
+
+@pytest.mark.asyncio
+async def test_terminal_missing_result_can_have_current_surviving_evidence():
+    redis = FakeRedis(); seed(redis, state="done", meta={"result_event_id":"e1"}, ttl=3600)
+    view = await DurableRunStatusResultReader(redis).read("r1")
+    assert view.freshness is ReadFreshness.CURRENT
+    assert view.result_ttl_seconds == -2
+    assert view.completeness is ReadCompleteness.TERMINAL_WITHOUT_RESULT
+
+
+@pytest.mark.asyncio
+async def test_surviving_ttl_values_are_exposed():
+    redis = FakeRedis(); seed(redis, ttl=120)
+    view = await DurableRunStatusResultReader(redis).read("r1")
+    assert view.state_ttl_seconds == 120
+    assert view.meta_ttl_seconds == 120
+    assert view.result_ttl_seconds == -2
 
 
 @pytest.mark.asyncio
@@ -160,6 +192,15 @@ async def test_deterministic_serialization():
     first = (await reader.read("r1")).to_canonical_json()
     second = (await reader.read("r1")).to_canonical_json()
     assert first == second
+
+
+@pytest.mark.asyncio
+async def test_schema_contains_no_false_projection_or_revision_fields():
+    redis = FakeRedis(); seed(redis)
+    data = (await DurableRunStatusResultReader(redis).read("r1")).to_dict()
+    assert "projection_revision" not in data
+    assert "canonical_revision" not in data
+    assert "source_transition_id" not in data
 
 
 @pytest.mark.asyncio
