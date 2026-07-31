@@ -7,7 +7,7 @@ from hfa.config.keys import RedisKey
 from hfa_control.run_status_read_model import (
     DurableRunStatusResultReader,
     ExternalRunStatus,
-    ProjectionCompleteness,
+    ReadCompleteness,
 )
 from hfa_control.service import ControlPlaneService
 from hfa_control.models import ControlPlaneConfig
@@ -57,7 +57,7 @@ async def test_real_redis_running_view(real_redis, unique_ns):
     await real_redis.expire(RedisKey.run_meta(run_id), 86400)
     view = await DurableRunStatusResultReader(real_redis).read(run_id)
     assert view.status is ExternalRunStatus.RUNNING
-    assert view.completeness is ProjectionCompleteness.RUNNING_WITHOUT_RESULT
+    assert view.completeness is ReadCompleteness.RUNNING_WITHOUT_RESULT
 
 
 @pytest.mark.asyncio
@@ -80,13 +80,15 @@ async def test_real_redis_failed_result_consumable(real_redis, unique_ns):
 
 
 @pytest.mark.asyncio
-async def test_real_redis_missing_terminal_result_classified(real_redis, unique_ns):
-    run_id = f"{unique_ns}:expired"
+async def test_real_redis_missing_terminal_result_is_not_proven_expired(real_redis, unique_ns):
+    run_id = f"{unique_ns}:missing-result"
     await real_redis.set(RedisKey.run_state(run_id), "done", ex=86400)
     await real_redis.hset(RedisKey.run_meta(run_id), mapping={"run_id":run_id,"state":"done","result_event_id":"e"})
     await real_redis.expire(RedisKey.run_meta(run_id), 86400)
     view = await DurableRunStatusResultReader(real_redis).read(run_id)
-    assert view.completeness is ProjectionCompleteness.RESULT_EXPIRED
+    assert view.completeness is ReadCompleteness.TERMINAL_WITHOUT_RESULT
+    assert view.completeness_reason == "RESULT_MISSING_OR_EXPIRED"
+    assert view.result_ttl_seconds == -2
 
 
 @pytest.mark.asyncio
@@ -98,6 +100,7 @@ async def test_control_plane_combined_query(real_redis, unique_ns):
     assert result["schema_version"] == 1
     assert result["status"] == "COMPLETED"
     assert result["completeness"] == "TERMINAL_WITH_RESULT"
+    assert "projection_revision" not in result
 
 
 @pytest.mark.asyncio
