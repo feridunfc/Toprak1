@@ -43,7 +43,7 @@ jobs:
 
     steps:
       - name: Checkout exact PR HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
@@ -62,6 +62,8 @@ jobs:
               "sprint/83-5-user-facing-runtime-e2e"
           )
           allowlist = {
+              ".github/workflows/"
+              "sprint83-3-durable-status-result-read-model.yml",
               ".github/workflows/"
               "sprint83-5-user-facing-runtime-e2e.yml",
               "docs/implementation/sprint83/"
@@ -115,7 +117,7 @@ jobs:
           print("SPRINT83_5_SCOPE_OK", mode, sorted(changed))
           PY
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -251,8 +253,26 @@ jobs:
           git diff --check "$PR_BASE_SHA...HEAD"
 
       - name: Upload deterministic evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: >-
+          ${{
+            always()
+            && hashFiles('sprint83_5_unit.txt') != ''
+            && hashFiles('sprint83_5_integration.txt') != ''
+            && hashFiles('sprint83_5_regressions.txt') != ''
+            && hashFiles(
+              'sprint83_5_acceptance_stdout.json'
+            ) != ''
+            && hashFiles(
+              'sprint83_5_acceptance_repeat_stdout.json'
+            ) != ''
+            && hashFiles(
+              'local_out/sprint83/sprint83_5_user_facing_runtime_e2e.json'
+            ) != ''
+            && hashFiles(
+              'local_out/sprint83/sprint83_5_user_facing_runtime_e2e_repeat.json'
+            ) != ''
+          }}
+        uses: actions/upload-artifact@v6
         with:
           name: sprint83-5-user-facing-e2e-${{ github.run_id }}
           path: |
