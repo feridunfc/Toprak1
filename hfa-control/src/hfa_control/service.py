@@ -579,10 +579,16 @@ class ControlPlaneService:
         return await StateStore(self._redis).get_result(run_id)
 
     async def get_run_status_result(self, run_id: str) -> dict:
-        """Return a typed combined status/result view without mutating runtime state."""
-        from hfa_control.run_status_read_model import DurableRunStatusResultReader
+        """Return additive RUN status/result plus canonical single-TASK output."""
+        from hfa_control.user_facing_run_result import (
+            UserFacingSingleTaskRunReader,
+        )
 
-        return (await DurableRunStatusResultReader(self._redis).read(run_id)).to_dict()
+        return (
+            await UserFacingSingleTaskRunReader(
+                self._redis
+            ).read(run_id)
+        ).to_dict()
 
     async def list_stale_runs(self) -> list:
         import time

@@ -181,6 +181,13 @@ try:
         meta_ttl_seconds: int
         result_ttl_seconds: int
         issues: List[str] = Field(default_factory=list)
+        task_output_status: str = "RUN_UNKNOWN"
+        task_id: Optional[str] = None
+        task_state: Optional[str] = None
+        task_output: Any = None
+        task_output_issues: List[str] = Field(
+            default_factory=list
+        )
 
     class RunningRunSummary(_CompatModel):
         run_id: str
@@ -396,6 +403,13 @@ except ImportError:
         result_ttl_seconds: int
         task_counts: Dict[str, int] = field(default_factory=dict)
         issues: List[str] = field(default_factory=list)
+        task_output_status: str = "RUN_UNKNOWN"
+        task_id: Optional[str] = None
+        task_state: Optional[str] = None
+        task_output: Any = None
+        task_output_issues: List[str] = field(
+            default_factory=list
+        )
 
     @dataclass
     class RunningRunSummary(_DataclassModel):
