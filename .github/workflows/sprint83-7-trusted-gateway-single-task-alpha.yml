@@ -18,6 +18,7 @@ on:
       - 'hfa-worker/src/hfa_worker/process_root.py'
       - 'scripts/runtime_alpha_acceptance_83_7.py'
       - 'tests/integration/test_product_alpha_closure_e2e_83_7.py'
+      - 'tests/integration/test_run_status_result_read_model_integration.py'
       - 'tests/unit/test_product_alpha_failure_contract.py'
       - 'tests/unit/test_product_alpha_profile.py'
       - 'tests/unit/test_product_alpha_readiness.py'
@@ -97,6 +98,8 @@ jobs:
               "scripts/runtime_alpha_acceptance_83_7.py",
               "tests/integration/"
               "test_product_alpha_closure_e2e_83_7.py",
+              "tests/integration/"
+              "test_run_status_result_read_model_integration.py",
               "tests/unit/"
               "test_product_alpha_failure_contract.py",
               "tests/unit/test_product_alpha_profile.py",
@@ -239,6 +242,7 @@ jobs:
             tests/unit/test_run_submission_coordinator.py \
             tests/unit/test_run_status_result_read_model.py \
             tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
             tests/integration/test_product_alpha_closure_e2e_83_7.py \
             -q --tb=short \
             | tee sprint83_7_regressions.txt
@@ -246,7 +250,7 @@ jobs:
           ! grep -Eqi \
             'skipped|deselected|xfailed|xpassed' \
             sprint83_7_regressions.txt
-          grep -Eq '(^|[^0-9])168 passed' \
+          grep -Eq '(^|[^0-9])174 passed' \
             sprint83_7_regressions.txt
 
       - name: Authority and architecture boundary scan
@@ -570,6 +574,7 @@ jobs:
             tests/unit/test_product_alpha_failure_contract.py \
             tests/unit/test_run_status_result_read_model.py \
             tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
             tests/integration/test_product_alpha_closure_e2e_83_7.py
 
           git diff --check "$PR_BASE_SHA...HEAD"

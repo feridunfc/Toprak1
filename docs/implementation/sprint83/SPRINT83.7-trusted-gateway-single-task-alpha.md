@@ -7,7 +7,7 @@ status: IMPLEMENTED_WITH_LIMITATIONS
 target_claim: TRUSTED_GATEWAY_SINGLE_TASK_PRODUCT_ALPHA_READY
 local_runtime_acceptance: PASS_WITH_LIMITATIONS
 local_dedicated_redis_e2e: 2_PASSED
-local_combined_regression: 168_PASSED
+local_combined_regression: 174_PASSED
 ci_gate: REQUIRED
 production_ready: false
 ```
@@ -254,6 +254,12 @@ Sprint 83.7 intentionally does not derive RUN `RUNNING` from TASK truth and
 does not introduce a new RUN lifecycle writer merely to manufacture that
 status.
 
+RUN terminal state and the complete public result projection may become
+observable on adjacent read turns. Acceptance therefore polls until the
+terminal RUN has `TERMINAL_WITH_RESULT`, canonical terminal TASK state, and
+`task_output_status=AVAILABLE`; it does not treat a transient terminal,
+incomplete projection as the final product response.
+
 ## Terminal read and retention
 
 Successful single-task RUN:
@@ -352,7 +358,7 @@ Local observed evidence:
 
 ```yaml
 dedicated_real_redis_e2e: 2 passed
-combined_alpha_regression: 168 passed
+combined_alpha_regression: 174 passed
 compileall: PASS
 git_diff_check: PASS
 ```
@@ -376,11 +382,11 @@ production_cutover_authorized: false
 The Sprint 83.7 workflow enforces:
 
 - exact PR HEAD checkout;
-- exact 23-file feature scope on the sprint branch;
+- exact 24-file feature scope on the sprint branch;
 - no `local_out`, cache, or bytecode files in the commit;
 - 73 dedicated alpha contract tests;
 - 2 real-Redis integration tests;
-- 168 combined regression tests;
+- 174 combined regression tests, including 6 prior durable read-model integration cases;
 - no skipped, deselected, xfailed, or xpassed tests;
 - authority and architecture scans;
 - two byte-identical one-command acceptance reports;
@@ -409,6 +415,7 @@ hfa-worker/src/hfa_worker/main.py
 hfa-worker/src/hfa_worker/process_root.py
 scripts/runtime_alpha_acceptance_83_7.py
 tests/integration/test_product_alpha_closure_e2e_83_7.py
+tests/integration/test_run_status_result_read_model_integration.py
 tests/unit/test_product_alpha_failure_contract.py
 tests/unit/test_product_alpha_profile.py
 tests/unit/test_product_alpha_readiness.py

@@ -336,6 +336,44 @@ async def _run_status(
     return payload
 
 
+async def _complete_terminal_view(
+    client: httpx.AsyncClient,
+    *,
+    run_id: str,
+    tenant_id: str,
+    expected_status: str,
+    expected_task_state: str,
+):
+    # Require terminal authority and complete public result evidence.
+    payload = await _run_view(
+        client,
+        run_id=run_id,
+        tenant_id=tenant_id,
+    )
+    if payload is None:
+        return None
+    if payload.get("status") != expected_status:
+        return None
+    if payload.get("terminal") is not True:
+        return None
+    if (
+        payload.get("completeness")
+        != "TERMINAL_WITH_RESULT"
+    ):
+        return None
+    if (
+        payload.get("task_output_status")
+        != "AVAILABLE"
+    ):
+        return None
+    if (
+        payload.get("task_state")
+        != expected_task_state
+    ):
+        return None
+    return payload
+
+
 async def _task_state(
     redis_client,
     *,
@@ -633,13 +671,16 @@ async def _product_alpha_scenario(
 
         executor.success_release.set()
         success_terminal = await _wait_until(
-            lambda: _run_status(
+            lambda: _complete_terminal_view(
                 client,
                 run_id=success_run_id,
                 tenant_id=tenant_id,
                 expected_status="COMPLETED",
+                expected_task_state="done",
             ),
-            description="HTTP COMPLETED success view",
+            description=(
+                "complete HTTP COMPLETED success view"
+            ),
         )
 
         failure_submit = await client.post(
@@ -698,13 +739,16 @@ async def _product_alpha_scenario(
             )
         executor.failure_release.set()
         failure_terminal = await _wait_until(
-            lambda: _run_status(
+            lambda: _complete_terminal_view(
                 client,
                 run_id=failure_run_id,
                 tenant_id=tenant_id,
                 expected_status="FAILED",
+                expected_task_state="failed",
             ),
-            description="HTTP FAILED view",
+            description=(
+                "complete HTTP FAILED view"
+            ),
         )
 
         raw_failure_output = _decode(
@@ -780,14 +824,17 @@ async def _product_alpha_scenario(
         ):
             duplicate_terminals[run_id] = (
                 await _wait_until(
-                    lambda run_id=run_id: _run_status(
-                        client,
-                        run_id=run_id,
-                        tenant_id=tenant_id,
-                        expected_status="COMPLETED",
-                    ),
+                    lambda run_id=run_id:
+                        _complete_terminal_view(
+                            client,
+                            run_id=run_id,
+                            tenant_id=tenant_id,
+                            expected_status="COMPLETED",
+                            expected_task_state="done",
+                        ),
                     description=(
-                        f"duplicate POST terminal {run_id}"
+                        "complete duplicate POST terminal "
+                        f"{run_id}"
                     ),
                 )
             )

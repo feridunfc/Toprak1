@@ -76,7 +76,10 @@ async def test_real_redis_failed_result_consumable(real_redis, unique_ns):
     await seed_terminal(real_redis, run_id, "failed")
     view = await DurableRunStatusResultReader(real_redis).read(run_id)
     assert view.status is ExternalRunStatus.FAILED
-    assert view.error.code == "aggregate_task_failure"
+    assert view.error is not None
+    assert view.error.code == "EXECUTOR_FAILED"
+    assert view.error.message == "Task execution failed."
+    assert view.error.retryable is False
 
 
 @pytest.mark.asyncio
