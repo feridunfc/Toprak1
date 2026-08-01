@@ -260,6 +260,10 @@ jobs:
           import ast
           from pathlib import Path
 
+          from hfa_control.product_profile import (
+              canonical_result_retention_seconds,
+          )
+
           runtime_paths = (
               Path(
                   "hfa-control/src/hfa_control/"
@@ -337,7 +341,7 @@ jobs:
           ).read_text(encoding="utf-8")
           assert "SINGLE_TASK_ALPHA" in profile
           assert "TRUSTED_GATEWAY_HEADER" in profile
-          assert "86400" in profile
+          assert canonical_result_retention_seconds() == 86400
 
           run_reader = Path(
               "hfa-control/src/hfa_control/"
