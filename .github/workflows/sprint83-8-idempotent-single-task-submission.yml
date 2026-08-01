@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/workflows/sprint83-7-trusted-gateway-single-task-alpha.yml'
       - '.github/workflows/sprint83-8-idempotent-single-task-submission.yml'
       - 'docs/implementation/sprint83/SPRINT83.8-idempotent-single-task-submission.md'
       - 'hfa-core/src/hfa/config/keys.py'
@@ -68,6 +69,8 @@ jobs:
               "sprint/83-8-idempotent-single-task-submission"
           )
           allowlist = {
+              ".github/workflows/"
+              "sprint83-7-trusted-gateway-single-task-alpha.yml",
               ".github/workflows/"
               "sprint83-8-idempotent-single-task-submission.yml",
               "docs/implementation/sprint83/"

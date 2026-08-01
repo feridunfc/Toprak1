@@ -205,9 +205,10 @@ retention_seconds: 86400
 
 ## Exact source scope
 
-Exactly 15 files:
+Exactly 16 files:
 
 ```text
+.github/workflows/sprint83-7-trusted-gateway-single-task-alpha.yml
 .github/workflows/sprint83-8-idempotent-single-task-submission.yml
 docs/implementation/sprint83/SPRINT83.8-idempotent-single-task-submission.md
 hfa-core/src/hfa/config/keys.py
