@@ -1,0 +1,424 @@
+name: Sprint 83.8 Idempotent Single-Task Submission
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - '.github/workflows/sprint83-8-idempotent-single-task-submission.yml'
+      - 'docs/implementation/sprint83/SPRINT83.8-idempotent-single-task-submission.md'
+      - 'hfa-core/src/hfa/config/keys.py'
+      - 'hfa-core/src/hfa/lua/submission_idempotency.lua'
+      - 'hfa-control/src/hfa_control/api/models.py'
+      - 'hfa-control/src/hfa_control/api/router.py'
+      - 'hfa-control/src/hfa_control/run_submission.py'
+      - 'hfa-control/src/hfa_control/service.py'
+      - 'hfa-control/src/hfa_control/submission_idempotency.py'
+      - 'scripts/runtime_alpha_acceptance_83_7.py'
+      - 'scripts/runtime_alpha_acceptance_83_8.py'
+      - 'tests/integration/test_product_alpha_closure_e2e_83_7.py'
+      - 'tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py'
+      - 'tests/unit/test_product_alpha_readiness.py'
+      - 'tests/unit/test_submission_idempotency.py'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact Sprint 83.8 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = (
+              "sprint/83-8-idempotent-single-task-submission"
+          )
+          allowlist = {
+              ".github/workflows/"
+              "sprint83-8-idempotent-single-task-submission.yml",
+              "docs/implementation/sprint83/"
+              "SPRINT83.8-idempotent-single-task-submission.md",
+              "hfa-core/src/hfa/config/keys.py",
+              "hfa-core/src/hfa/lua/submission_idempotency.lua",
+              "hfa-control/src/hfa_control/api/models.py",
+              "hfa-control/src/hfa_control/api/router.py",
+              "hfa-control/src/hfa_control/run_submission.py",
+              "hfa-control/src/hfa_control/service.py",
+              "hfa-control/src/hfa_control/"
+              "submission_idempotency.py",
+              "scripts/runtime_alpha_acceptance_83_7.py",
+              "scripts/runtime_alpha_acceptance_83_8.py",
+              "tests/integration/"
+              "test_product_alpha_closure_e2e_83_7.py",
+              "tests/integration/"
+              "test_product_alpha_idempotent_submission_e2e_83_8.py",
+              "tests/unit/test_product_alpha_readiness.py",
+              "tests/unit/test_submission_idempotency.py",
+          }
+          changed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert changed == allowlist, {
+                  "missing": sorted(allowlist - changed),
+                  "unexpected": sorted(changed - allowlist),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              protected_runtime = {
+                  "hfa-core/src/hfa/config/keys.py",
+                  "hfa-core/src/hfa/lua/"
+                  "submission_idempotency.lua",
+                  "hfa-control/src/hfa_control/api/router.py",
+                  "hfa-control/src/hfa_control/run_submission.py",
+                  "hfa-control/src/hfa_control/service.py",
+                  "hfa-control/src/hfa_control/"
+                  "submission_idempotency.py",
+              }
+              assert changed & protected_runtime, {
+                  "mode": "future_runtime_regression",
+                  "changed": sorted(changed),
+                  "required_runtime_intersection": sorted(
+                      protected_runtime
+                  ),
+              }
+              mode = "RUNTIME_INTERSECTION"
+
+          forbidden = [
+              path
+              for path in changed
+              if path.startswith("local_out/")
+              or "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, {
+              "forbidden_generated_or_evidence_files":
+                  sorted(forbidden)
+          }
+
+          print(
+              "SPRINT83_8_SCOPE_OK",
+              mode,
+              f"changed_count={len(changed)}",
+              sorted(changed),
+          )
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -e hfa-core \
+            -e hfa-control \
+            -e hfa-worker \
+            -e hfa-tools
+          python -m pip install \
+            pytest \
+            pytest-asyncio \
+            redis \
+            fakeredis \
+            rfc8785 \
+            fastapi \
+            httpx \
+            uvicorn
+
+      - name: Dedicated idempotency contract tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_submission_idempotency.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            -q --tb=short \
+            | tee sprint83_8_contracts.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_8_contracts.txt
+          grep -Eq '(^|[^0-9])74 passed' \
+            sprint83_8_contracts.txt
+
+      - name: Real Redis Sprint 83.8 E2E
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py \
+            -q --tb=short \
+            | tee sprint83_8_integration.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_8_integration.txt
+          grep -Eq '(^|[^0-9])2 passed' \
+            sprint83_8_integration.txt
+
+      - name: Combined Sprint 83.7 and 83.8 E2E
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py \
+            -q --tb=short \
+            | tee sprint83_8_combined_e2e.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_8_combined_e2e.txt
+          grep -Eq '(^|[^0-9])4 passed' \
+            sprint83_8_combined_e2e.txt
+
+      - name: Complete Sprint 83.7 and 83.8 regression set
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/unit/test_submission_idempotency.py \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/core/test_production_scheduler_composition_contract.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py \
+            -q --tb=short \
+            | tee sprint83_8_regressions.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_8_regressions.txt
+          grep -Eq '(^|[^0-9])196 passed' \
+            sprint83_8_regressions.txt
+
+      - name: Authority and architecture boundary scan
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          runtime_paths = (
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "submission_idempotency.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "run_submission.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/service.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/api/router.py"
+              ),
+              Path(
+                  "scripts/runtime_alpha_acceptance_83_8.py"
+              ),
+          )
+
+          for path in runtime_paths:
+              text = path.read_text(encoding="utf-8")
+              tree = ast.parse(text, filename=str(path))
+              assert "hfa.loop_plane" not in text, path
+              assert "LoopPlane" not in text, path
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          assert not alias.name.startswith(
+                              "hfa.loop_plane"
+                          ), (path, alias.name)
+                  elif isinstance(node, ast.ImportFrom):
+                      assert not (
+                          node.module or ""
+                      ).startswith("hfa.loop_plane"), (
+                          path,
+                          node.module,
+                      )
+
+          lua = Path(
+              "hfa-core/src/hfa/lua/"
+              "submission_idempotency.lua"
+          ).read_text(encoding="utf-8")
+          for action in ('"reserve"', '"finalize"', '"release"'):
+              assert action in lua, action
+          for forbidden in (
+              "run:state",
+              "run:meta",
+              "run:result",
+              "task:state",
+              "XADD",
+              "ZADD",
+              "SADD",
+          ):
+              assert forbidden not in lua, forbidden
+
+          keys = Path(
+              "hfa-core/src/hfa/config/keys.py"
+          ).read_text(encoding="utf-8")
+          assert "submission_idempotency" in keys
+          assert "SUBMISSION_IDEMPOTENCY" in keys
+
+          coordinator = Path(
+              "hfa-control/src/hfa_control/"
+              "run_submission.py"
+          ).read_text(encoding="utf-8")
+          assert "IDEMPOTENCY_KEY_REUSED" in coordinator
+          assert "IDEMPOTENCY_IN_PROGRESS" in coordinator
+          assert "IDEMPOTENCY_STORE_FAILED" in coordinator
+          assert "idempotent_replay" in coordinator
+          assert "automatic_repair=False" in coordinator
+
+          acceptance = Path(
+              "scripts/runtime_alpha_acceptance_83_8.py"
+          ).read_text(encoding="utf-8")
+          for forbidden in (
+              "task_dispatch_commit(",
+              "task_claim_start(",
+              "task_complete(",
+              "automatic_repair_used\": True",
+              "new_lifecycle_writer\": True",
+          ):
+              assert forbidden not in acceptance, forbidden
+
+          print(
+              "SPRINT83_8_AUTHORITY_SCAN_OK",
+              "new_lifecycle_writer=0",
+              "automatic_repair=0",
+              "stale_owner_takeover=0",
+              "production_cutover=0",
+          )
+          PY
+
+      - name: Deterministic one-command product acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out/sprint83
+
+          python scripts/runtime_alpha_acceptance_83_8.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s83-8-ci \
+            --reset-test-db \
+            --out \
+              local_out/sprint83/sprint83_8_idempotent_submission.json \
+            --json \
+            > sprint83_8_acceptance_stdout.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(
+              "local_out/sprint83/"
+              "sprint83_8_idempotent_submission.json"
+          )
+          report = json.loads(path.read_text(encoding="utf-8"))
+
+          assert report["status"] == "PASS_WITH_LIMITATIONS"
+          assert report["submission_idempotency_supported"] is True
+          assert report["same_key_same_request_replay"] is True
+          assert report["same_key_different_request_conflict"] is True
+          assert report["concurrent_in_progress_fail_closed"] is True
+          assert report["composition_restart_durability"] is True
+          assert report["corrupt_evidence_fail_closed"] is True
+          assert report["tenant_scoped_namespace"] is True
+          assert report["zero_replay_lifecycle_writes"] is True
+          assert report["retention_seconds"] == 86400
+          assert report["production_ready"] is False
+          assert report["automatic_repair"] is False
+          assert report["stale_owner_takeover"] is False
+          assert report["production_cutover_authorized"] is False
+
+          print(
+              "SPRINT83_8_ACCEPTANCE_OK",
+              report["status"],
+          )
+          PY
+
+      - name: Compile and whitespace checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m compileall -q \
+            hfa-core/src/hfa \
+            hfa-control/src/hfa_control \
+            scripts/runtime_alpha_acceptance_83_7.py \
+            scripts/runtime_alpha_acceptance_83_8.py \
+            tests/unit/test_submission_idempotency.py \
+            tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py
+
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint83-8-idempotent-single-task-submission
+          if-no-files-found: error
+          path: |
+            local_out/sprint83/sprint83_8_idempotent_submission.json
+            sprint83_8_acceptance_stdout.json
+            sprint83_8_contracts.txt
+            sprint83_8_integration.txt
+            sprint83_8_combined_e2e.txt
+            sprint83_8_regressions.txt

@@ -182,6 +182,7 @@ try:
         automatic_retry: bool
         automatic_rollback: bool
         automatic_repair: bool
+        idempotent_replay: bool = False
 
     class RunStatusResultResponse(_CompatModel):
         schema_version: int
@@ -428,6 +429,7 @@ except ImportError:
         automatic_retry: bool
         automatic_rollback: bool
         automatic_repair: bool
+        idempotent_replay: bool = False
 
     @dataclass
     class RunStatusResultResponse(_DataclassModel):

@@ -379,9 +379,18 @@ async def submit_run(
     body: RunSubmissionRequest,
     request: Request,
     x_tenant_id: str = Header(...),
+    idempotency_key: str = Header(
+        default="",
+        alias="Idempotency-Key",
+    ),
 ):
-    """Tenant-scoped canonical single-task RUN submission."""
+    """Tenant-scoped idempotent single-task RUN submission."""
     tenant_id = _tenant_header(x_tenant_id)
+    normalized_idempotency_key = (
+        idempotency_key
+        if isinstance(idempotency_key, str)
+        else ""
+    )
     data = await request.app.state.cp.submit_single_task_run(
         SingleTaskRunSubmission(
             tenant_id=tenant_id,
@@ -395,10 +404,18 @@ async def submit_run(
             required_capabilities=tuple(body.required_capabilities),
             trace_parent=body.trace_parent,
             trace_state=body.trace_state,
+            idempotency_key=(
+                normalized_idempotency_key
+            ),
         )
     )
     response = RunSubmissionResponse(**data)
     if response.status == "ACCEPTED":
+        if response.idempotent_replay:
+            return JSONResponse(
+                status_code=200,
+                content=response.model_dump(),
+            )
         return response
 
     if response.status == "SUBMISSION_INCOMPLETE":
@@ -406,8 +423,14 @@ async def submit_run(
     elif response.failure_code in {
         "INVALID_REQUEST",
         "UNSUPPORTED_RUN_SHAPE",
+        "INVALID_IDEMPOTENCY_KEY",
     }:
         status_code = 400
+    elif response.failure_code in {
+        "IDEMPOTENCY_KEY_REUSED",
+        "IDEMPOTENCY_IN_PROGRESS",
+    }:
+        status_code = 409
     else:
         status_code = 503
 
