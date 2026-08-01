@@ -11,6 +11,10 @@ from enum import Enum
 from typing import List
 
 from hfa.config.keys import RedisKey
+from hfa_control.product_profile import (
+    ProductMode,
+    TenantIdentityBoundary,
+)
 
 
 class WorkerStatus(str, Enum):
@@ -138,6 +142,11 @@ class ControlPlaneConfig:
 
     # Sprint 23: CAS-only enforcement (production should set True)
     strict_cas_mode: bool = False
+    # Sprint 83.7 product profile; legacy runtime remains default.
+    product_mode: str = ProductMode.RUNTIME_INTERNAL.value
+    tenant_identity_boundary: str = (
+        TenantIdentityBoundary.INTERNAL_UNSPECIFIED.value
+    )
 
     # Sprint 19 dispatch pacing
     dispatch_tokens_capacity: int = 128

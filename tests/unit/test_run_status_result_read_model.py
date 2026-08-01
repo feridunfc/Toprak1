@@ -92,7 +92,10 @@ async def test_failed_with_error():
     redis = FakeRedis(); seed(redis, state="failed", meta={"result_event_id":"e1"}, result={"run_id":"r1","status":"failed","payload":"{}","completed_at":"2.0","result_event_id":"e1","error":"aggregate_task_failure"})
     view = await DurableRunStatusResultReader(redis).read("r1")
     assert view.status is ExternalRunStatus.FAILED
-    assert view.error.code == "aggregate_task_failure"
+    assert view.error.code == "EXECUTOR_FAILED"
+    assert view.error.message == "Task execution failed."
+    assert view.error.retryable is False
+    assert view.error.summary == "Task execution failed."
 
 
 @pytest.mark.asyncio

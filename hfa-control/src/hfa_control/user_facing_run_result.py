@@ -12,6 +12,7 @@ from hfa_control.run_status_read_model import (
     ExternalRunStatus,
     ReadCompleteness,
     RunStatusResultView,
+    public_executor_failure_payload,
 )
 
 
@@ -272,6 +273,17 @@ class UserFacingSingleTaskRunReader:
                 task_state=task_state or None,
                 issues=(
                     "RUN_TASK_TERMINAL_STATE_MISMATCH",
+                ),
+            )
+
+        if run.status is ExternalRunStatus.FAILED:
+            return self._view(
+                run,
+                TaskOutputStatus.AVAILABLE,
+                task_id=task_id,
+                task_state=task_state,
+                task_output=(
+                    public_executor_failure_payload()
                 ),
             )
 

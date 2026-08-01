@@ -1,0 +1,617 @@
+name: Sprint 83.7 Trusted-Gateway Single-Task Alpha
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-control/src/hfa_control/api/models.py'
+      - 'hfa-control/src/hfa_control/api/router.py'
+      - 'hfa-control/src/hfa_control/models.py'
+      - 'hfa-control/src/hfa_control/product_profile.py'
+      - 'hfa-control/src/hfa_control/run_status_read_model.py'
+      - 'hfa-control/src/hfa_control/run_submission.py'
+      - 'hfa-control/src/hfa_control/service.py'
+      - 'hfa-control/src/hfa_control/user_facing_run_result.py'
+      - 'hfa-worker/src/hfa_worker/executor.py'
+      - 'hfa-worker/src/hfa_worker/fake_executor.py'
+      - 'hfa-worker/src/hfa_worker/main.py'
+      - 'hfa-worker/src/hfa_worker/process_root.py'
+      - 'scripts/runtime_alpha_acceptance_83_7.py'
+      - 'tests/integration/test_product_alpha_closure_e2e_83_7.py'
+      - 'tests/integration/test_run_status_result_read_model_integration.py'
+      - 'tests/unit/test_product_alpha_failure_contract.py'
+      - 'tests/unit/test_product_alpha_profile.py'
+      - 'tests/unit/test_product_alpha_readiness.py'
+      - 'tests/unit/test_product_alpha_run_shape.py'
+      - 'tests/unit/test_product_alpha_worker_capabilities.py'
+      - 'tests/unit/test_run_status_result_read_model.py'
+      - 'tests/unit/test_user_facing_run_result.py'
+      - 'docs/implementation/sprint83/SPRINT83.7-trusted-gateway-single-task-alpha.md'
+      - '.github/workflows/sprint83-7-trusted-gateway-single-task-alpha.yml'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact Sprint 83.7 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = (
+              "sprint/83-7-trusted-gateway-single-task-alpha"
+          )
+          allowlist = {
+              ".github/workflows/"
+              "sprint83-7-trusted-gateway-single-task-alpha.yml",
+              "docs/implementation/sprint83/"
+              "SPRINT83.7-trusted-gateway-single-task-alpha.md",
+              "hfa-control/src/hfa_control/api/models.py",
+              "hfa-control/src/hfa_control/api/router.py",
+              "hfa-control/src/hfa_control/models.py",
+              "hfa-control/src/hfa_control/product_profile.py",
+              "hfa-control/src/hfa_control/"
+              "run_status_read_model.py",
+              "hfa-control/src/hfa_control/run_submission.py",
+              "hfa-control/src/hfa_control/service.py",
+              "hfa-control/src/hfa_control/"
+              "user_facing_run_result.py",
+              "hfa-worker/src/hfa_worker/executor.py",
+              "hfa-worker/src/hfa_worker/fake_executor.py",
+              "hfa-worker/src/hfa_worker/main.py",
+              "hfa-worker/src/hfa_worker/process_root.py",
+              "scripts/runtime_alpha_acceptance_83_7.py",
+              "tests/integration/"
+              "test_product_alpha_closure_e2e_83_7.py",
+              "tests/integration/"
+              "test_run_status_result_read_model_integration.py",
+              "tests/unit/"
+              "test_product_alpha_failure_contract.py",
+              "tests/unit/test_product_alpha_profile.py",
+              "tests/unit/test_product_alpha_readiness.py",
+              "tests/unit/test_product_alpha_run_shape.py",
+              "tests/unit/"
+              "test_product_alpha_worker_capabilities.py",
+              "tests/unit/"
+              "test_run_status_result_read_model.py",
+              "tests/unit/test_user_facing_run_result.py",
+          }
+          changed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert changed == allowlist, {
+                  "missing": sorted(allowlist - changed),
+                  "unexpected": sorted(changed - allowlist),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              protected_runtime = {
+                  "hfa-control/src/hfa_control/product_profile.py",
+                  "hfa-control/src/hfa_control/run_submission.py",
+                  "hfa-control/src/hfa_control/"
+                  "run_status_read_model.py",
+                  "hfa-control/src/hfa_control/"
+                  "user_facing_run_result.py",
+                  "hfa-control/src/hfa_control/service.py",
+                  "hfa-worker/src/hfa_worker/main.py",
+                  "hfa-worker/src/hfa_worker/process_root.py",
+              }
+              assert changed & protected_runtime, {
+                  "mode": "future_runtime_regression",
+                  "changed": sorted(changed),
+                  "required_runtime_intersection": sorted(
+                      protected_runtime
+                  ),
+              }
+              mode = "RUNTIME_INTERSECTION"
+
+          forbidden = [
+              path
+              for path in changed
+              if path.startswith("local_out/")
+              or "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, {
+              "forbidden_generated_or_evidence_files":
+                  sorted(forbidden)
+          }
+
+          print(
+              "SPRINT83_7_SCOPE_OK",
+              mode,
+              f"changed_count={len(changed)}",
+              sorted(changed),
+          )
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -e hfa-core \
+            -e hfa-control \
+            -e hfa-worker \
+            -e hfa-tools
+          python -m pip install \
+            pytest \
+            pytest-asyncio \
+            redis \
+            fakeredis \
+            rfc8785 \
+            fastapi \
+            httpx \
+            uvicorn
+
+      - name: Dedicated alpha contract tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            -q --tb=short \
+            | tee sprint83_7_contracts.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_7_contracts.txt
+          grep -Eq '(^|[^0-9])73 passed' \
+            sprint83_7_contracts.txt
+
+      - name: Real Redis product alpha E2E
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            -q --tb=short \
+            | tee sprint83_7_integration.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_7_integration.txt
+          grep -Eq '(^|[^0-9])2 passed' \
+            sprint83_7_integration.txt
+
+      - name: Complete Sprint 83.7 regression set
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/core/test_production_scheduler_composition_contract.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            -q --tb=short \
+            | tee sprint83_7_regressions.txt
+
+          ! grep -Eqi \
+            'skipped|deselected|xfailed|xpassed' \
+            sprint83_7_regressions.txt
+          grep -Eq '(^|[^0-9])174 passed' \
+            sprint83_7_regressions.txt
+
+      - name: Authority and architecture boundary scan
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          from hfa_control.product_profile import (
+              canonical_result_retention_seconds,
+          )
+
+          runtime_paths = (
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "product_profile.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "run_submission.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "run_status_read_model.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "user_facing_run_result.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/service.py"
+              ),
+              Path(
+                  "hfa-worker/src/hfa_worker/main.py"
+              ),
+              Path(
+                  "hfa-worker/src/hfa_worker/process_root.py"
+              ),
+              Path(
+                  "scripts/"
+                  "runtime_alpha_acceptance_83_7.py"
+              ),
+          )
+
+          for path in runtime_paths:
+              text = path.read_text(encoding="utf-8")
+              tree = ast.parse(text, filename=str(path))
+              assert "hfa.loop_plane" not in text, path
+              assert "LoopPlane" not in text, path
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          assert not alias.name.startswith(
+                              "hfa.loop_plane"
+                          ), (path, alias.name)
+                  elif isinstance(node, ast.ImportFrom):
+                      assert not (
+                          node.module or ""
+                      ).startswith("hfa.loop_plane"), (
+                          path,
+                          node.module,
+                      )
+
+          acceptance = Path(
+              "scripts/runtime_alpha_acceptance_83_7.py"
+          ).read_text(encoding="utf-8")
+          forbidden_acceptance_tokens = (
+              "task_dispatch_commit(",
+              "task_claim_start(",
+              "task_complete(",
+              "redis_client.set(",
+              "redis_client.hset(",
+              "redis_client.sadd(",
+              "redis_client.zadd(",
+              "redis_client.xadd(",
+              "redis_client.delete(",
+              "direct_dispatch_call_used\": True",
+              "direct_lifecycle_write_used\": True",
+              "new_lifecycle_writer\": True",
+          )
+          for token in forbidden_acceptance_tokens:
+              assert token not in acceptance, token
+
+          profile = Path(
+              "hfa-control/src/hfa_control/"
+              "product_profile.py"
+          ).read_text(encoding="utf-8")
+          assert "SINGLE_TASK_ALPHA" in profile
+          assert "TRUSTED_GATEWAY_HEADER" in profile
+          assert canonical_result_retention_seconds() == 86400
+
+          run_reader = Path(
+              "hfa-control/src/hfa_control/"
+              "run_status_read_model.py"
+          ).read_text(encoding="utf-8")
+          assert (
+              '"admitted": ExternalRunStatus.QUEUED'
+              in run_reader
+          )
+          assert "EXECUTOR_FAILED" in run_reader
+          assert "Task execution failed." in run_reader
+
+          print(
+              "SPRINT83_7_AUTHORITY_SCAN_OK",
+              "new_lifecycle_writer=0",
+              "direct_dispatch=0",
+              "Loop_Plane_dependencies=0",
+              "public_RUN_RUNNING_claim=0",
+              "trusted_gateway_boundary=1",
+          )
+          PY
+
+      - name: Deterministic one-command product acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out/sprint83
+
+          python scripts/runtime_alpha_acceptance_83_7.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s83-7-ci \
+            --reset-test-db \
+            --out local_out/sprint83/sprint83_7_product_alpha.json \
+            --json \
+            > sprint83_7_acceptance_stdout.json
+
+          python scripts/runtime_alpha_acceptance_83_7.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s83-7-ci \
+            --reset-test-db \
+            --out local_out/sprint83/sprint83_7_product_alpha_repeat.json \
+            --json \
+            > sprint83_7_acceptance_repeat_stdout.json
+
+          cmp \
+            local_out/sprint83/sprint83_7_product_alpha.json \
+            local_out/sprint83/sprint83_7_product_alpha_repeat.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(
+              "local_out/sprint83/"
+              "sprint83_7_product_alpha.json"
+          )
+          report = json.loads(
+              path.read_text(encoding="utf-8")
+          )
+
+          assert report["status"] == "PASS_WITH_LIMITATIONS"
+          assert report[
+              "trusted_gateway_product_alpha_ready"
+          ] is True
+          assert report["product_alpha_ready"] is True
+          assert report[
+              "internal_product_alpha_ready"
+          ] is True
+          assert report[
+              "direct_public_multitenant_alpha_ready"
+          ] is False
+          assert report["production_ready"] is False
+          assert report[
+              "public_run_running_supported"
+          ] is False
+          assert report[
+              "canonical_task_running_observed"
+          ] is True
+          assert report["success_path"] is True
+          assert report["failure_path"] is True
+          assert report[
+              "sanitized_failure_contract"
+          ] is True
+          assert report[
+              "control_service_restart_durability"
+          ] is True
+          assert report[
+              "worker_service_restart_durability"
+          ] is True
+          assert report[
+              "duplicate_get_zero_writes"
+          ] is True
+          assert report[
+              "duplicate_post_distinct_run"
+          ] is True
+          assert report["tenant_isolation"] is True
+          assert report[
+              "unsupported_multi_task_zero_writes"
+          ] is True
+          assert report[
+              "submission_idempotency_supported"
+          ] is False
+          assert report["multi_task_support"] is False
+          assert report["cancel_supported"] is False
+          assert report["retry_supported"] is False
+          assert report[
+              "external_executor_cutover"
+          ] is False
+          assert report["automatic_repair"] is False
+          assert report["archive_available"] is False
+          assert report["new_lifecycle_writer"] is False
+          assert report[
+              "direct_lifecycle_write_used"
+          ] is False
+          assert report[
+              "direct_dispatch_call_used"
+          ] is False
+          assert report["Loop_Plane_dependencies"] == 0
+          assert report[
+              "production_cutover_authorized"
+          ] is False
+
+          scenario = report["scenarios"][0]
+          assert scenario["status"] == "PASS"
+          assert scenario[
+              "initial_product_readiness"
+          ]["ready"] is True
+          assert scenario[
+              "initial_product_readiness"
+          ]["product_mode"] == "SINGLE_TASK_ALPHA"
+          assert scenario[
+              "initial_product_readiness"
+          ]["tenant_identity_boundary"] == (
+              "TRUSTED_GATEWAY_HEADER"
+          )
+          assert scenario[
+              "initial_product_readiness"
+          ]["result_retention_seconds"] == 86400
+
+          assert scenario["success"]["queued_status"] == "QUEUED"
+          assert scenario["success"][
+              "task_running_state"
+          ] == "running"
+          assert scenario["success"][
+              "public_run_status_while_task_running"
+          ] == "QUEUED"
+          assert scenario["success"][
+              "terminal_status"
+          ] == "COMPLETED"
+          assert scenario["success"][
+              "terminal_outcome"
+          ] == "SUCCESS"
+
+          assert scenario["failure"][
+              "task_running_state"
+          ] == "running"
+          assert scenario["failure"][
+              "public_run_status_while_task_running"
+          ] == "QUEUED"
+          assert scenario["failure"][
+              "terminal_status"
+          ] == "FAILED"
+          assert scenario["failure"][
+              "terminal_outcome"
+          ] == "FAILURE"
+          expected_failure = {
+              "code": "EXECUTOR_FAILED",
+              "message": "Task execution failed.",
+              "retryable": False,
+          }
+          assert scenario["failure"][
+              "public_error"
+          ] == expected_failure
+          assert scenario["failure"][
+              "public_task_output"
+          ] == expected_failure
+          assert scenario["failure"][
+              "raw_failure_output_contains_private"
+          ] is False
+          assert scenario["failure"][
+              "public_response_contains_private"
+          ] is False
+
+          assert scenario["contract"][
+              "unsupported_multi_task_status_code"
+          ] == 400
+          assert scenario["contract"][
+              "unsupported_multi_task_failure_code"
+          ] == "UNSUPPORTED_RUN_SHAPE"
+          assert scenario["contract"][
+              "unsupported_multi_task_zero_new_keys"
+          ] is True
+          assert scenario["contract"][
+              "duplicate_post_distinct_run"
+          ] is True
+          assert scenario["contract"][
+              "duplicate_get_zero_writes"
+          ] is True
+          assert scenario["contract"][
+              "tenant_isolation_status_code"
+          ] == 403
+          assert scenario["contract"][
+              "unknown_run_status_code"
+          ] == 404
+
+          assert scenario["durability"][
+              "control_service_restart_semantics_stable"
+          ] is True
+          assert scenario["durability"][
+              "worker_service_restart_semantics_stable"
+          ] is True
+          assert scenario["durability"][
+              "replacement_executor_call_count"
+          ] == 0
+          assert scenario["durability"][
+              "original_executor_call_count"
+          ] == 4
+          assert scenario["durability"][
+              "pending_count"
+          ] == 0
+          PY
+
+      - name: Compile and whitespace checks
+        shell: bash
+        run: |
+          python -m compileall -q \
+            hfa-control/src/hfa_control \
+            hfa-worker/src/hfa_worker \
+            scripts/runtime_alpha_acceptance_83_7.py \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py
+
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: >-
+          ${{
+            always()
+            && hashFiles('sprint83_7_contracts.txt') != ''
+            && hashFiles('sprint83_7_integration.txt') != ''
+            && hashFiles('sprint83_7_regressions.txt') != ''
+            && hashFiles(
+              'sprint83_7_acceptance_stdout.json'
+            ) != ''
+            && hashFiles(
+              'sprint83_7_acceptance_repeat_stdout.json'
+            ) != ''
+            && hashFiles(
+              'local_out/sprint83/sprint83_7_product_alpha.json'
+            ) != ''
+            && hashFiles(
+              'local_out/sprint83/sprint83_7_product_alpha_repeat.json'
+            ) != ''
+          }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: sprint83-7-trusted-gateway-alpha-${{ github.run_id }}
+          path: |
+            sprint83_7_contracts.txt
+            sprint83_7_integration.txt
+            sprint83_7_regressions.txt
+            sprint83_7_acceptance_stdout.json
+            sprint83_7_acceptance_repeat_stdout.json
+            local_out/sprint83/sprint83_7_product_alpha.json
+            local_out/sprint83/sprint83_7_product_alpha_repeat.json
+          if-no-files-found: error

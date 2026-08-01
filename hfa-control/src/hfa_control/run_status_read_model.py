@@ -84,10 +84,38 @@ def _freshness(ttls: tuple[int, ...], *, exists: bool) -> ReadFreshness:
     return ReadFreshness.CURRENT
 
 
+PUBLIC_EXECUTOR_FAILURE_CODE = "EXECUTOR_FAILED"
+PUBLIC_EXECUTOR_FAILURE_MESSAGE = "Task execution failed."
+
+
 @dataclass(frozen=True)
 class RunErrorView:
-    code: str | None
-    summary: str | None
+    code: str
+    message: str
+    retryable: bool
+
+    @property
+    def summary(self) -> str:
+        return self.message
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+
+
+def public_executor_failure_view() -> RunErrorView:
+    return RunErrorView(
+        code=PUBLIC_EXECUTOR_FAILURE_CODE,
+        message=PUBLIC_EXECUTOR_FAILURE_MESSAGE,
+        retryable=False,
+    )
+
+
+def public_executor_failure_payload() -> dict[str, Any]:
+    return public_executor_failure_view().to_dict()
 
 
 @dataclass(frozen=True)
@@ -214,9 +242,9 @@ class DurableRunStatusResultReader:
                 completed_at=_safe_float(result_record.get("completed_at")),
                 result_event_id=result_event_id,
             )
-            error_text = result_record.get("error", "").strip()
-            if error_text:
-                error_view = RunErrorView(code=error_text, summary=error_text)
+            # Raw durable executor/provider error text is internal evidence.
+            if status is ExternalRunStatus.FAILED:
+                error_view = public_executor_failure_view()
 
         if result_record and not terminal:
             contradictions.append("TERMINAL_RESULT_BEFORE_TERMINAL_STATE")
