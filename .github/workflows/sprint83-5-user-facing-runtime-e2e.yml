@@ -1,0 +1,286 @@
+name: Sprint 83.5 User-Facing Runtime E2E
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-control/src/hfa_control/api/models.py'
+      - 'hfa-control/src/hfa_control/api/router.py'
+      - 'hfa-control/src/hfa_control/run_submission.py'
+      - 'hfa-control/src/hfa_control/service.py'
+      - 'scripts/runtime_alpha_acceptance_83_5.py'
+      - 'tests/unit/test_run_submission_coordinator.py'
+      - 'tests/integration/test_user_facing_runtime_e2e_83_5.py'
+      - 'docs/implementation/sprint83/SPRINT83.5-user-facing-runtime-e2e.md'
+      - '.github/workflows/sprint83-5-user-facing-runtime-e2e.yml'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact Sprint 83.5 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = (
+              "sprint/83-5-user-facing-runtime-e2e"
+          )
+          allowlist = {
+              ".github/workflows/"
+              "sprint83-3-durable-status-result-read-model.yml",
+              ".github/workflows/"
+              "sprint83-5-user-facing-runtime-e2e.yml",
+              "docs/implementation/sprint83/"
+              "SPRINT83.5-user-facing-runtime-e2e.md",
+              "hfa-control/src/hfa_control/api/models.py",
+              "hfa-control/src/hfa_control/api/router.py",
+              "hfa-control/src/hfa_control/run_submission.py",
+              "hfa-control/src/hfa_control/service.py",
+              "scripts/runtime_alpha_acceptance_83_5.py",
+              "tests/integration/"
+              "test_user_facing_runtime_e2e_83_5.py",
+              "tests/unit/"
+              "test_run_submission_coordinator.py",
+          }
+          changed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert changed == allowlist, {
+                  "missing": sorted(allowlist - changed),
+                  "unexpected": sorted(changed - allowlist),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              runtime = {
+                  "hfa-control/src/hfa_control/api/models.py",
+                  "hfa-control/src/hfa_control/api/router.py",
+                  "hfa-control/src/hfa_control/run_submission.py",
+                  "hfa-control/src/hfa_control/service.py",
+              }
+              assert changed & runtime, sorted(changed)
+              mode = "RUNTIME_INTERSECTION"
+
+          forbidden = [
+              path
+              for path in changed
+              if "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, forbidden
+          print("SPRINT83_5_SCOPE_OK", mode, sorted(changed))
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install             -e hfa-core             -e hfa-control             -e hfa-worker             -e hfa-tools
+          python -m pip install             pytest             pytest-asyncio             redis             fakeredis             rfc8785             fastapi             httpx             uvicorn
+
+      - name: Dedicated unit and HTTP contract
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest             tests/unit/test_run_submission_coordinator.py             -q --tb=short             | tee sprint83_5_unit.txt
+
+          ! grep -Eqi             'skipped|deselected|xfailed|xpassed'             sprint83_5_unit.txt
+          grep -Eq '(^|[^0-9])19 passed' sprint83_5_unit.txt
+
+      - name: Real Redis E2E and prior bindings
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest             tests/integration/test_user_facing_runtime_e2e_83_5.py             tests/integration/test_task_admit_authority_binding_integration.py             tests/integration/test_run_status_result_read_model_integration.py             tests/integration/test_production_run_finalization_binding_integration.py             -q --tb=short             | tee sprint83_5_integration.txt
+
+          ! grep -Eqi             'skipped|deselected|xfailed|xpassed'             sprint83_5_integration.txt
+          grep -Eq '(^|[^0-9])44 passed' sprint83_5_integration.txt
+
+      - name: Focused production regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest             tests/unit/test_run_submission_coordinator.py             tests/core/test_production_scheduler_composition_contract.py             tests/core/test_production_run_finalization_binding.py             tests/unit/test_run_status_result_read_model.py             -q --tb=short             | tee sprint83_5_regressions.txt
+
+          ! grep -Eqi             'skipped|deselected|xfailed|xpassed'             sprint83_5_regressions.txt
+          grep -Eq '(^|[^0-9])71 passed' sprint83_5_regressions.txt
+
+      - name: Boundary scan
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          acceptance = Path(
+              "scripts/runtime_alpha_acceptance_83_5.py"
+          )
+          text = acceptance.read_text(encoding="utf-8")
+          tree = ast.parse(text, filename=str(acceptance))
+
+          forbidden_tokens = (
+              "worker._dag_lua",
+              "task_dispatch_commit(",
+              "task_claim_start(",
+              "redis_client.set(",
+              "redis_client.hset(",
+              "redis_client.xadd(",
+              "hfa.loop_plane",
+              "LoopPlane",
+          )
+          for token in forbidden_tokens:
+              assert token not in text, token
+
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  for alias in node.names:
+                      assert not alias.name.startswith(
+                          "hfa.loop_plane"
+                      )
+              elif isinstance(node, ast.ImportFrom):
+                  assert not (
+                      node.module or ""
+                  ).startswith("hfa.loop_plane")
+
+          print(
+              "SPRINT83_5_BOUNDARY_SCAN_OK",
+              "new_lifecycle_writer=0",
+              "direct_dispatch=0",
+              "Loop_Plane_dependencies=0",
+          )
+          PY
+
+      - name: Deterministic one-command acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out/sprint83
+
+          python scripts/runtime_alpha_acceptance_83_5.py             --redis-url "$REDIS_URL"             --acceptance-id s83-5-ci             --reset-test-db             --out local_out/sprint83/sprint83_5_user_facing_runtime_e2e.json             --json             > sprint83_5_acceptance_stdout.json
+
+          python scripts/runtime_alpha_acceptance_83_5.py             --redis-url "$REDIS_URL"             --acceptance-id s83-5-ci             --reset-test-db             --out local_out/sprint83/sprint83_5_user_facing_runtime_e2e_repeat.json             --json             > sprint83_5_acceptance_repeat_stdout.json
+
+          cmp             local_out/sprint83/sprint83_5_user_facing_runtime_e2e.json             local_out/sprint83/sprint83_5_user_facing_runtime_e2e_repeat.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(
+              "local_out/sprint83/"
+              "sprint83_5_user_facing_runtime_e2e.json"
+          )
+          report = json.loads(
+              path.read_text(encoding="utf-8")
+          )
+          assert report["status"] == "PASS_WITH_LIMITATIONS"
+          assert report[
+              "user_facing_http_submit_supported"
+          ] is True
+          assert report[
+              "user_facing_http_status_result_supported"
+          ] is True
+          assert report["production_scheduler_used"] is True
+          assert report["production_worker_used"] is True
+          assert report["task_output_durable"] is True
+          assert report[
+              "task_output_exposed_in_http_result"
+          ] is False
+          assert report["new_lifecycle_writer"] is False
+          assert report["direct_dispatch_call_used"] is False
+          assert report["Loop_Plane_dependencies"] == 0
+          assert report["product_alpha_ready"] is False
+          assert report["production_ready"] is False
+          assert report[
+              "production_cutover_authorized"
+          ] is False
+          PY
+
+      - name: Compile and whitespace checks
+        shell: bash
+        run: |
+          python -m compileall -q             hfa-control/src/hfa_control             scripts/runtime_alpha_acceptance_83_5.py             tests/unit/test_run_submission_coordinator.py             tests/integration/test_user_facing_runtime_e2e_83_5.py
+
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: >-
+          ${{
+            always()
+            && hashFiles('sprint83_5_unit.txt') != ''
+            && hashFiles('sprint83_5_integration.txt') != ''
+            && hashFiles('sprint83_5_regressions.txt') != ''
+            && hashFiles(
+              'sprint83_5_acceptance_stdout.json'
+            ) != ''
+            && hashFiles(
+              'sprint83_5_acceptance_repeat_stdout.json'
+            ) != ''
+            && hashFiles(
+              'local_out/sprint83/sprint83_5_user_facing_runtime_e2e.json'
+            ) != ''
+            && hashFiles(
+              'local_out/sprint83/sprint83_5_user_facing_runtime_e2e_repeat.json'
+            ) != ''
+          }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: sprint83-5-user-facing-e2e-${{ github.run_id }}
+          path: |
+            sprint83_5_unit.txt
+            sprint83_5_integration.txt
+            sprint83_5_regressions.txt
+            sprint83_5_acceptance_stdout.json
+            sprint83_5_acceptance_repeat_stdout.json
+            local_out/sprint83/sprint83_5_user_facing_runtime_e2e.json
+            local_out/sprint83/sprint83_5_user_facing_runtime_e2e_repeat.json
+          if-no-files-found: error

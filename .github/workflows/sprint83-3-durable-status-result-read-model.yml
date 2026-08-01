@@ -20,6 +20,7 @@ env:
   USE_EXISTING_REDIS: '1'
   PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
   PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
 
 jobs:
   verify:
@@ -37,36 +38,94 @@ jobs:
           --health-retries 30
     steps:
       - name: Checkout exact PR HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - name: Verify exact HEAD and changed-file allowlist
+      - name: Verify HEAD and regression-aware scope
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
           python - <<'PY'
-          import os, subprocess
-          allowed = {
-              '.github/workflows/sprint83-3-durable-status-result-read-model.yml',
-              'docs/implementation/sprint83/SPRINT83.3-durable-status-result-read-model.md',
-              'hfa-control/src/hfa_control/run_status_read_model.py',
-              'hfa-control/src/hfa_control/service.py',
-              'tests/unit/test_run_status_result_read_model.py',
-              'tests/integration/test_run_status_result_read_model_integration.py',
+          import os
+          import subprocess
+
+          feature_branch = (
+              "sprint/83-3-durable-status-result-read-model"
+          )
+          feature_allowlist = {
+              ".github/workflows/"
+              "sprint83-3-durable-status-result-read-model.yml",
+              "docs/implementation/sprint83/"
+              "SPRINT83.3-durable-status-result-read-model.md",
+              "hfa-control/src/hfa_control/"
+              "run_status_read_model.py",
+              "hfa-control/src/hfa_control/service.py",
+              "tests/unit/"
+              "test_run_status_result_read_model.py",
+              "tests/integration/"
+              "test_run_status_result_read_model_integration.py",
           }
-          changed = set(subprocess.check_output(
-              ['git','diff','--name-only',f"{os.environ['PR_BASE_SHA']}...HEAD"],
-              text=True,
-          ).splitlines())
-          assert changed == allowed, {'missing': sorted(allowed-changed), 'unexpected': sorted(changed-allowed)}
-          assert not any('__pycache__' in p or '.pytest_cache' in p or p.endswith('.pyc') for p in changed)
-          print('SPRINT83_3_EXACT_SCOPE_OK', sorted(changed))
+          protected_runtime_paths = {
+              "hfa-control/src/hfa_control/"
+              "run_status_read_model.py",
+              "hfa-control/src/hfa_control/service.py",
+          }
+
+          changed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert changed == feature_allowlist, {
+                  "mode": "feature_exact_scope",
+                  "missing": sorted(
+                      feature_allowlist - changed
+                  ),
+                  "unexpected": sorted(
+                      changed - feature_allowlist
+                  ),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              assert changed & protected_runtime_paths, {
+                  "mode": "future_runtime_regression",
+                  "changed": sorted(changed),
+                  "required_runtime_intersection": sorted(
+                      protected_runtime_paths
+                  ),
+              }
+              mode = "RUNTIME_INTERSECTION"
+
+          forbidden = [
+              path
+              for path in changed
+              if "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, {
+              "forbidden_generated_files": sorted(forbidden)
+          }
+
+          print(
+              "SPRINT83_3_SCOPE_OK",
+              mode,
+              sorted(changed),
+          )
           PY
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -232,8 +291,16 @@ jobs:
         run: git diff --check "$PR_BASE_SHA...HEAD"
 
       - name: Upload deterministic evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: >-
+          ${{
+            always()
+            && hashFiles('sprint83_3_tests.txt') != ''
+            && hashFiles('sprint83_2_regression.txt') != ''
+            && hashFiles(
+              'local_out/sprint83/sprint83_3_read_model_evidence.json'
+            ) != ''
+          }}
+        uses: actions/upload-artifact@v6
         with:
           name: sprint83-3-status-result-${{ github.run_id }}
           path: |

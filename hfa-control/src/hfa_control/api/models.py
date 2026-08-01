@@ -133,6 +133,55 @@ try:
         payload: Dict[str, Any]
         completed_at: float
 
+    class RunSubmissionRequest(_CompatModel):
+        payload: Dict[str, Any] = Field(default_factory=dict)
+        agent_type: str = "default"
+        priority: int = 5
+        estimated_cost_cents: int = 0
+        preferred_region: str = ""
+        preferred_placement: str = "LEAST_LOADED"
+        required_capabilities: List[str] = Field(default_factory=list)
+        trace_parent: str = ""
+        trace_state: str = ""
+
+    class RunSubmissionResponse(_CompatModel):
+        status: str
+        tenant_id: str
+        run_id: str
+        task_id: str
+        run_admitted: bool
+        task_admitted: bool
+        task_ready: bool
+        task_admit_status: str
+        failure_code: Optional[str]
+        failure_type: Optional[str]
+        dispatch_possible: bool
+        automatic_retry: bool
+        automatic_rollback: bool
+        automatic_repair: bool
+
+    class RunStatusResultResponse(_CompatModel):
+        schema_version: int
+        run_id: str
+        status: str
+        terminal: bool
+        outcome: Optional[str]
+        result: Optional[Dict[str, Any]]
+        error: Optional[Dict[str, Any]]
+        submitted_at: Optional[float]
+        started_at: Optional[float]
+        finished_at: Optional[float]
+        updated_at: Optional[float]
+        freshness: str
+        completeness: str
+        completeness_reason: Optional[str]
+        internal_state: Optional[str]
+        task_counts: Dict[str, int] = Field(default_factory=dict)
+        state_ttl_seconds: int
+        meta_ttl_seconds: int
+        result_ttl_seconds: int
+        issues: List[str] = Field(default_factory=list)
+
     class RunningRunSummary(_CompatModel):
         run_id: str
         tenant_id: str
@@ -295,6 +344,58 @@ except ImportError:
         error: Optional[str]
         payload: Dict[str, Any]
         completed_at: float
+
+    @dataclass
+    class RunSubmissionRequest(_DataclassModel):
+        payload: Dict[str, Any] = field(default_factory=dict)
+        agent_type: str = "default"
+        priority: int = 5
+        estimated_cost_cents: int = 0
+        preferred_region: str = ""
+        preferred_placement: str = "LEAST_LOADED"
+        required_capabilities: List[str] = field(default_factory=list)
+        trace_parent: str = ""
+        trace_state: str = ""
+
+    @dataclass
+    class RunSubmissionResponse(_DataclassModel):
+        status: str
+        tenant_id: str
+        run_id: str
+        task_id: str
+        run_admitted: bool
+        task_admitted: bool
+        task_ready: bool
+        task_admit_status: str
+        failure_code: Optional[str]
+        failure_type: Optional[str]
+        dispatch_possible: bool
+        automatic_retry: bool
+        automatic_rollback: bool
+        automatic_repair: bool
+
+    @dataclass
+    class RunStatusResultResponse(_DataclassModel):
+        schema_version: int
+        run_id: str
+        status: str
+        terminal: bool
+        outcome: Optional[str]
+        result: Optional[Dict[str, Any]]
+        error: Optional[Dict[str, Any]]
+        submitted_at: Optional[float]
+        started_at: Optional[float]
+        finished_at: Optional[float]
+        updated_at: Optional[float]
+        freshness: str
+        completeness: str
+        completeness_reason: Optional[str]
+        internal_state: Optional[str]
+        state_ttl_seconds: int
+        meta_ttl_seconds: int
+        result_ttl_seconds: int
+        task_counts: Dict[str, int] = field(default_factory=dict)
+        issues: List[str] = field(default_factory=list)
 
     @dataclass
     class RunningRunSummary(_DataclassModel):
