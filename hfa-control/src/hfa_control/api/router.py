@@ -84,6 +84,8 @@ from hfa_control.api.models import (
     LiveResponse,
     ReadyResponse,
     ReadyCheckDetail,
+    ProductReadinessResponse,
+    ProductCapabilitiesResponse,
     WorkerSummary,
     WorkerListResponse,
     RunStateResponse,
@@ -156,6 +158,40 @@ async def health_ready(request: Request) -> ReadyResponse:
     if data["status"] != "ready":
         return JSONResponse(status_code=503, content=resp.model_dump())
     return resp
+
+
+# ===========================================================================
+# Sprint 83.7 — Product readiness and capability contract
+# ===========================================================================
+
+
+@router.get(
+    "/product/readiness",
+    response_model=ProductReadinessResponse,
+)
+async def product_readiness(request: Request):
+    data = await request.app.state.cp.get_product_readiness()
+    response = ProductReadinessResponse(**data)
+    if not response.ready:
+        return JSONResponse(
+            status_code=503,
+            content=response.model_dump(),
+        )
+    return response
+
+
+@router.get(
+    "/product/capabilities",
+    response_model=ProductCapabilitiesResponse,
+)
+async def product_capabilities(
+    request: Request,
+) -> ProductCapabilitiesResponse:
+    data = (
+        await request.app.state.cp
+        .get_product_capabilities()
+    )
+    return ProductCapabilitiesResponse(**data)
 
 
 # ===========================================================================
@@ -350,6 +386,7 @@ async def submit_run(
         SingleTaskRunSubmission(
             tenant_id=tenant_id,
             payload=body.payload,
+            run_shape=body.run_shape,
             agent_type=body.agent_type,
             priority=body.priority,
             estimated_cost_cents=body.estimated_cost_cents,
@@ -366,7 +403,10 @@ async def submit_run(
 
     if response.status == "SUBMISSION_INCOMPLETE":
         status_code = 409
-    elif response.failure_code == "INVALID_REQUEST":
+    elif response.failure_code in {
+        "INVALID_REQUEST",
+        "UNSUPPORTED_RUN_SHAPE",
+    }:
         status_code = 400
     else:
         status_code = 503

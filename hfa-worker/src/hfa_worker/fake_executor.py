@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class FakeExecutor(BaseExecutor):
+    product_executor_capability = "executor:deterministic"
+
     """
     Deterministic fake executor for testing and local development.
 

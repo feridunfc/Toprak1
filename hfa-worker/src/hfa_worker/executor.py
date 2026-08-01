@@ -27,6 +27,8 @@ __all__ = ["BaseExecutor", "FakeExecutor"]
 
 
 class BaseExecutor(abc.ABC):
+    product_executor_capability = "executor:configured"
+
     """
     Abstract base class for all executors.
 

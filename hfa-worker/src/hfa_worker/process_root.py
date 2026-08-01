@@ -9,6 +9,10 @@ from typing import Any
 
 import redis.asyncio as redis_async
 
+from hfa_control.product_profile import (
+    ProductMode,
+    parse_product_mode,
+)
 from hfa_worker.main import WorkerService
 
 
@@ -49,6 +53,20 @@ def config_from_env(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     source = os.environ if env is None else env
+    product_mode = parse_product_mode(
+        source.get("HFA_PRODUCT_MODE")
+    )
+    configured_worker_group = str(
+        source.get("WORKER_GROUP") or ""
+    ).strip()
+    if (
+        product_mode is ProductMode.SINGLE_TASK_ALPHA
+        and not configured_worker_group
+    ):
+        raise RuntimeError(
+            "WORKER_GROUP is required for SINGLE_TASK_ALPHA"
+        )
+
     executor_mode = str(
         source.get("WORKER_EXECUTOR_MODE") or ""
     ).strip()
@@ -61,8 +79,11 @@ def config_from_env(
     return {
         "redis_url": source.get("REDIS_URL", "redis://localhost:6379/0"),
         "production": True,
+        "product_mode": product_mode.value,
         "worker_id": source.get("WORKER_ID", ""),
-        "worker_group": source.get("WORKER_GROUP", "default"),
+        "worker_group": (
+            configured_worker_group or "default"
+        ),
         "region": source.get("WORKER_REGION", "us-east-1"),
         "shards": _parse_shards(source.get("WORKER_SHARDS", "0")),
         "capacity": int(source.get("WORKER_CAPACITY", "10")),

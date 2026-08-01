@@ -87,6 +87,28 @@ try:
             }
             return data
 
+    class ProductReadinessResponse(_CompatModel):
+        product_mode: str
+        ready: bool
+        tenant_identity_boundary: str
+        redis_reachable: bool
+        leader_available: bool
+        scheduler_running: bool
+        compatible_worker_count: int
+        run_finalization_available: bool
+        executor_available: bool
+        result_retention_seconds: int
+
+    class ProductCapabilitiesResponse(_CompatModel):
+        supported_run_shapes: List[str]
+        multi_task_result_supported: bool
+        cancel_supported: bool
+        retry_supported: bool
+        submission_idempotency_supported: bool
+        external_executor_cutover: bool
+        archive_available: bool
+        production_ready: bool
+
     class WorkerSummary(_CompatModel):
         worker_id: str
         worker_group: str
@@ -134,6 +156,7 @@ try:
         completed_at: float
 
     class RunSubmissionRequest(_CompatModel):
+        run_shape: str = "SINGLE_TASK"
         payload: Dict[str, Any] = Field(default_factory=dict)
         agent_type: str = "default"
         priority: int = 5
@@ -302,6 +325,30 @@ except ImportError:
         checks: Dict[str, ReadyCheckDetail] = field(default_factory=dict)
 
     @dataclass
+    class ProductReadinessResponse(_DataclassModel):
+        product_mode: str
+        ready: bool
+        tenant_identity_boundary: str
+        redis_reachable: bool
+        leader_available: bool
+        scheduler_running: bool
+        compatible_worker_count: int
+        run_finalization_available: bool
+        executor_available: bool
+        result_retention_seconds: int
+
+    @dataclass
+    class ProductCapabilitiesResponse(_DataclassModel):
+        supported_run_shapes: List[str]
+        multi_task_result_supported: bool
+        cancel_supported: bool
+        retry_supported: bool
+        submission_idempotency_supported: bool
+        external_executor_cutover: bool
+        archive_available: bool
+        production_ready: bool
+
+    @dataclass
     class WorkerSummary(_DataclassModel):
         worker_id: str
         worker_group: str
@@ -354,6 +401,7 @@ except ImportError:
 
     @dataclass
     class RunSubmissionRequest(_DataclassModel):
+        run_shape: str = "SINGLE_TASK"
         payload: Dict[str, Any] = field(default_factory=dict)
         agent_type: str = "default"
         priority: int = 5

@@ -12,6 +12,17 @@ from hfa_control.admission import AdmissionController
 from hfa_control.audit import build_audit_logger
 from hfa_control.leader import LeaderElection
 from hfa_control.models import ControlPlaneConfig
+from hfa_control.product_profile import (
+    ControlProductProfile,
+    ProductMode,
+    TenantIdentityBoundary,
+    parse_strict_bool,
+    validate_control_product_profile,
+)
+from hfa_control.task_admit_authority import (
+    FEATURE_FLAG as TASK_ADMIT_FEATURE_FLAG,
+    parse_task_admit_binding_flag,
+)
 from hfa_control.recovery import RecoveryService
 from hfa_control.redis_resilience import RedisHealthMonitor
 from hfa_control.registry import WorkerRegistry
@@ -68,6 +79,24 @@ class ControlPlaneService:
     def __init__(self, redis, config: Optional[ControlPlaneConfig] = None) -> None:
         self._redis = redis
         self._config = config or _config_from_env()
+        canonical_task_admit_binding = (
+            parse_task_admit_binding_flag(
+                os.getenv(TASK_ADMIT_FEATURE_FLAG)
+            )
+        )
+        self._product_profile = (
+            validate_control_product_profile(
+                product_mode=self._config.product_mode,
+                tenant_identity_boundary=(
+                    self._config.tenant_identity_boundary
+                ),
+                strict_cas_mode=self._config.strict_cas_mode,
+                canonical_task_admit_binding=(
+                    canonical_task_admit_binding
+                ),
+                single_task_submission_surface=True,
+            )
+        )
         self._leader = LeaderElection(redis, self._config.instance_id, self._config)
         self._registry = WorkerRegistry(redis, self._config)
         self._shards = ShardOwnershipManager(redis, self._config)
@@ -120,6 +149,10 @@ class ControlPlaneService:
     @property
     def is_leader(self) -> bool:
         return self._leader.is_leader
+
+    @property
+    def product_profile(self) -> ControlProductProfile:
+        return self._product_profile
 
     async def start(self) -> None:
         await self._registry.start()
@@ -239,6 +272,120 @@ class ControlPlaneService:
             "instance_id": self._config.instance_id,
             "is_leader": self._leader.is_leader,
             "checks": checks,
+        }
+
+    async def get_product_readiness(self) -> dict:
+        redis_reachable = False
+        leader_available = False
+        try:
+            await self._redis.ping()
+            redis_reachable = True
+            leader_id = _decode(
+                await self._redis.get(
+                    self._config.leader_key
+                )
+            ).strip()
+            leader_available = bool(leader_id)
+        except Exception:
+            redis_reachable = False
+            leader_available = False
+
+        scheduler_running = bool(
+            self._leader.is_leader
+            and self._sched_started
+            and self._scheduler.running
+        )
+
+        schedulable_workers = []
+        if redis_reachable:
+            try:
+                schedulable_workers = (
+                    await self._registry
+                    .list_schedulable_workers()
+                )
+            except Exception:
+                schedulable_workers = []
+
+        compatible_worker_count = 0
+        run_finalization_available = False
+        executor_available = False
+        for worker in schedulable_workers:
+            capabilities = {
+                str(value).strip()
+                for value in (
+                    getattr(worker, "capabilities", [])
+                    or []
+                )
+                if str(value).strip()
+            }
+            has_product = (
+                "product:single-task-v1"
+                in capabilities
+            )
+            has_finalization = (
+                "run-finalization:v1"
+                in capabilities
+            )
+            has_executor = any(
+                capability.startswith("executor:")
+                for capability in capabilities
+            )
+            run_finalization_available = (
+                run_finalization_available
+                or has_finalization
+            )
+            executor_available = (
+                executor_available or has_executor
+            )
+            if (
+                has_product
+                and has_finalization
+                and has_executor
+            ):
+                compatible_worker_count += 1
+
+        ready = bool(
+            self._product_profile.single_task_alpha
+            and redis_reachable
+            and leader_available
+            and scheduler_running
+            and compatible_worker_count > 0
+        )
+        return {
+            "product_mode": (
+                self._product_profile.product_mode.value
+            ),
+            "ready": ready,
+            "tenant_identity_boundary": (
+                self._product_profile
+                .tenant_identity_boundary.value
+            ),
+            "redis_reachable": redis_reachable,
+            "leader_available": leader_available,
+            "scheduler_running": scheduler_running,
+            "compatible_worker_count": (
+                compatible_worker_count
+            ),
+            "run_finalization_available": (
+                run_finalization_available
+            ),
+            "executor_available": executor_available,
+            "result_retention_seconds": (
+                self._product_profile
+                .result_retention_seconds
+            ),
+        }
+
+    async def get_product_capabilities(self) -> dict:
+        return {
+            "supported_run_shapes": ["SINGLE_TASK"],
+            "multi_task_result_supported": False,
+            "cancel_supported": False,
+            "retry_supported": False,
+            "submission_idempotency_supported": False,
+            "external_executor_cutover": False,
+            "archive_available": False,
+            "production_ready": False,
         }
 
     async def list_all_workers(self) -> list:
@@ -575,8 +722,21 @@ class ControlPlaneService:
 
     async def get_run_result(self, run_id: str):
         from hfa.runtime.state_store import StateStore
+        from hfa_control.run_status_read_model import (
+            PUBLIC_EXECUTOR_FAILURE_MESSAGE,
+        )
 
-        return await StateStore(self._redis).get_result(run_id)
+        result = await StateStore(self._redis).get_result(run_id)
+        if result is None:
+            return None
+        public_result = dict(result)
+        if str(
+            public_result.get("status") or ""
+        ).strip().lower() == "failed":
+            public_result["error"] = (
+                PUBLIC_EXECUTOR_FAILURE_MESSAGE
+            )
+        return public_result
 
     async def get_run_status_result(self, run_id: str) -> dict:
         """Return additive RUN status/result plus canonical single-TASK output."""
@@ -641,5 +801,18 @@ def _config_from_env() -> ControlPlaneConfig:
         max_reschedule_attempts=int(os.environ.get("MAX_RESCHEDULE_ATTEMPTS", "3")),
         scheduler_reservation_ttl_seconds=int(
             os.environ.get("SCHEDULER_RESERVATION_TTL_SECONDS", "30")
+        ),
+        strict_cas_mode=parse_strict_bool(
+            os.environ.get("HFA_STRICT_CAS_MODE"),
+            name="HFA_STRICT_CAS_MODE",
+            default=False,
+        ),
+        product_mode=os.environ.get(
+            "HFA_PRODUCT_MODE",
+            ProductMode.RUNTIME_INTERNAL.value,
+        ),
+        tenant_identity_boundary=os.environ.get(
+            "HFA_TENANT_IDENTITY_BOUNDARY",
+            TenantIdentityBoundary.INTERNAL_UNSPECIFIED.value,
         ),
     )

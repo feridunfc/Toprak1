@@ -12,6 +12,12 @@ from hfa_control.dag_lua import DagLua
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.task_recovery import TaskHeartbeatManager
 from hfa_control.run_termination import RunTerminationCoordinator
+from hfa_control.product_profile import (
+    ProductMode,
+    WorkerProductProfile,
+    parse_product_mode,
+    validate_worker_product_profile,
+)
 from hfa_control.shard import OWNER_TTL, ShardOwnershipManager
 from hfa_worker.consumer import WorkerConsumer
 from hfa_worker.drain import DrainManager
@@ -26,6 +32,51 @@ from hfa_worker.task_consumer import TaskConsumer
 from hfa_worker.task_executor import TaskExecutionResult, TaskExecutor
 
 logger = logging.getLogger(__name__)
+
+_RESERVED_PRODUCT_CAPABILITY_PREFIXES = (
+    "product:",
+    "run-finalization:",
+    "executor:",
+)
+_ALLOWED_EXECUTOR_CAPABILITIES = frozenset({
+    "executor:configured",
+    "executor:deterministic",
+    "executor:external",
+    "executor:cognitive",
+})
+
+
+def _sanitize_declared_capabilities(
+    values: object,
+) -> list[str]:
+    raw_values = values if isinstance(values, (list, tuple, set)) else []
+    sanitized = set()
+    for value in raw_values:
+        capability = str(value or "").strip()
+        if not capability:
+            continue
+        if capability.startswith(
+            _RESERVED_PRODUCT_CAPABILITY_PREFIXES
+        ):
+            continue
+        sanitized.add(capability)
+    return sorted(sanitized or {"base"})
+
+
+def _executor_product_capability(
+    executor: object,
+) -> str:
+    capability = str(
+        getattr(
+            executor,
+            "product_executor_capability",
+            "executor:configured",
+        )
+        or ""
+    ).strip()
+    if capability not in _ALLOWED_EXECUTOR_CAPABILITIES:
+        return "executor:configured"
+    return capability
 
 
 class _BaseExecutorTaskAdapter(TaskExecutor):
@@ -64,6 +115,9 @@ class WorkerService:
     def __init__(self, redis, config: Dict[str, Any]) -> None:
         self._redis = redis
         self._production = bool(config.get("production", False))
+        self._product_mode = parse_product_mode(
+            config.get("product_mode")
+        )
 
         run_termination_binding = config.get(
             "run_termination_binding_enabled",
@@ -85,10 +139,17 @@ class WorkerService:
                 "Production worker_id must be explicitly configured and non-empty"
             )
         self._worker_id = configured_worker_id or f"worker-{uuid.uuid4().hex[:8]}"
-        self._worker_group = str(config.get("worker_group") or "default-group")
+        configured_worker_group = str(
+            config.get("worker_group") or ""
+        ).strip()
+        self._worker_group = (
+            configured_worker_group or "default-group"
+        )
         self._region = str(config.get("region") or "us-east-1")
         self._version = str(config.get("version") or "0.0.0")
-        self._capabilities: list[str] = list(config.get("capabilities") or ["base"])
+        self._capabilities = _sanitize_declared_capabilities(
+            config.get("capabilities") or ["base"]
+        )
         self._shards: list[int] = list(config.get("shards") or [0])
         self._capacity = int(config.get("capacity") or 10)
         self._shard_renew_interval = float(
@@ -153,6 +214,17 @@ class WorkerService:
                 self._worker_id,
             )
 
+        self._product_profile = validate_worker_product_profile(
+            product_mode=self._product_mode,
+            production=self._production,
+            worker_id=configured_worker_id,
+            worker_group=configured_worker_group,
+            executor_configured=executor is not None,
+            run_termination_binding_enabled=(
+                self._run_termination_binding_enabled
+            ),
+        )
+
         self._dag_lua: DagLua | None = None
         self._task_claim_manager: TaskClaimManager | None = None
         self._task_heartbeat_manager: TaskHeartbeatManager | None = None
@@ -212,6 +284,11 @@ class WorkerService:
                 completion_manager=completion_manager,
             )
 
+        self._derive_runtime_capabilities(
+            executor=executor,
+            worker_consumer_type=worker_consumer_type,
+        )
+
         self._consumer = worker_consumer_type(
             redis=redis,
             worker_id=self._worker_id,
@@ -253,6 +330,38 @@ class WorkerService:
             config.get("shutdown_grace_period", 30.0)
         )
 
+    def _derive_runtime_capabilities(
+        self,
+        *,
+        executor: object,
+        worker_consumer_type: type,
+    ) -> None:
+        capabilities = set(self._capabilities)
+        capabilities.add(
+            _executor_product_capability(executor)
+        )
+
+        finalization_bound = (
+            self._production
+            and self._run_termination_binding_enabled
+            and self._run_termination_coordinator is not None
+            and isinstance(
+                self._task_consumer,
+                RunFinalizingTaskConsumer,
+            )
+            and worker_consumer_type
+            is RunFinalizingWorkerConsumer
+        )
+        if finalization_bound:
+            capabilities.add("run-finalization:v1")
+        if (
+            self._product_profile.single_task_alpha
+            and finalization_bound
+        ):
+            capabilities.add("product:single-task-v1")
+
+        self._capabilities[:] = sorted(capabilities)
+
     @property
     def worker_id(self) -> str:
         return self._worker_id
@@ -260,6 +369,14 @@ class WorkerService:
     @property
     def run_termination_binding_enabled(self) -> bool:
         return self._run_termination_binding_enabled
+
+    @property
+    def product_profile(self) -> WorkerProductProfile:
+        return self._product_profile
+
+    @property
+    def runtime_capabilities(self) -> tuple[str, ...]:
+        return tuple(self._capabilities)
 
     def _refresh_background_health(self) -> None:
         for component, task in (

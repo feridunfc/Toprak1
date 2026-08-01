@@ -458,7 +458,7 @@ async def test_valid_terminal_output_is_available():
 
 
 @pytest.mark.asyncio
-async def test_failed_task_output_can_be_exposed():
+async def test_failed_task_output_is_sanitized():
     redis = FakeRedis()
     seed_run(redis, state="failed")
     seed_task(
@@ -476,7 +476,9 @@ async def test_failed_task_output_can_be_exposed():
         is TaskOutputStatus.AVAILABLE
     )
     assert view.task_output == {
-        "error": "executor_failed"
+        "code": "EXECUTOR_FAILED",
+        "message": "Task execution failed.",
+        "retryable": False,
     }
 
 

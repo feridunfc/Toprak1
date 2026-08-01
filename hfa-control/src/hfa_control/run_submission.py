@@ -17,8 +17,17 @@ class RunSubmissionStatus(str, Enum):
     SUBMISSION_INCOMPLETE = "SUBMISSION_INCOMPLETE"
 
 
+class RunShape(str, Enum):
+    SINGLE_TASK = "SINGLE_TASK"
+
+
+class UnsupportedRunShapeError(ValueError):
+    pass
+
+
 class RunSubmissionFailureCode(str, Enum):
     INVALID_REQUEST = "INVALID_REQUEST"
+    UNSUPPORTED_RUN_SHAPE = "UNSUPPORTED_RUN_SHAPE"
     ID_GENERATION_FAILED = "ID_GENERATION_FAILED"
     CLOCK_FAILED = "CLOCK_FAILED"
     TASK_ADMIT_INITIALISATION_FAILED = "TASK_ADMIT_INITIALISATION_FAILED"
@@ -35,6 +44,7 @@ class RunSubmissionFailureCode(str, Enum):
 class SingleTaskRunSubmission:
     tenant_id: str
     payload: Mapping[str, Any]
+    run_shape: str = RunShape.SINGLE_TASK.value
     agent_type: str = "default"
     priority: int = 5
     estimated_cost_cents: int = 0
@@ -145,6 +155,18 @@ class RunSubmissionCoordinator:
     ) -> RunSubmissionResult:
         try:
             normalized = self._normalize_request(request)
+        except UnsupportedRunShapeError:
+            return self._failure(
+                status=RunSubmissionStatus.REJECTED,
+                tenant_id=self._safe_tenant_id(request),
+                run_id="",
+                task_id="",
+                run_admitted=False,
+                code=(
+                    RunSubmissionFailureCode
+                    .UNSUPPORTED_RUN_SHAPE
+                ),
+            )
         except Exception as exc:
             return self._failure(
                 status=RunSubmissionStatus.REJECTED,
@@ -428,6 +450,14 @@ class RunSubmissionCoordinator:
                 "request must be SingleTaskRunSubmission"
             )
 
+        run_shape = str(
+            request.run_shape or ""
+        ).strip()
+        if run_shape != RunShape.SINGLE_TASK.value:
+            raise UnsupportedRunShapeError(
+                "only SINGLE_TASK is supported"
+            )
+
         tenant_id = str(request.tenant_id or "").strip()
         if not tenant_id:
             raise ValueError(
@@ -494,6 +524,7 @@ class RunSubmissionCoordinator:
         return SingleTaskRunSubmission(
             tenant_id=tenant_id,
             payload=payload,
+            run_shape=RunShape.SINGLE_TASK.value,
             agent_type=agent_type,
             priority=request.priority,
             estimated_cost_cents=(
