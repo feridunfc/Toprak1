@@ -30,6 +30,9 @@ from hfa_control.run_submission import (
     RunSubmissionCoordinator,
     SingleTaskRunSubmission,
 )
+from hfa_control.submission_idempotency import (
+    SubmissionIdempotencyStore,
+)
 from hfa_control.scheduler import Scheduler, build_production_scheduler
 from hfa_control.shard import ShardOwnershipManager
 
@@ -120,9 +123,24 @@ class ControlPlaneService:
                 "production scheduler composition must expose dag_lua "
                 "for canonical RUN submission"
             )
+        self._submission_idempotency = (
+            SubmissionIdempotencyStore(
+                redis,
+                retention_seconds=(
+                    self._product_profile
+                    .result_retention_seconds
+                ),
+            )
+        )
         self._run_submission = RunSubmissionCoordinator(
             admission_controller=self._admitter,
             dag_lua=scheduler_dag_lua,
+            idempotency_store=(
+                self._submission_idempotency
+            ),
+            require_idempotency_key=(
+                self._product_profile.single_task_alpha
+            ),
         )
         self._recovery = RecoveryService(redis, self._config)
         self._redis_monitor = RedisHealthMonitor(redis)
@@ -382,7 +400,9 @@ class ControlPlaneService:
             "multi_task_result_supported": False,
             "cancel_supported": False,
             "retry_supported": False,
-            "submission_idempotency_supported": False,
+            "submission_idempotency_supported": bool(
+                self._product_profile.single_task_alpha
+            ),
             "external_executor_cutover": False,
             "archive_available": False,
             "production_ready": False,

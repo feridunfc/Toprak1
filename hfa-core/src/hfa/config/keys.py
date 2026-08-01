@@ -81,6 +81,7 @@ class RedisTTL:
     RUN_STATE: int = 86_400  # 24 h
     RUN_META: int = 86_400  # 24 h
     RUN_RESULT: int = 86_400  # 24 h
+    SUBMISSION_IDEMPOTENCY: int = 86_400  # 24 h
     RUN_CLAIM: int = 300  # 5 min
     DLQ_META: int = 604_800  # 7 days
     TENANT_INFLIGHT: int = 86_400  # 24 h
@@ -163,6 +164,18 @@ class RedisKey:
     def tenant_rate(cls, tenant_id: str) -> str:
         """hfa:tenant:{tenant_id}:rate — sliding-window ZSET."""
         return f"{cls.PREFIX}:tenant:{tenant_id}:rate"
+
+    @classmethod
+    def submission_idempotency(
+        cls,
+        tenant_id: str,
+        key_digest: str,
+    ) -> str:
+        """Tenant-scoped submission idempotency HASH."""
+        return (
+            f"{cls.PREFIX}:tenant:{tenant_id}:"
+            f"submission:idempotency:{key_digest}"
+        )
 
     @classmethod
     def tenant_queue(cls, tenant_id: str) -> str:

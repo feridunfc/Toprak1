@@ -73,7 +73,7 @@ async def test_trusted_gateway_product_alpha_report_83_7():
     assert report["production_ready"] is False
     assert report[
         "submission_idempotency_supported"
-    ] is False
+    ] is True
     assert report["multi_task_support"] is False
     assert report["cancel_supported"] is False
     assert report["retry_supported"] is False

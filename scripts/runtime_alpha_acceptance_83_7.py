@@ -537,6 +537,10 @@ async def _product_alpha_scenario(
     control._run_submission = RunSubmissionCoordinator(
         admission_controller=control._admitter,
         dag_lua=control._scheduler.composition.dag_lua,
+        idempotency_store=(
+            control._submission_idempotency
+        ),
+        require_idempotency_key=True,
         uuid_factory=DeterministicUUIDFactory(
             *[
                 _uuid4_from_material(
@@ -592,7 +596,11 @@ async def _product_alpha_scenario(
 
         success_submit = await client.post(
             "/control/v1/runs",
-            headers={"X-Tenant-ID": tenant_id},
+            headers={
+                "X-Tenant-ID": tenant_id,
+                "Idempotency-Key":
+                    f"{acceptance_id}-success",
+            },
             json={
                 "run_shape": "SINGLE_TASK",
                 "payload": {
@@ -685,7 +693,11 @@ async def _product_alpha_scenario(
 
         failure_submit = await client.post(
             "/control/v1/runs",
-            headers={"X-Tenant-ID": tenant_id},
+            headers={
+                "X-Tenant-ID": tenant_id,
+                "Idempotency-Key":
+                    f"{acceptance_id}-failure",
+            },
             json={
                 "run_shape": "SINGLE_TASK",
                 "payload": {
@@ -767,7 +779,11 @@ async def _product_alpha_scenario(
         )
         unsupported = await client.post(
             "/control/v1/runs",
-            headers={"X-Tenant-ID": tenant_id},
+            headers={
+                "X-Tenant-ID": tenant_id,
+                "Idempotency-Key":
+                    f"{acceptance_id}-unsupported",
+            },
             json={
                 "run_shape": "MULTI_TASK",
                 "payload": {"tasks": [1, 2]},
@@ -794,12 +810,20 @@ async def _product_alpha_scenario(
         }
         duplicate_a = await client.post(
             "/control/v1/runs",
-            headers={"X-Tenant-ID": tenant_id},
+            headers={
+                "X-Tenant-ID": tenant_id,
+                "Idempotency-Key":
+                    f"{acceptance_id}-duplicate-a",
+            },
             json=duplicate_body,
         )
         duplicate_b = await client.post(
             "/control/v1/runs",
-            headers={"X-Tenant-ID": tenant_id},
+            headers={
+                "X-Tenant-ID": tenant_id,
+                "Idempotency-Key":
+                    f"{acceptance_id}-duplicate-b",
+            },
             json=duplicate_body,
         )
         duplicate_a_body = duplicate_a.json()
@@ -1010,7 +1034,7 @@ async def _product_alpha_scenario(
                 is False,
                 capabilities.get(
                     "submission_idempotency_supported"
-                ) is False,
+                ) is True,
                 capabilities.get("production_ready")
                 is False,
                 success_submit.status_code == 202,
@@ -1343,7 +1367,7 @@ async def build_acceptance_report(
             "direct_public_multitenant_alpha_ready":
                 False,
             "production_ready": False,
-            "submission_idempotency_supported": False,
+            "submission_idempotency_supported": True,
             "multi_task_support": False,
             "cancel_supported": False,
             "retry_supported": False,
@@ -1364,7 +1388,7 @@ async def build_acceptance_report(
                 "Canonical TASK state becomes running during execution, but RUN authority remains admitted/QUEUED until terminal RUN_TERMINATE; public RUNNING is not claimed and no new lifecycle writer is introduced.",
                 "Terminal response comparison excludes naturally decreasing TTL fields and verifies the stable semantic projection.",
                 "Result retention remains the fixed current 86400-second Redis contract; no durable archive exists.",
-                "Duplicate POST intentionally creates a distinct RUN because submission idempotency is unsupported.",
+                "Distinct Idempotency-Key values intentionally create distinct RUNs; same-key replay is covered by Sprint 83.8.",
                 "Cancellation, retry, multi-task result aggregation, external executor cutover, automatic repair, and production cutover remain unsupported.",
             ],
         }

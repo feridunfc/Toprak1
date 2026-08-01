@@ -1,7 +1,7 @@
-"""Canonical single-task RUN submission coordination for Sprint 83.5."""
+"""Canonical single-task RUN submission coordination."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import json
 import time
@@ -9,6 +9,12 @@ from typing import Any, Callable, Mapping
 from uuid import UUID, uuid4
 
 from hfa.dag.schema import DagTaskSeed
+from hfa_control.submission_idempotency import (
+    IdempotencyReservationStatus,
+    SubmissionIdempotencyStore,
+    canonical_submission_fingerprint,
+    validate_idempotency_key,
+)
 
 
 class RunSubmissionStatus(str, Enum):
@@ -28,14 +34,29 @@ class UnsupportedRunShapeError(ValueError):
 class RunSubmissionFailureCode(str, Enum):
     INVALID_REQUEST = "INVALID_REQUEST"
     UNSUPPORTED_RUN_SHAPE = "UNSUPPORTED_RUN_SHAPE"
+    INVALID_IDEMPOTENCY_KEY = "INVALID_IDEMPOTENCY_KEY"
+    IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
+    IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
+    IDEMPOTENCY_STORE_FAILED = "IDEMPOTENCY_STORE_FAILED"
+    IDEMPOTENCY_FINALIZATION_FAILED = (
+        "IDEMPOTENCY_FINALIZATION_FAILED"
+    )
     ID_GENERATION_FAILED = "ID_GENERATION_FAILED"
     CLOCK_FAILED = "CLOCK_FAILED"
-    TASK_ADMIT_INITIALISATION_FAILED = "TASK_ADMIT_INITIALISATION_FAILED"
+    TASK_ADMIT_INITIALISATION_FAILED = (
+        "TASK_ADMIT_INITIALISATION_FAILED"
+    )
     RUN_ADMISSION_FAILED = "RUN_ADMISSION_FAILED"
-    RUN_ADMISSION_NOT_COMMITTED = "RUN_ADMISSION_NOT_COMMITTED"
-    RUN_ADMISSION_IDENTITY_MISMATCH = "RUN_ADMISSION_IDENTITY_MISMATCH"
+    RUN_ADMISSION_NOT_COMMITTED = (
+        "RUN_ADMISSION_NOT_COMMITTED"
+    )
+    RUN_ADMISSION_IDENTITY_MISMATCH = (
+        "RUN_ADMISSION_IDENTITY_MISMATCH"
+    )
     TASK_ADMISSION_FAILED = "TASK_ADMISSION_FAILED"
-    TASK_ADMISSION_NOT_COMMITTED = "TASK_ADMISSION_NOT_COMMITTED"
+    TASK_ADMISSION_NOT_COMMITTED = (
+        "TASK_ADMISSION_NOT_COMMITTED"
+    )
     TASK_ID_COLLISION = "TASK_ID_COLLISION"
     TASK_NOT_READY = "TASK_NOT_READY"
 
@@ -53,6 +74,7 @@ class SingleTaskRunSubmission:
     required_capabilities: tuple[str, ...] = ()
     trace_parent: str = ""
     trace_state: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +93,7 @@ class RunSubmissionResult:
     automatic_retry: bool = False
     automatic_rollback: bool = False
     automatic_repair: bool = False
+    idempotent_replay: bool = False
 
     @property
     def accepted(self) -> bool:
@@ -96,7 +119,56 @@ class RunSubmissionResult:
             "automatic_retry": self.automatic_retry,
             "automatic_rollback": self.automatic_rollback,
             "automatic_repair": self.automatic_repair,
+            "idempotent_replay": self.idempotent_replay,
         }
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> "RunSubmissionResult":
+        failure_code_raw = value.get("failure_code")
+        return cls(
+            status=RunSubmissionStatus(
+                str(value.get("status") or "")
+            ),
+            tenant_id=str(value.get("tenant_id") or ""),
+            run_id=str(value.get("run_id") or ""),
+            task_id=str(value.get("task_id") or ""),
+            run_admitted=bool(value.get("run_admitted")),
+            task_admitted=bool(value.get("task_admitted")),
+            task_ready=bool(value.get("task_ready")),
+            task_admit_status=str(
+                value.get("task_admit_status") or ""
+            ),
+            failure_code=(
+                RunSubmissionFailureCode(
+                    str(failure_code_raw)
+                )
+                if failure_code_raw is not None
+                else None
+            ),
+            failure_type=(
+                str(value.get("failure_type"))
+                if value.get("failure_type") is not None
+                else None
+            ),
+            dispatch_possible=bool(
+                value.get("dispatch_possible")
+            ),
+            automatic_retry=bool(
+                value.get("automatic_retry")
+            ),
+            automatic_rollback=bool(
+                value.get("automatic_rollback")
+            ),
+            automatic_repair=bool(
+                value.get("automatic_repair")
+            ),
+            idempotent_replay=bool(
+                value.get("idempotent_replay", False)
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -112,16 +184,11 @@ class _RunAdmissionRequest:
 
 
 class RunSubmissionCoordinator:
-    """Compose existing RUN admission and TASK_ADMIT authorities.
+    """Compose idempotency, RUN admission and TASK_ADMIT.
 
-    Commit order is deliberately non-atomic:
-
-        RUN admission
-        -> root TASK admission
-
-    A TASK admission failure after successful RUN admission is returned as
-    SUBMISSION_INCOMPLETE. This coordinator does not retry, roll back, repair,
-    dispatch, or write lifecycle state directly.
+    The idempotency record is a submission gate, not lifecycle
+    authority. RUN and TASK mutation continues through the existing
+    canonical authorities only.
     """
 
     def __init__(
@@ -129,12 +196,20 @@ class RunSubmissionCoordinator:
         *,
         admission_controller: Any,
         dag_lua: Any,
+        idempotency_store: SubmissionIdempotencyStore | None = None,
+        require_idempotency_key: bool = False,
         uuid_factory: Callable[[], UUID] = uuid4,
+        owner_token_factory: Callable[[], UUID] = uuid4,
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
         self._admission_controller = admission_controller
         self._dag_lua = dag_lua
+        self._idempotency_store = idempotency_store
+        self._require_idempotency_key = bool(
+            require_idempotency_key
+        )
         self._uuid_factory = uuid_factory
+        self._owner_token_factory = owner_token_factory
         self._clock_ms = clock_ms or (
             lambda: int(time.time() * 1000)
         )
@@ -143,9 +218,15 @@ class RunSubmissionCoordinator:
     async def initialise(self) -> None:
         if self._initialised:
             return
-        initialise = getattr(self._dag_lua, "initialise", None)
+        initialise = getattr(
+            self._dag_lua,
+            "initialise",
+            None,
+        )
         if not callable(initialise):
-            raise TypeError("dag_lua.initialise must be callable")
+            raise TypeError(
+                "dag_lua.initialise must be callable"
+            )
         await initialise()
         self._initialised = True
 
@@ -179,6 +260,42 @@ class RunSubmissionCoordinator:
             )
 
         tenant_id = normalized.tenant_id
+        idempotency_key = normalized.idempotency_key
+        use_idempotency = bool(
+            idempotency_key
+            or self._require_idempotency_key
+        )
+
+        if use_idempotency:
+            try:
+                idempotency_key = validate_idempotency_key(
+                    idempotency_key
+                )
+            except Exception as exc:
+                return self._failure(
+                    status=RunSubmissionStatus.REJECTED,
+                    tenant_id=tenant_id,
+                    run_id="",
+                    task_id="",
+                    run_admitted=False,
+                    code=(
+                        RunSubmissionFailureCode
+                        .INVALID_IDEMPOTENCY_KEY
+                    ),
+                    exc=exc,
+                )
+            if self._idempotency_store is None:
+                return self._failure(
+                    status=RunSubmissionStatus.REJECTED,
+                    tenant_id=tenant_id,
+                    run_id="",
+                    task_id="",
+                    run_admitted=False,
+                    code=(
+                        RunSubmissionFailureCode
+                        .IDEMPOTENCY_STORE_FAILED
+                    ),
+                )
 
         try:
             run_id = self._new_run_id(tenant_id)
@@ -207,8 +324,39 @@ class RunSubmissionCoordinator:
                 exc=exc,
             )
 
+        if not use_idempotency:
+            return await self._submit_after_initialise(
+                normalized=normalized,
+                run_id=run_id,
+                task_id=task_id,
+                admitted_at_ms=admitted_at_ms,
+            )
+
+        assert self._idempotency_store is not None
         try:
-            await self.initialise()
+            await self._idempotency_store.initialise()
+            request_fingerprint = (
+                canonical_submission_fingerprint(normalized)
+            )
+            owner_token = str(
+                self._next_uuid(
+                    self._owner_token_factory,
+                    name="owner_token_factory",
+                )
+            )
+            reservation = (
+                await self._idempotency_store.reserve(
+                    tenant_id=tenant_id,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=(
+                        request_fingerprint
+                    ),
+                    run_id=run_id,
+                    task_id=task_id,
+                    owner_token=owner_token,
+                    created_at_ms=admitted_at_ms,
+                )
+            )
         except Exception as exc:
             return self._failure(
                 status=RunSubmissionStatus.REJECTED,
@@ -218,11 +366,198 @@ class RunSubmissionCoordinator:
                 run_admitted=False,
                 code=(
                     RunSubmissionFailureCode
-                    .TASK_ADMIT_INITIALISATION_FAILED
+                    .IDEMPOTENCY_STORE_FAILED
                 ),
                 exc=exc,
             )
 
+        if (
+            reservation.status
+            is IdempotencyReservationStatus
+            .FINAL_SAME_REQUEST
+        ):
+            try:
+                stored = RunSubmissionResult.from_dict(
+                    json.loads(reservation.result_json)
+                )
+            except Exception as exc:
+                return self._failure(
+                    status=RunSubmissionStatus.REJECTED,
+                    tenant_id=tenant_id,
+                    run_id=reservation.run_id,
+                    task_id=reservation.task_id,
+                    run_admitted=False,
+                    code=(
+                        RunSubmissionFailureCode
+                        .IDEMPOTENCY_STORE_FAILED
+                    ),
+                    exc=exc,
+                )
+            if (
+                stored.tenant_id != tenant_id
+                or stored.run_id
+                != reservation.run_id
+                or stored.task_id
+                != reservation.task_id
+                or stored.idempotent_replay
+            ):
+                return self._failure(
+                    status=RunSubmissionStatus.REJECTED,
+                    tenant_id=tenant_id,
+                    run_id=reservation.run_id,
+                    task_id=reservation.task_id,
+                    run_admitted=False,
+                    code=(
+                        RunSubmissionFailureCode
+                        .IDEMPOTENCY_STORE_FAILED
+                    ),
+                    exc=ValueError(
+                        "stored idempotency result identity "
+                        "does not match reservation"
+                    ),
+                )
+            return replace(
+                stored,
+                idempotent_replay=True,
+            )
+
+        if (
+            reservation.status
+            is IdempotencyReservationStatus
+            .IN_PROGRESS_SAME_REQUEST
+        ):
+            return self._failure(
+                status=RunSubmissionStatus.REJECTED,
+                tenant_id=tenant_id,
+                run_id=reservation.run_id,
+                task_id=reservation.task_id,
+                run_admitted=False,
+                code=(
+                    RunSubmissionFailureCode
+                    .IDEMPOTENCY_IN_PROGRESS
+                ),
+            )
+
+        if (
+            reservation.status
+            is IdempotencyReservationStatus
+            .DIFFERENT_REQUEST
+        ):
+            return self._failure(
+                status=RunSubmissionStatus.REJECTED,
+                tenant_id=tenant_id,
+                run_id=reservation.run_id,
+                task_id=reservation.task_id,
+                run_admitted=False,
+                code=(
+                    RunSubmissionFailureCode
+                    .IDEMPOTENCY_KEY_REUSED
+                ),
+            )
+
+        if (
+            reservation.status
+            is not IdempotencyReservationStatus.RESERVED
+        ):
+            return self._failure(
+                status=RunSubmissionStatus.REJECTED,
+                tenant_id=tenant_id,
+                run_id=reservation.run_id,
+                task_id=reservation.task_id,
+                run_admitted=False,
+                code=(
+                    RunSubmissionFailureCode
+                    .IDEMPOTENCY_STORE_FAILED
+                ),
+            )
+
+        result = await self._submit_after_initialise(
+            normalized=normalized,
+            run_id=run_id,
+            task_id=task_id,
+            admitted_at_ms=admitted_at_ms,
+        )
+        try:
+            result_json = json.dumps(
+                result.to_dict(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            await self._idempotency_store.finalize(
+                tenant_id=tenant_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                run_id=run_id,
+                task_id=task_id,
+                owner_token=owner_token,
+                result_json=result_json,
+                updated_at_ms=self._exact_clock_ms(),
+            )
+            return result
+        except Exception as exc:
+            return self._failure(
+                status=(
+                    RunSubmissionStatus
+                    .SUBMISSION_INCOMPLETE
+                    if result.run_admitted
+                    else RunSubmissionStatus.REJECTED
+                ),
+                tenant_id=tenant_id,
+                run_id=run_id,
+                task_id=task_id,
+                run_admitted=result.run_admitted,
+                task_admitted=result.task_admitted,
+                task_ready=result.task_ready,
+                task_admit_status=(
+                    result.task_admit_status
+                ),
+                code=(
+                    RunSubmissionFailureCode
+                    .IDEMPOTENCY_FINALIZATION_FAILED
+                ),
+                exc=exc,
+            )
+
+    async def _submit_after_initialise(
+        self,
+        *,
+        normalized: SingleTaskRunSubmission,
+        run_id: str,
+        task_id: str,
+        admitted_at_ms: int,
+    ) -> RunSubmissionResult:
+        try:
+            await self.initialise()
+        except Exception as exc:
+            return self._failure(
+                status=RunSubmissionStatus.REJECTED,
+                tenant_id=normalized.tenant_id,
+                run_id=run_id,
+                task_id=task_id,
+                run_admitted=False,
+                code=(
+                    RunSubmissionFailureCode
+                    .TASK_ADMIT_INITIALISATION_FAILED
+                ),
+                exc=exc,
+            )
+        return await self._submit_once(
+            normalized=normalized,
+            run_id=run_id,
+            task_id=task_id,
+            admitted_at_ms=admitted_at_ms,
+        )
+
+    async def _submit_once(
+        self,
+        *,
+        normalized: SingleTaskRunSubmission,
+        run_id: str,
+        task_id: str,
+        admitted_at_ms: int,
+    ) -> RunSubmissionResult:
+        tenant_id = normalized.tenant_id
         payload = dict(normalized.payload)
         admission_request = _RunAdmissionRequest(
             run_id=run_id,
@@ -541,27 +876,46 @@ class RunSubmissionCoordinator:
             trace_state=str(
                 request.trace_state or ""
             ).strip(),
+            idempotency_key=(
+                request.idempotency_key
+                if isinstance(
+                    request.idempotency_key,
+                    str,
+                )
+                else ""
+            ),
         )
 
     def _new_run_id(self, tenant_id: str) -> str:
-        return f"run-{tenant_id}-{self._next_uuid()}"
+        return (
+            f"run-{tenant_id}-"
+            f"{self._next_uuid(self._uuid_factory, name='uuid_factory')}"
+        )
 
     def _new_task_id(self) -> str:
-        return f"task-{self._next_uuid()}"
+        return (
+            "task-"
+            f"{self._next_uuid(self._uuid_factory, name='uuid_factory')}"
+        )
 
-    def _next_uuid(self) -> UUID:
-        value = self._uuid_factory()
+    @staticmethod
+    def _next_uuid(
+        factory: Callable[[], UUID],
+        *,
+        name: str,
+    ) -> UUID:
+        value = factory()
         if not isinstance(value, UUID):
             raise TypeError(
-                "uuid_factory must return uuid.UUID"
+                f"{name} must return uuid.UUID"
             )
         if value.version != 4:
             raise ValueError(
-                "uuid_factory must return UUIDv4"
+                f"{name} must return UUIDv4"
             )
         if value.int == 0:
             raise ValueError(
-                "uuid_factory must not return nil UUID"
+                f"{name} must not return nil UUID"
             )
         return value
 
@@ -606,4 +960,5 @@ class RunSubmissionCoordinator:
             automatic_retry=False,
             automatic_rollback=False,
             automatic_repair=False,
+            idempotent_replay=False,
         )
