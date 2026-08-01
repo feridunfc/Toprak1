@@ -26,6 +26,8 @@ Security matrix (Sprint 13):
   Tenant-scoped (X-Tenant-ID header, ownership check):
     GET /workers                       (tenant sees fleet; no sensitive detail)
     GET /workers/{worker_id}
+    POST /runs
+    GET /runs/{run_id}
     GET /runs/{run_id}/state
     GET /runs/{run_id}/result
     GET /runs/{run_id}/placement       (Sprint 10)
@@ -59,6 +61,11 @@ from hfa_control.exceptions import (
     TenantMismatchError,
     LeadershipError,
 )
+from hfa_control.run_submission import SingleTaskRunSubmission
+from hfa_tools.middleware.tenant import (
+    TenantFormatError as RunIdFormatError,
+    validate_run_id_format,
+)
 from hfa_control.api.crash_boundary_evidence import read_crash_boundary_evidence
 from hfa_control.api.task_evidence import read_task_evidence
 from hfa_control.terminal_duplicate_operator_evidence import read_terminal_duplicate_operator_evidence
@@ -82,6 +89,9 @@ from hfa_control.api.models import (
     RunStateResponse,
     RunClaimResponse,
     RunResultResponse,
+    RunSubmissionRequest,
+    RunSubmissionResponse,
+    RunStatusResultResponse,
     RunningRunSummary,
     RunningRunsResponse,
     StaleRunSummary,
@@ -322,6 +332,86 @@ async def runs_running(
         for r in runs
     ]
     return RunningRunsResponse(count=len(summaries), runs=summaries)
+
+
+@router.post(
+    "/runs",
+    response_model=RunSubmissionResponse,
+    status_code=202,
+)
+async def submit_run(
+    body: RunSubmissionRequest,
+    request: Request,
+    x_tenant_id: str = Header(...),
+):
+    """Tenant-scoped canonical single-task RUN submission."""
+    tenant_id = _tenant_header(x_tenant_id)
+    data = await request.app.state.cp.submit_single_task_run(
+        SingleTaskRunSubmission(
+            tenant_id=tenant_id,
+            payload=body.payload,
+            agent_type=body.agent_type,
+            priority=body.priority,
+            estimated_cost_cents=body.estimated_cost_cents,
+            preferred_region=body.preferred_region,
+            preferred_placement=body.preferred_placement,
+            required_capabilities=tuple(body.required_capabilities),
+            trace_parent=body.trace_parent,
+            trace_state=body.trace_state,
+        )
+    )
+    response = RunSubmissionResponse(**data)
+    if response.status == "ACCEPTED":
+        return response
+
+    if response.status == "SUBMISSION_INCOMPLETE":
+        status_code = 409
+    elif response.failure_code == "INVALID_REQUEST":
+        status_code = 400
+    else:
+        status_code = 503
+
+    return JSONResponse(
+        status_code=status_code,
+        content=response.model_dump(),
+    )
+
+
+@router.get(
+    "/runs/{run_id}",
+    response_model=RunStatusResultResponse,
+)
+async def run_status_result(
+    run_id: str,
+    request: Request,
+    x_tenant_id: str = Header(...),
+) -> RunStatusResultResponse:
+    """Tenant-scoped combined durable RUN status/result view."""
+    tenant_id = _tenant_header(x_tenant_id)
+    try:
+        run_tenant_id, _ = validate_run_id_format(run_id)
+    except RunIdFormatError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    if run_tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant mismatch",
+        )
+
+    data = await request.app.state.cp.get_run_status_result(run_id)
+    if (
+        data.get("status") == "UNKNOWN"
+        and data.get("completeness") == "UNKNOWN_RUN"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run {run_id!r} not found",
+        )
+    return RunStatusResultResponse(**data)
 
 
 @router.get("/runs/{run_id}/state", response_model=RunStateResponse)

@@ -15,6 +15,10 @@ from hfa_control.models import ControlPlaneConfig
 from hfa_control.recovery import RecoveryService
 from hfa_control.redis_resilience import RedisHealthMonitor
 from hfa_control.registry import WorkerRegistry
+from hfa_control.run_submission import (
+    RunSubmissionCoordinator,
+    SingleTaskRunSubmission,
+)
 from hfa_control.scheduler import Scheduler, build_production_scheduler
 from hfa_control.shard import ShardOwnershipManager
 
@@ -75,6 +79,21 @@ class ControlPlaneService:
             registry=self._registry,
             shards=self._shards,
             event_store=None,
+        )
+        scheduler_composition = self._scheduler.composition
+        scheduler_dag_lua = (
+            None
+            if scheduler_composition is None
+            else scheduler_composition.dag_lua
+        )
+        if scheduler_dag_lua is None:
+            raise RuntimeError(
+                "production scheduler composition must expose dag_lua "
+                "for canonical RUN submission"
+            )
+        self._run_submission = RunSubmissionCoordinator(
+            admission_controller=self._admitter,
+            dag_lua=scheduler_dag_lua,
         )
         self._recovery = RecoveryService(redis, self._config)
         self._redis_monitor = RedisHealthMonitor(redis)
@@ -533,6 +552,13 @@ class ControlPlaneService:
             "truth_conflict": bool(conflicts),
             "truth_conflicts": conflicts,
         }
+
+    async def submit_single_task_run(
+        self,
+        request: SingleTaskRunSubmission,
+    ) -> dict:
+        """Submit one canonical root TASK through existing production authorities."""
+        return (await self._run_submission.submit(request)).to_dict()
 
     async def get_run_claim(self, run_id: str) -> dict:
         from hfa.runtime.state_store import StateStore
