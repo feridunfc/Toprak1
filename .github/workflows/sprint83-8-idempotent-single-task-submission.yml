@@ -189,7 +189,7 @@ jobs:
           ! grep -Eqi \
             'skipped|deselected|xfailed|xpassed' \
             sprint83_8_contracts.txt
-          grep -Eq '(^|[^0-9])74 passed' \
+          grep -Eq '(^|[^0-9])77 passed' \
             sprint83_8_contracts.txt
 
       - name: Real Redis Sprint 83.8 E2E

@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/workflows/sprint83-8-idempotent-single-task-submission.yml'
       - '.github/workflows/sprint83-9-idempotency-reservation-diagnostics.yml'
       - 'docs/implementation/sprint83/SPRINT83.9-idempotency-reservation-diagnostics.md'
       - 'hfa-core/src/hfa/lua/submission_idempotency.lua'
@@ -62,6 +63,8 @@ jobs:
               "sprint/83-9-idempotency-reservation-diagnostics"
           )
           allowlist = {
+              ".github/workflows/"
+              "sprint83-8-idempotent-single-task-submission.yml",
               ".github/workflows/"
               "sprint83-9-idempotency-reservation-diagnostics.yml",
               "docs/implementation/sprint83/"

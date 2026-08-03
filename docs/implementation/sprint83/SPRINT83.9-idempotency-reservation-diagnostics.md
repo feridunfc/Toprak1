@@ -87,9 +87,10 @@ owner_token_exposed: false
 
 ## Exact source scope
 
-Exactly 9 files:
+Exactly 10 files:
 
 ```text
+.github/workflows/sprint83-8-idempotent-single-task-submission.yml
 .github/workflows/sprint83-9-idempotency-reservation-diagnostics.yml
 docs/implementation/sprint83/SPRINT83.9-idempotency-reservation-diagnostics.md
 hfa-core/src/hfa/lua/submission_idempotency.lua
