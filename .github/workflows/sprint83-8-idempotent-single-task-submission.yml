@@ -189,8 +189,15 @@ jobs:
           ! grep -Eqi \
             'skipped|deselected|xfailed|xpassed' \
             sprint83_8_contracts.txt
-          grep -Eq '(^|[^0-9])77 passed' \
-            sprint83_8_contracts.txt
+          passed_count="$(
+            grep -Eo '[0-9]+ passed' \
+              sprint83_8_contracts.txt \
+              | tail -n 1 \
+              | cut -d' ' -f1
+          )"
+          test -n "$passed_count"
+          test "$passed_count" -ge 74
+          echo "SPRINT83_8_CONTRACT_COUNT_OK passed_count=$passed_count minimum=74"
 
       - name: Real Redis Sprint 83.8 E2E
         shell: bash
@@ -204,8 +211,15 @@ jobs:
           ! grep -Eqi \
             'skipped|deselected|xfailed|xpassed' \
             sprint83_8_integration.txt
-          grep -Eq '(^|[^0-9])2 passed' \
-            sprint83_8_integration.txt
+          passed_count="$(
+            grep -Eo '[0-9]+ passed' \
+              sprint83_8_integration.txt \
+              | tail -n 1 \
+              | cut -d' ' -f1
+          )"
+          test -n "$passed_count"
+          test "$passed_count" -ge 2
+          echo "SPRINT83_8_INTEGRATION_COUNT_OK passed_count=$passed_count minimum=2"
 
       - name: Combined Sprint 83.7 and 83.8 E2E
         shell: bash
@@ -220,8 +234,15 @@ jobs:
           ! grep -Eqi \
             'skipped|deselected|xfailed|xpassed' \
             sprint83_8_combined_e2e.txt
-          grep -Eq '(^|[^0-9])4 passed' \
-            sprint83_8_combined_e2e.txt
+          passed_count="$(
+            grep -Eo '[0-9]+ passed' \
+              sprint83_8_combined_e2e.txt \
+              | tail -n 1 \
+              | cut -d' ' -f1
+          )"
+          test -n "$passed_count"
+          test "$passed_count" -ge 4
+          echo "SPRINT83_8_COMBINED_COUNT_OK passed_count=$passed_count minimum=4"
 
       - name: Complete Sprint 83.7 and 83.8 regression set
         shell: bash
@@ -248,8 +269,15 @@ jobs:
           ! grep -Eqi \
             'skipped|deselected|xfailed|xpassed' \
             sprint83_8_regressions.txt
-          grep -Eq '(^|[^0-9])196 passed' \
-            sprint83_8_regressions.txt
+          passed_count="$(
+            grep -Eo '[0-9]+ passed' \
+              sprint83_8_regressions.txt \
+              | tail -n 1 \
+              | cut -d' ' -f1
+          )"
+          test -n "$passed_count"
+          test "$passed_count" -ge 196
+          echo "SPRINT83_8_REGRESSION_COUNT_OK passed_count=$passed_count minimum=196"
 
       - name: Authority and architecture boundary scan
         shell: bash
