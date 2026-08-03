@@ -183,6 +183,10 @@ try:
         automatic_rollback: bool
         automatic_repair: bool
         idempotent_replay: bool = False
+        idempotency_reservation_created_at_ms: Optional[int] = None
+        idempotency_reservation_updated_at_ms: Optional[int] = None
+        idempotency_reservation_ttl_seconds: Optional[int] = None
+        idempotency_recovery_safe: bool = False
 
     class RunStatusResultResponse(_CompatModel):
         schema_version: int
@@ -430,6 +434,10 @@ except ImportError:
         automatic_rollback: bool
         automatic_repair: bool
         idempotent_replay: bool = False
+        idempotency_reservation_created_at_ms: Optional[int] = None
+        idempotency_reservation_updated_at_ms: Optional[int] = None
+        idempotency_reservation_ttl_seconds: Optional[int] = None
+        idempotency_recovery_safe: bool = False
 
     @dataclass
     class RunStatusResultResponse(_DataclassModel):

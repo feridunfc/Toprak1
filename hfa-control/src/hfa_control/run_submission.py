@@ -94,6 +94,10 @@ class RunSubmissionResult:
     automatic_rollback: bool = False
     automatic_repair: bool = False
     idempotent_replay: bool = False
+    idempotency_reservation_created_at_ms: int | None = None
+    idempotency_reservation_updated_at_ms: int | None = None
+    idempotency_reservation_ttl_seconds: int | None = None
+    idempotency_recovery_safe: bool = False
 
     @property
     def accepted(self) -> bool:
@@ -120,6 +124,18 @@ class RunSubmissionResult:
             "automatic_rollback": self.automatic_rollback,
             "automatic_repair": self.automatic_repair,
             "idempotent_replay": self.idempotent_replay,
+            "idempotency_reservation_created_at_ms": (
+                self.idempotency_reservation_created_at_ms
+            ),
+            "idempotency_reservation_updated_at_ms": (
+                self.idempotency_reservation_updated_at_ms
+            ),
+            "idempotency_reservation_ttl_seconds": (
+                self.idempotency_reservation_ttl_seconds
+            ),
+            "idempotency_recovery_safe": (
+                self.idempotency_recovery_safe
+            ),
         }
 
     @classmethod
@@ -167,6 +183,27 @@ class RunSubmissionResult:
             ),
             idempotent_replay=bool(
                 value.get("idempotent_replay", False)
+            ),
+            idempotency_reservation_created_at_ms=(
+                int(value["idempotency_reservation_created_at_ms"])
+                if value.get("idempotency_reservation_created_at_ms")
+                is not None
+                else None
+            ),
+            idempotency_reservation_updated_at_ms=(
+                int(value["idempotency_reservation_updated_at_ms"])
+                if value.get("idempotency_reservation_updated_at_ms")
+                is not None
+                else None
+            ),
+            idempotency_reservation_ttl_seconds=(
+                int(value["idempotency_reservation_ttl_seconds"])
+                if value.get("idempotency_reservation_ttl_seconds")
+                is not None
+                else None
+            ),
+            idempotency_recovery_safe=bool(
+                value.get("idempotency_recovery_safe", False)
             ),
         )
 
@@ -436,6 +473,16 @@ class RunSubmissionCoordinator:
                     RunSubmissionFailureCode
                     .IDEMPOTENCY_IN_PROGRESS
                 ),
+                idempotency_reservation_created_at_ms=(
+                    reservation.created_at_ms
+                ),
+                idempotency_reservation_updated_at_ms=(
+                    reservation.updated_at_ms
+                ),
+                idempotency_reservation_ttl_seconds=(
+                    reservation.ttl_seconds
+                ),
+                idempotency_recovery_safe=False,
             )
 
         if (
@@ -940,6 +987,10 @@ class RunSubmissionCoordinator:
         task_admitted: bool = False,
         task_ready: bool = False,
         task_admit_status: str = "",
+        idempotency_reservation_created_at_ms: int | None = None,
+        idempotency_reservation_updated_at_ms: int | None = None,
+        idempotency_reservation_ttl_seconds: int | None = None,
+        idempotency_recovery_safe: bool = False,
     ) -> RunSubmissionResult:
         return RunSubmissionResult(
             status=status,
@@ -961,4 +1012,14 @@ class RunSubmissionCoordinator:
             automatic_rollback=False,
             automatic_repair=False,
             idempotent_replay=False,
+            idempotency_reservation_created_at_ms=(
+                idempotency_reservation_created_at_ms
+            ),
+            idempotency_reservation_updated_at_ms=(
+                idempotency_reservation_updated_at_ms
+            ),
+            idempotency_reservation_ttl_seconds=(
+                idempotency_reservation_ttl_seconds
+            ),
+            idempotency_recovery_safe=idempotency_recovery_safe,
         )

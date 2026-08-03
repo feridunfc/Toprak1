@@ -46,7 +46,9 @@ local function current()
     "task_id",
     "state",
     "owner_token",
-    "result_json"
+    "result_json",
+    "created_at_ms",
+    "updated_at_ms"
   )
 end
 
@@ -117,14 +119,28 @@ if action == "reserve" then
   end
 
   if values[6] == "IN_PROGRESS" then
-    if values[7] == false or values[7] == "" then
+    local created_at_ms = tonumber(values[9])
+    local updated_at_ms = tonumber(values[10])
+    local ttl_remaining = redis.call("TTL", key)
+    if (
+      values[7] == false
+      or values[7] == ""
+      or not created_at_ms
+      or created_at_ms < 0
+      or not updated_at_ms
+      or updated_at_ms < created_at_ms
+      or ttl_remaining <= 0
+    ) then
       return {"INVALID_EVIDENCE", values[4], values[5], ""}
     end
     return {
       "IN_PROGRESS_SAME_REQUEST",
       values[4],
       values[5],
-      ""
+      "",
+      tostring(created_at_ms),
+      tostring(updated_at_ms),
+      tostring(ttl_remaining)
     }
   end
 

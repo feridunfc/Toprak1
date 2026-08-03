@@ -1,0 +1,297 @@
+name: Sprint 83.9 Idempotency Reservation Diagnostics
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - '.github/workflows/sprint83-8-idempotent-single-task-submission.yml'
+      - '.github/workflows/sprint83-9-idempotency-reservation-diagnostics.yml'
+      - 'docs/implementation/sprint83/SPRINT83.9-idempotency-reservation-diagnostics.md'
+      - 'hfa-core/src/hfa/lua/submission_idempotency.lua'
+      - 'hfa-control/src/hfa_control/api/models.py'
+      - 'hfa-control/src/hfa_control/run_submission.py'
+      - 'hfa-control/src/hfa_control/submission_idempotency.py'
+      - 'scripts/runtime_alpha_acceptance_83_9.py'
+      - 'tests/integration/test_product_alpha_idempotency_diagnostics_e2e_83_9.py'
+      - 'tests/unit/test_submission_idempotency.py'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact Sprint 83.9 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = (
+              "sprint/83-9-idempotency-reservation-diagnostics"
+          )
+          allowlist = {
+              ".github/workflows/"
+              "sprint83-8-idempotent-single-task-submission.yml",
+              ".github/workflows/"
+              "sprint83-9-idempotency-reservation-diagnostics.yml",
+              "docs/implementation/sprint83/"
+              "SPRINT83.9-idempotency-reservation-diagnostics.md",
+              "hfa-core/src/hfa/lua/submission_idempotency.lua",
+              "hfa-control/src/hfa_control/api/models.py",
+              "hfa-control/src/hfa_control/run_submission.py",
+              "hfa-control/src/hfa_control/"
+              "submission_idempotency.py",
+              "scripts/runtime_alpha_acceptance_83_9.py",
+              "tests/integration/"
+              "test_product_alpha_idempotency_diagnostics_e2e_83_9.py",
+              "tests/unit/test_submission_idempotency.py",
+          }
+          changed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert changed == allowlist, {
+                  "missing": sorted(allowlist - changed),
+                  "unexpected": sorted(changed - allowlist),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              protected_runtime = {
+                  "hfa-core/src/hfa/lua/"
+                  "submission_idempotency.lua",
+                  "hfa-control/src/hfa_control/api/models.py",
+                  "hfa-control/src/hfa_control/run_submission.py",
+                  "hfa-control/src/hfa_control/"
+                  "submission_idempotency.py",
+              }
+              assert changed & protected_runtime, {
+                  "mode": "FUTURE_RUNTIME_REGRESSION",
+                  "changed": sorted(changed),
+              }
+              mode = "RUNTIME_INTERSECTION"
+
+          forbidden = [
+              path
+              for path in changed
+              if path.startswith("local_out/")
+              or "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, sorted(forbidden)
+
+          print(
+              "SPRINT83_9_SCOPE_OK",
+              mode,
+              f"changed_count={len(changed)}",
+              sorted(changed),
+          )
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -e hfa-core \
+            -e hfa-control \
+            -e hfa-worker \
+            -e hfa-tools
+          python -m pip install \
+            pytest \
+            pytest-asyncio \
+            redis \
+            fakeredis \
+            rfc8785 \
+            fastapi \
+            httpx \
+            uvicorn
+
+      - name: Dedicated diagnostics contract tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_submission_idempotency.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            -q
+
+      - name: Real Redis 83.8 and 83.9 E2E
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py \
+            tests/integration/test_product_alpha_idempotency_diagnostics_e2e_83_9.py \
+            -q
+
+      - name: Deterministic one-command acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out/sprint83
+
+          python scripts/runtime_alpha_acceptance_83_9.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s83-9-ci \
+            --reset-test-db \
+            --out local_out/sprint83/sprint83_9_diagnostics.json \
+            --json \
+            > sprint83_9_acceptance_stdout.json
+
+          python scripts/runtime_alpha_acceptance_83_9.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s83-9-ci \
+            --reset-test-db \
+            --out local_out/sprint83/sprint83_9_diagnostics_repeat.json \
+            --json \
+            > sprint83_9_acceptance_repeat_stdout.json
+
+          cmp \
+            local_out/sprint83/sprint83_9_diagnostics.json \
+            local_out/sprint83/sprint83_9_diagnostics_repeat.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(
+              Path(
+                  "local_out/sprint83/"
+                  "sprint83_9_diagnostics.json"
+              ).read_text(encoding="utf-8")
+          )
+
+          assert report["status"] == "PASS_WITH_LIMITATIONS"
+          assert report["reservation_timestamps_exposed"] is True
+          assert report["reservation_ttl_exposed"] is True
+          assert report["owner_token_exposed"] is False
+          assert report["in_progress_zero_lifecycle_writes"] is True
+          assert report["corrupt_diagnostics_fail_closed"] is True
+          assert report["stale_owner_takeover"] is False
+          assert report["automatic_release"] is False
+          assert report["automatic_retry"] is False
+          assert report["automatic_repair"] is False
+          assert report["new_lifecycle_writer"] is False
+          assert report["production_ready"] is False
+          assert report["production_cutover_authorized"] is False
+
+          print("SPRINT83_9_ACCEPTANCE_OK")
+          PY
+
+      - name: Authority and privacy scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime = [
+              Path(
+                  "hfa-core/src/hfa/lua/"
+                  "submission_idempotency.lua"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "submission_idempotency.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/"
+                  "run_submission.py"
+              ),
+              Path(
+                  "hfa-control/src/hfa_control/api/models.py"
+              ),
+          ]
+          combined = "\n".join(
+              path.read_text(encoding="utf-8")
+              for path in runtime
+          )
+
+          assert "TAKEOVER" not in combined.upper()
+          assert "automatic_release=True" not in combined
+          assert "automatic_retry=True" not in combined
+          assert "automatic_repair=True" not in combined
+          assert "owner_token" not in Path(
+              "hfa-control/src/hfa_control/api/models.py"
+          ).read_text(encoding="utf-8")
+
+          print(
+              "SPRINT83_9_AUTHORITY_SCAN_OK",
+              "new_lifecycle_writer=0",
+              "takeover=0",
+              "automatic_release=0",
+              "automatic_retry=0",
+              "automatic_repair=0",
+              "owner_token_api=0",
+          )
+          PY
+
+      - name: Compile and whitespace validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q \
+            hfa-control/src/hfa_control/submission_idempotency.py \
+            hfa-control/src/hfa_control/run_submission.py \
+            hfa-control/src/hfa_control/api/models.py \
+            scripts/runtime_alpha_acceptance_83_9.py \
+            tests/unit/test_submission_idempotency.py \
+            tests/integration/test_product_alpha_idempotency_diagnostics_e2e_83_9.py
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint83-9-idempotency-reservation-diagnostics
+          path: |
+            local_out/sprint83/sprint83_9_diagnostics.json
+            sprint83_9_acceptance_stdout.json
+          if-no-files-found: warn
