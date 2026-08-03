@@ -553,3 +553,97 @@ async def test_final_replay_rejects_stored_identity_mismatch(
     assert dag.initialise_calls == 0
     assert dag.task_admit_calls == []
     assert store.finalize_calls == []
+
+@pytest.mark.asyncio
+async def test_store_maps_in_progress_diagnostics():
+    loader = LoaderProbe(
+        [
+            b"IN_PROGRESS_SAME_REQUEST",
+            b"run-tenant1-existing",
+            b"task-existing",
+            b"",
+            b"1000",
+            b"1250",
+            b"86399",
+        ]
+    )
+    store = SubmissionIdempotencyStore(
+        object(), retention_seconds=86_400, loader=loader
+    )
+    result = await store.reserve(
+        tenant_id="tenant1",
+        idempotency_key="key-one",
+        request_fingerprint="f" * 64,
+        run_id="run-tenant1-new",
+        task_id="task-new",
+        owner_token="owner-new",
+        created_at_ms=2000,
+    )
+    assert result.status is (
+        IdempotencyReservationStatus.IN_PROGRESS_SAME_REQUEST
+    )
+    assert result.run_id == "run-tenant1-existing"
+    assert result.task_id == "task-existing"
+    assert result.created_at_ms == 1000
+    assert result.updated_at_ms == 1250
+    assert result.ttl_seconds == 86399
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_invalid_in_progress_diagnostics():
+    loader = LoaderProbe(
+        [
+            b"IN_PROGRESS_SAME_REQUEST",
+            b"run-tenant1-existing",
+            b"task-existing",
+            b"",
+            b"2000",
+            b"1000",
+            b"0",
+        ]
+    )
+    store = SubmissionIdempotencyStore(
+        object(), retention_seconds=86_400, loader=loader
+    )
+    with pytest.raises(SubmissionIdempotencyError):
+        await store.reserve(
+            tenant_id="tenant1",
+            idempotency_key="key-one",
+            request_fingerprint="f" * 64,
+            run_id="run-tenant1-new",
+            task_id="task-new",
+            owner_token="owner-new",
+            created_at_ms=3000,
+        )
+
+
+@pytest.mark.asyncio
+async def test_in_progress_response_exposes_safe_diagnostics_only():
+    admission = AdmissionProbe()
+    dag = DagProbe()
+    store = StoreProbe(
+        IdempotencyReservation(
+            status=(
+                IdempotencyReservationStatus.IN_PROGRESS_SAME_REQUEST
+            ),
+            run_id="run-tenant1-stored",
+            task_id="task-stored",
+            created_at_ms=1000,
+            updated_at_ms=1250,
+            ttl_seconds=86399,
+        )
+    )
+    result = await subject(store, admission, dag).submit(request())
+    assert result.failure_code is (
+        RunSubmissionFailureCode.IDEMPOTENCY_IN_PROGRESS
+    )
+    assert result.idempotency_reservation_created_at_ms == 1000
+    assert result.idempotency_reservation_updated_at_ms == 1250
+    assert result.idempotency_reservation_ttl_seconds == 86399
+    assert result.idempotency_recovery_safe is False
+    assert admission.calls == []
+    assert dag.initialise_calls == 0
+    assert dag.task_admit_calls == []
+    payload = result.to_dict()
+    assert "owner_token" not in json.dumps(payload, sort_keys=True)
+    assert type(result).from_dict(payload) == result

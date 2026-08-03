@@ -30,6 +30,9 @@ class IdempotencyReservation:
     run_id: str
     task_id: str
     result_json: str = ""
+    created_at_ms: int | None = None
+    updated_at_ms: int | None = None
+    ttl_seconds: int | None = None
 
 
 def validate_idempotency_key(value: Any) -> str:
@@ -346,9 +349,43 @@ class SubmissionIdempotencyStore:
                 "idempotency reservation returned "
                 f"unknown status: {values[0]!r}"
             ) from exc
+        created_at_ms: int | None = None
+        updated_at_ms: int | None = None
+        ttl_seconds: int | None = None
+        if (
+            status
+            is IdempotencyReservationStatus
+            .IN_PROGRESS_SAME_REQUEST
+        ):
+            if len(values) < 7:
+                raise SubmissionIdempotencyError(
+                    "in-progress idempotency reservation "
+                    f"missing diagnostics: {values!r}"
+                )
+            try:
+                created_at_ms = int(values[4])
+                updated_at_ms = int(values[5])
+                ttl_seconds = int(values[6])
+            except (TypeError, ValueError) as exc:
+                raise SubmissionIdempotencyError(
+                    "in-progress idempotency reservation "
+                    f"has invalid diagnostics: {values!r}"
+                ) from exc
+            if (
+                created_at_ms < 0
+                or updated_at_ms < created_at_ms
+                or ttl_seconds <= 0
+            ):
+                raise SubmissionIdempotencyError(
+                    "in-progress idempotency reservation "
+                    f"has contradictory diagnostics: {values!r}"
+                )
         return IdempotencyReservation(
             status=status,
             run_id=values[1],
             task_id=values[2],
             result_json=values[3],
+            created_at_ms=created_at_ms,
+            updated_at_ms=updated_at_ms,
+            ttl_seconds=ttl_seconds,
         )
