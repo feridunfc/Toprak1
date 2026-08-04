@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -23,6 +24,7 @@ TASK_CLAIM_DUPLICATE_STATUS = "canonical_claim_already_projected"
 _MAX_SAFE_INTEGER = 2**53 - 1
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def parse_task_claim_binding_flag(value: str | None) -> bool:
@@ -40,6 +42,15 @@ def _required_text(value: Any, field_name: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise ValueError(f"{field_name} must not be empty")
+    return normalized
+
+
+def _required_sha256(value: Any, field_name: str) -> str:
+    normalized = _required_text(value, field_name)
+    if _SHA256_PATTERN.fullmatch(normalized) is None:
+        raise ValueError(
+            f"{field_name} must be a lowercase SHA-256 hex digest"
+        )
     return normalized
 
 
@@ -299,3 +310,123 @@ def build_task_claim_context(
 
 def task_claim_status_allows_execution(status: str) -> bool:
     return status == TASK_CLAIM_PROJECTED_STATUS
+
+
+@dataclass(frozen=True)
+class TaskClaimCanonicalProjectionInput:
+    task_id: str
+    run_id: str
+    tenant_id: str
+    worker_instance_id: str
+    scheduler_epoch: str
+    claimed_at_ms: int
+    dispatch_attempt: int
+    dispatch_revision: int
+    previous_claim_epoch: int
+    dispatch_transition_id: str
+    dispatch_record_hash: str
+    dispatch_command_hash: str
+    dispatch_operation_id: str
+    canonical_transition_id: str
+    canonical_record_hash: str
+    canonical_command_hash: str
+    canonical_revision: int
+    canonical_operation_id: str
+    claim_epoch: int
+
+
+def normalize_task_claim_canonical_projection_input(
+    projection: TaskClaimCanonicalProjectionInput,
+) -> TaskClaimCanonicalProjectionInput:
+    if not isinstance(
+        projection,
+        TaskClaimCanonicalProjectionInput,
+    ):
+        raise ValueError(
+            "canonical TASK_CLAIM projection must be "
+            "TaskClaimCanonicalProjectionInput"
+        )
+
+    claim = normalize_task_claim_input(
+        TaskClaimAuthorityInput(
+            task_id=projection.task_id,
+            run_id=projection.run_id,
+            tenant_id=projection.tenant_id,
+            worker_instance_id=projection.worker_instance_id,
+            dispatch_worker_id=projection.worker_instance_id,
+            scheduler_epoch=projection.scheduler_epoch,
+            claimed_at_ms=projection.claimed_at_ms,
+            dispatch_attempt=projection.dispatch_attempt,
+            dispatch_revision=projection.dispatch_revision,
+            previous_claim_epoch=projection.previous_claim_epoch,
+            dispatch_transition_id=projection.dispatch_transition_id,
+            dispatch_record_hash=projection.dispatch_record_hash,
+            dispatch_command_hash=projection.dispatch_command_hash,
+            dispatch_operation_id=projection.dispatch_operation_id,
+        )
+    )
+
+    normalized = replace(
+        projection,
+        task_id=claim.task_id,
+        run_id=claim.run_id,
+        tenant_id=claim.tenant_id,
+        worker_instance_id=claim.worker_instance_id,
+        scheduler_epoch=claim.scheduler_epoch,
+        claimed_at_ms=claim.claimed_at_ms,
+        dispatch_attempt=claim.dispatch_attempt,
+        dispatch_revision=claim.dispatch_revision,
+        previous_claim_epoch=claim.previous_claim_epoch,
+        dispatch_transition_id=claim.dispatch_transition_id,
+        dispatch_record_hash=_required_sha256(
+            claim.dispatch_record_hash,
+            "dispatch_record_hash",
+        ),
+        dispatch_command_hash=_required_sha256(
+            claim.dispatch_command_hash,
+            "dispatch_command_hash",
+        ),
+        dispatch_operation_id=claim.dispatch_operation_id,
+        canonical_transition_id=_required_text(
+            projection.canonical_transition_id,
+            "canonical_transition_id",
+        ),
+        canonical_record_hash=_required_sha256(
+            projection.canonical_record_hash,
+            "canonical_record_hash",
+        ),
+        canonical_command_hash=_required_sha256(
+            projection.canonical_command_hash,
+            "canonical_command_hash",
+        ),
+        canonical_revision=_exact_safe_integer(
+            projection.canonical_revision,
+            "canonical_revision",
+            minimum=1,
+        ),
+        canonical_operation_id=_required_text(
+            projection.canonical_operation_id,
+            "canonical_operation_id",
+        ),
+        claim_epoch=_exact_safe_integer(
+            projection.claim_epoch,
+            "claim_epoch",
+            minimum=1,
+        ),
+    )
+
+    if normalized.canonical_revision != normalized.dispatch_revision + 1:
+        raise ValueError(
+            "canonical_revision must be dispatch_revision + 1"
+        )
+    if normalized.claim_epoch != normalized.previous_claim_epoch + 1:
+        raise ValueError(
+            "claim_epoch must be previous_claim_epoch + 1"
+        )
+    expected_operation_id = task_claim_operation_id(claim)
+    if normalized.canonical_operation_id != expected_operation_id:
+        raise ValueError(
+            "canonical_operation_id does not match TASK identity and attempt"
+        )
+
+    return normalized

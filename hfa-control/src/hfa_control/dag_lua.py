@@ -16,6 +16,10 @@ from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.schema import DagRedisKey
 from hfa.dag.states import DagTaskState
 from hfa.lua.loader import LuaScriptLoader
+from hfa_control.task_claim_authority import (
+    TaskClaimCanonicalProjectionInput,
+    normalize_task_claim_canonical_projection_input,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +116,12 @@ TASK_CLAIM_STATUS_RUN_TRUTH_CORRUPTION_CONFLICT = "run_truth_corruption_conflict
 TASK_CLAIM_STATUS_TRUTH_CONFLICT_EVIDENCE_STORE_UNAVAILABLE = (
     "truth_conflict_evidence_store_unavailable"
 )
+TASK_CLAIM_STATUS_CANONICAL_ALREADY_PROJECTED = (
+    "canonical_claim_already_projected"
+)
+TASK_CLAIM_STATUS_CANONICAL_PROJECTION_CONFLICT = (
+    "canonical_projection_conflict"
+)
 
 TASK_CLAIM_SUCCESS_STATUSES: frozenset[str] = frozenset({
     TASK_CLAIM_STATUS_TASK_CLAIMED,
@@ -134,6 +144,8 @@ TASK_CLAIM_FAILURE_STATUSES: frozenset[str] = frozenset({
     TASK_CLAIM_STATUS_RUN_TRUTH_TERMINAL_CONFLICT,
     TASK_CLAIM_STATUS_RUN_TRUTH_CORRUPTION_CONFLICT,
     TASK_CLAIM_STATUS_TRUTH_CONFLICT_EVIDENCE_STORE_UNAVAILABLE,
+    TASK_CLAIM_STATUS_CANONICAL_ALREADY_PROJECTED,
+    TASK_CLAIM_STATUS_CANONICAL_PROJECTION_CONFLICT,
 })
 
 TASK_CLAIM_STATUSES: frozenset[str] = (
@@ -536,11 +548,56 @@ class DagLua:
         run_id: str = "",
         allow_legacy_direct_claim: bool | None = None,
     ) -> TaskClaimResult:
+        return await self._task_claim_project(
+            task_id=task_id,
+            tenant_id=tenant_id,
+            worker_instance_id=worker_instance_id,
+            claimed_at_ms=claimed_at_ms,
+            scheduler_epoch=scheduler_epoch,
+            run_id=run_id,
+            allow_legacy_direct_claim=allow_legacy_direct_claim,
+            canonical_projection=None,
+        )
+
+    async def task_claim_canonical_projection(
+        self,
+        projection: TaskClaimCanonicalProjectionInput,
+    ) -> TaskClaimResult:
+        normalized = normalize_task_claim_canonical_projection_input(
+            projection
+        )
+        return await self._task_claim_project(
+            task_id=normalized.task_id,
+            tenant_id=normalized.tenant_id,
+            worker_instance_id=normalized.worker_instance_id,
+            claimed_at_ms=normalized.claimed_at_ms,
+            scheduler_epoch=normalized.scheduler_epoch,
+            run_id=normalized.run_id,
+            allow_legacy_direct_claim=False,
+            canonical_projection=normalized,
+        )
+
+    async def _task_claim_project(
+        self,
+        *,
+        task_id: str,
+        tenant_id: str,
+        worker_instance_id: str,
+        claimed_at_ms: int,
+        scheduler_epoch: str,
+        run_id: str,
+        allow_legacy_direct_claim: bool | None,
+        canonical_projection: (
+            TaskClaimCanonicalProjectionInput | None
+        ),
+    ) -> TaskClaimResult:
         await self._ensure_initialised()
         assert self._claim_loader is not None
 
         resolved_run_id = await _resolve_run_id_compat(
-            self._redis, task_id=task_id, run_id=run_id
+            self._redis,
+            task_id=task_id,
+            run_id=run_id,
         )
         keys = [
             DagRedisKey.task_state(task_id),
@@ -564,8 +621,58 @@ class DagLua:
             _legacy_direct_claim_arg(allow_legacy_direct_claim),
             resolved_run_id,
         ]
-        raw = await self._claim_loader.run(num_keys=len(keys), keys=keys, args=args)
-        return TaskClaimResult.from_lua(raw, task_id=task_id, worker_id=worker_instance_id)
+
+        if canonical_projection is None:
+            args.extend(
+                [
+                    "0",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "0",
+                    "",
+                    "0",
+                    "0",
+                    "",
+                    "",
+                    "",
+                    "0",
+                    "",
+                    "0",
+                ]
+            )
+        else:
+            args.extend(
+                [
+                    "1",
+                    canonical_projection.tenant_id,
+                    canonical_projection.canonical_transition_id,
+                    canonical_projection.canonical_record_hash,
+                    canonical_projection.canonical_command_hash,
+                    str(canonical_projection.canonical_revision),
+                    canonical_projection.canonical_operation_id,
+                    str(canonical_projection.previous_claim_epoch),
+                    str(canonical_projection.claim_epoch),
+                    canonical_projection.dispatch_transition_id,
+                    canonical_projection.dispatch_record_hash,
+                    canonical_projection.dispatch_command_hash,
+                    str(canonical_projection.dispatch_revision),
+                    canonical_projection.dispatch_operation_id,
+                    str(canonical_projection.dispatch_attempt),
+                ]
+            )
+
+        raw = await self._claim_loader.run(
+            num_keys=len(keys),
+            keys=keys,
+            args=args,
+        )
+        return TaskClaimResult.from_lua(
+            raw,
+            task_id=task_id,
+            worker_id=worker_instance_id,
+        )
 
     async def task_complete(
         self,

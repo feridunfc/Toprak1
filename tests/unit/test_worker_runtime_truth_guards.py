@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from hfa.authority import AggregateType, CanonicalAggregateIdentity
 from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
+from hfa_control.task_claim_authority import (
+    TaskClaimCanonicalProjectionInput,
+)
 from hfa_control.task_recovery import TaskHeartbeatManager
 
 
@@ -16,6 +22,10 @@ HEARTBEAT_LUA = ROOT / "hfa-core/src/hfa/lua/task_heartbeat.lua"
 COMPLETE_LUA = ROOT / "hfa-core/src/hfa/lua/task_complete.lua"
 CONSUMER = ROOT / "hfa-worker/src/hfa_worker/task_consumer.py"
 HEARTBEAT_LOOP = ROOT / "hfa-worker/src/hfa_worker/task_heartbeat.py"
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 class _Redis:
@@ -101,6 +111,89 @@ async def test_dag_lua_claim_passes_run_truth_and_conflict_keys() -> None:
     assert keys[7] == RedisKey.runtime_truth_conflict_index()
     assert keys[8] == RedisKey.runtime_truth_conflict_stream()
     assert args[8] == "run-1"
+    assert args[9] == "0"
+
+
+@pytest.mark.asyncio
+async def test_dag_lua_passes_exact_canonical_claim_projection_proof() -> None:
+    identity = CanonicalAggregateIdentity(
+        aggregate_type=AggregateType.TASK,
+        run_id="run-1",
+        task_id="task-1",
+    )
+    dispatch_operation_id = (
+        f"task-dispatch:v1:{identity.sha256}:attempt:2"
+    )
+    claim_operation_id = (
+        f"task-claim:v1:{identity.sha256}:attempt:2"
+    )
+    projection = TaskClaimCanonicalProjectionInput(
+        task_id="task-1",
+        run_id="run-1",
+        tenant_id="tenant-1",
+        worker_instance_id="worker-1",
+        scheduler_epoch="sched-1",
+        claimed_at_ms=100,
+        dispatch_attempt=2,
+        dispatch_revision=4,
+        previous_claim_epoch=7,
+        dispatch_transition_id="dispatch-transition",
+        dispatch_record_hash=_sha256("dispatch-record"),
+        dispatch_command_hash=_sha256("dispatch-command"),
+        dispatch_operation_id=dispatch_operation_id,
+        canonical_transition_id="claim-transition",
+        canonical_record_hash=_sha256("claim-record"),
+        canonical_command_hash=_sha256("claim-command"),
+        canonical_revision=5,
+        canonical_operation_id=claim_operation_id,
+        claim_epoch=8,
+    )
+
+    dag = DagLua(_Redis())
+    loader = _Loader(
+        ["task_claimed", "8", "sched-1", "worker-1", "task-1"]
+    )
+    dag._admit_loader = object()
+    dag._claim_loader = loader
+
+    result = await dag.task_claim_canonical_projection(projection)
+
+    assert result.ok is True
+    assert result.claim_epoch == "8"
+    assert loader.call is not None
+    num_keys, keys, args = loader.call
+    assert num_keys == 9
+    assert keys[6] == RedisKey.run_state("run-1")
+    assert args[9:] == [
+        "1",
+        "tenant-1",
+        "claim-transition",
+        _sha256("claim-record"),
+        _sha256("claim-command"),
+        "5",
+        claim_operation_id,
+        "7",
+        "8",
+        "dispatch-transition",
+        _sha256("dispatch-record"),
+        _sha256("dispatch-command"),
+        "4",
+        dispatch_operation_id,
+        "2",
+    ]
+
+    loader.call = None
+    with pytest.raises(
+        ValueError,
+        match="canonical_record_hash must be a lowercase SHA-256",
+    ):
+        await dag.task_claim_canonical_projection(
+            replace(
+                projection,
+                canonical_record_hash="not-a-sha256",
+            )
+        )
+    assert loader.call is None
 
 
 @pytest.mark.asyncio

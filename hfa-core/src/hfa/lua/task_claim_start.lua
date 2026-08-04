@@ -22,6 +22,21 @@
 -- 7  expected_scheduler_epoch
 -- 8  allow_legacy_direct_claim
 -- 9  explicit_run_id
+-- 10 canonical_projection_enabled
+-- 11 canonical_tenant_id
+-- 12 canonical_transition_id
+-- 13 canonical_record_hash
+-- 14 canonical_command_hash
+-- 15 canonical_revision
+-- 16 canonical_operation_id
+-- 17 canonical_previous_claim_epoch
+-- 18 canonical_claim_epoch
+-- 19 dispatch_transition_id
+-- 20 dispatch_record_hash
+-- 21 dispatch_command_hash
+-- 22 dispatch_revision
+-- 23 dispatch_operation_id
+-- 24 dispatch_attempt
 --
 -- RETURN
 -- { status, claim_epoch, scheduler_epoch, worker_instance_id, task_id }
@@ -45,6 +60,21 @@ local heartbeat_score           = tonumber(ARGV[6])
 local expected_scheduler_epoch  = ARGV[7]
 local allow_legacy_direct_claim = ARGV[8] or '0'
 local run_id                    = ARGV[9] or ''
+local canonical_projection      = ARGV[10] == '1'
+local canonical_tenant_id       = ARGV[11] or ''
+local canonical_transition_id   = ARGV[12] or ''
+local canonical_record_hash     = ARGV[13] or ''
+local canonical_command_hash    = ARGV[14] or ''
+local canonical_revision        = ARGV[15] or ''
+local canonical_operation_id    = ARGV[16] or ''
+local canonical_previous_epoch  = ARGV[17] or ''
+local canonical_claim_epoch     = ARGV[18] or ''
+local dispatch_transition_id    = ARGV[19] or ''
+local dispatch_record_hash      = ARGV[20] or ''
+local dispatch_command_hash     = ARGV[21] or ''
+local dispatch_revision         = ARGV[22] or ''
+local dispatch_operation_id     = ARGV[23] or ''
+local dispatch_attempt          = ARGV[24] or ''
 
 local OPERATION = 'TASK_CLAIM'
 local TRUTH_COUNT_FIELD = '__runtime_truth_conflict_count'
@@ -87,6 +117,128 @@ local function truth_conflict_pair_state()
         return false, 'truth_conflict_pair_cardinality_mismatch'
     end
     return true, count
+end
+
+local MAX_SAFE_INTEGER = 9007199254740991
+
+local function exact_safe_integer(value)
+    local number = tonumber(value)
+    return value ~= ''
+        and number ~= nil
+        and number >= 0
+        and number <= MAX_SAFE_INTEGER
+        and number % 1 == 0
+end
+
+local function valid_sha256(value)
+    return type(value) == 'string'
+        and string.len(value) == 64
+        and string.match(value, '^[0-9a-f]+$') ~= nil
+end
+
+local function canonical_projection_input_valid()
+    if not canonical_projection then return true end
+    if task_id == ''
+        or run_id == ''
+        or worker_instance_id == ''
+        or expected_scheduler_epoch == ''
+        or expected_scheduler_epoch == '0'
+        or canonical_tenant_id == ''
+        or canonical_transition_id == ''
+        or canonical_operation_id == ''
+        or dispatch_transition_id == ''
+        or dispatch_operation_id == ''
+        or not valid_sha256(canonical_record_hash)
+        or not valid_sha256(canonical_command_hash)
+        or not valid_sha256(dispatch_record_hash)
+        or not valid_sha256(dispatch_command_hash) then
+        return false
+    end
+    if not exact_safe_integer(canonical_revision)
+        or not exact_safe_integer(canonical_previous_epoch)
+        or not exact_safe_integer(canonical_claim_epoch)
+        or not exact_safe_integer(dispatch_revision)
+        or not exact_safe_integer(dispatch_attempt) then
+        return false
+    end
+    if tonumber(dispatch_revision) < 1
+        or tonumber(dispatch_attempt) < 1 then
+        return false
+    end
+    if tonumber(canonical_revision) ~= tonumber(dispatch_revision) + 1 then
+        return false
+    end
+    return tonumber(canonical_claim_epoch)
+        == tonumber(canonical_previous_epoch) + 1
+end
+
+local function canonical_dispatch_proof_matches()
+    local values = redis.call(
+        'HMGET',
+        task_meta_key,
+        'tenant_id',
+        'scheduler_epoch',
+        'dispatch_attempt',
+        'dispatch_worker_id',
+        'canonical_transition_id',
+        'canonical_record_hash',
+        'canonical_command_hash',
+        'canonical_revision',
+        'canonical_operation_id',
+        'claim_epoch'
+    )
+    local current_claim_epoch = values[10] or '0'
+    return values[1] == canonical_tenant_id
+        and values[2] == expected_scheduler_epoch
+        and values[3] == dispatch_attempt
+        and values[4] == worker_instance_id
+        and values[5] == dispatch_transition_id
+        and values[6] == dispatch_record_hash
+        and values[7] == dispatch_command_hash
+        and values[8] == dispatch_revision
+        and values[9] == dispatch_operation_id
+        and current_claim_epoch == canonical_previous_epoch
+end
+
+local function canonical_claim_exact_duplicate()
+    local values = redis.call(
+        'HMGET',
+        task_meta_key,
+        'tenant_id',
+        'worker_instance_id',
+        'scheduler_epoch',
+        'claimed_at_ms',
+        'claim_epoch',
+        'claim_canonical_transition_id',
+        'claim_canonical_record_hash',
+        'claim_canonical_command_hash',
+        'claim_canonical_revision',
+        'claim_canonical_operation_id',
+        'dispatch_canonical_transition_id',
+        'dispatch_canonical_record_hash',
+        'dispatch_canonical_command_hash',
+        'dispatch_canonical_revision',
+        'dispatch_canonical_operation_id',
+        'dispatch_attempt',
+        'dispatch_worker_id'
+    )
+    return values[1] == canonical_tenant_id
+        and values[2] == worker_instance_id
+        and values[3] == expected_scheduler_epoch
+        and values[4] == claimed_at_ms
+        and values[5] == canonical_claim_epoch
+        and values[6] == canonical_transition_id
+        and values[7] == canonical_record_hash
+        and values[8] == canonical_command_hash
+        and values[9] == canonical_revision
+        and values[10] == canonical_operation_id
+        and values[11] == dispatch_transition_id
+        and values[12] == dispatch_record_hash
+        and values[13] == dispatch_command_hash
+        and values[14] == dispatch_revision
+        and values[15] == dispatch_operation_id
+        and values[16] == dispatch_attempt
+        and values[17] == worker_instance_id
 end
 
 local function emit_truth_conflict(status, detail_code, observed_run_state)
@@ -173,6 +325,32 @@ if authoritative_run_id ~= run_id then
     return claim_failure('identity_run_id_mismatch')
 end
 
+if canonical_projection and not canonical_projection_input_valid() then
+    return claim_failure('canonical_projection_conflict')
+end
+
+local task_terminal = {
+    done=true,
+    failed=true,
+    rejected=true,
+    blocked_by_failure=true,
+    dead_lettered=true,
+    skipped=true
+}
+
+if canonical_projection and task_terminal[current_state] then
+    if canonical_claim_exact_duplicate() then
+        return {
+            'canonical_claim_already_projected',
+            canonical_claim_epoch,
+            expected_scheduler_epoch,
+            worker_instance_id,
+            task_id
+        }
+    end
+    return claim_failure('canonical_projection_conflict')
+end
+
 if current_state ~= 'scheduled' and current_state ~= 'running' then
     return claim_failure('task_state_conflict')
 end
@@ -201,7 +379,23 @@ if not nonterminal[run_state] then
     return emit_truth_conflict('run_truth_corruption_conflict', 'run_state_unknown', run_state)
 end
 
-if current_state == 'running' then
+if canonical_projection then
+    if current_state == 'running' then
+        if canonical_claim_exact_duplicate() then
+            return {
+                'canonical_claim_already_projected',
+                canonical_claim_epoch,
+                expected_scheduler_epoch,
+                worker_instance_id,
+                task_id
+            }
+        end
+        return claim_failure('canonical_projection_conflict')
+    end
+    if not canonical_dispatch_proof_matches() then
+        return claim_failure('canonical_projection_conflict')
+    end
+elseif current_state == 'running' then
     return claim_failure('task_already_owned')
 end
 
@@ -266,7 +460,35 @@ if not legacy_direct_claim then
     end
 end
 
-local new_claim_epoch = redis.call('HINCRBY', task_meta_key, 'claim_epoch', 1)
+local new_claim_epoch
+if canonical_projection then
+    new_claim_epoch = tonumber(canonical_claim_epoch)
+    redis.call('HSET', task_meta_key,
+        'claim_epoch', canonical_claim_epoch,
+        'dispatch_canonical_transition_id', dispatch_transition_id,
+        'dispatch_canonical_record_hash', dispatch_record_hash,
+        'dispatch_canonical_command_hash', dispatch_command_hash,
+        'dispatch_canonical_revision', dispatch_revision,
+        'dispatch_canonical_operation_id', dispatch_operation_id,
+        'claim_canonical_transition_id', canonical_transition_id,
+        'claim_canonical_record_hash', canonical_record_hash,
+        'claim_canonical_command_hash', canonical_command_hash,
+        'claim_canonical_revision', canonical_revision,
+        'claim_canonical_operation_id', canonical_operation_id,
+        'canonical_transition_id', canonical_transition_id,
+        'canonical_record_hash', canonical_record_hash,
+        'canonical_command_hash', canonical_command_hash,
+        'canonical_revision', canonical_revision,
+        'canonical_operation_id', canonical_operation_id
+    )
+else
+    new_claim_epoch = redis.call(
+        'HINCRBY',
+        task_meta_key,
+        'claim_epoch',
+        1
+    )
+end
 redis.call('SET', task_state_key, 'running', 'EX', state_ttl)
 redis.call('HSET', task_meta_key,
     'worker_instance_id', worker_instance_id,
