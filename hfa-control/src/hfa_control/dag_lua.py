@@ -192,10 +192,30 @@ class TaskCompleteResult:
 class DagLua:
     """Lua CAS gateway for DAG task state transitions."""
 
-    def __init__(self, redis, *, canonical_task_admit_binding: bool = False) -> None:
+    def __init__(
+        self,
+        redis,
+        *,
+        canonical_task_admit_binding: bool = False,
+        canonical_task_dispatch_binding: bool = False,
+    ) -> None:
         self._redis = redis
-        self._canonical_task_admit_binding_enabled = bool(canonical_task_admit_binding)
+        self._canonical_task_admit_binding_enabled = bool(
+            canonical_task_admit_binding
+        )
+        self._canonical_task_dispatch_binding_enabled = bool(
+            canonical_task_dispatch_binding
+        )
+        if (
+            self._canonical_task_dispatch_binding_enabled
+            and not self._canonical_task_admit_binding_enabled
+        ):
+            raise ValueError(
+                "canonical TASK_DISPATCH binding requires "
+                "canonical TASK_ADMIT binding"
+            )
         self._task_admit_authority_binding = None
+        self._task_dispatch_authority_binding = None
         self._admit_loader: Optional[LuaScriptLoader] = None
         self._dispatch_loader: Optional[LuaScriptLoader] = None
         self._claim_loader: Optional[LuaScriptLoader] = None
@@ -297,33 +317,90 @@ class DagLua:
         admitted = status in ("seeded_root", "seeded_waiting", "already_exists")
         return TaskAdmitResult(admitted=admitted, ready=ready, task_id=task_id, status=status)
 
-    async def task_dispatch_commit(self, dispatch) -> TaskDispatchCommitResult:
+    async def task_dispatch_commit(
+        self,
+        dispatch,
+    ) -> TaskDispatchCommitResult:
+        if self._canonical_task_dispatch_binding_enabled:
+            if self._task_dispatch_authority_binding is None:
+                from hfa_control.task_dispatch_authority import (
+                    TaskDispatchAuthorityBinding,
+                )
+
+                self._task_dispatch_authority_binding = (
+                    TaskDispatchAuthorityBinding(
+                        self._redis,
+                        self._task_dispatch_canonical_projection,
+                    )
+                )
+            return (
+                await self._task_dispatch_authority_binding
+                .dispatch(dispatch)
+            )
+        return await self._task_dispatch_legacy(dispatch)
+
+    async def _task_dispatch_legacy(
+        self,
+        dispatch,
+    ) -> TaskDispatchCommitResult:
+        return await self._task_dispatch_project(dispatch)
+
+    async def _task_dispatch_canonical_projection(
+        self,
+        dispatch,
+    ) -> TaskDispatchCommitResult:
+        return await self._task_dispatch_project(dispatch)
+
+    async def _task_dispatch_project(
+        self,
+        dispatch,
+    ) -> TaskDispatchCommitResult:
         await self._ensure_initialised()
         assert self._dispatch_loader is not None
 
         task_id = dispatch.task_id
         tenant_id = dispatch.tenant_id
-        run_id = str(getattr(dispatch, "run_id", "") or "").strip()
+        run_id = str(
+            getattr(dispatch, "run_id", "") or ""
+        ).strip()
         shard = getattr(dispatch, "shard", 0)
-        scheduled_at = getattr(dispatch, "scheduled_at", None) or int(time.time() * 1000)
-        scheduler_epoch = str(getattr(dispatch, "scheduler_epoch", "") or "").strip()
+        scheduled_at = (
+            getattr(dispatch, "scheduled_at", None)
+            or int(time.time() * 1000)
+        )
+        scheduler_epoch = str(
+            getattr(dispatch, "scheduler_epoch", "")
+            or ""
+        ).strip()
         scheduled_zset = (
             getattr(dispatch, "scheduled_zset", "")
-            or DagRedisKey.task_scheduled_zset(tenant_id)
+            or DagRedisKey.task_scheduled_zset(
+                tenant_id
+            )
         )
         running_zset = (
             getattr(dispatch, "running_zset", "")
-            or DagRedisKey.task_running_zset(tenant_id)
+            or DagRedisKey.task_running_zset(
+                tenant_id
+            )
         )
-        control_stream = getattr(dispatch, "control_stream", "") or RedisKey.stream_control()
-        shard_stream = getattr(dispatch, "shard_stream", "") or RedisKey.stream_shard(shard)
+        control_stream = (
+            getattr(dispatch, "control_stream", "")
+            or RedisKey.stream_control()
+        )
+        shard_stream = (
+            getattr(dispatch, "shard_stream", "")
+            or RedisKey.stream_shard(shard)
+        )
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),
             scheduled_zset,
             control_stream,
             shard_stream,
-            DagRedisKey.tenant_ready_queue(tenant_id),
+            DagRedisKey.tenant_ready_queue(
+                tenant_id
+            ),
             running_zset,
             RedisKey.run_state(run_id),
             RedisKey.runtime_truth_conflict_index(),
@@ -337,26 +414,109 @@ class DagLua:
             getattr(dispatch, "worker_group", "") or "",
             str(shard),
             str(getattr(dispatch, "priority", 0)),
-            str(getattr(dispatch, "admitted_at", 0.0) or 0.0),
+            str(
+                getattr(
+                    dispatch,
+                    "admitted_at",
+                    0.0,
+                )
+                or 0.0
+            ),
             str(scheduled_at),
-            str(int(getattr(RedisTTL, "RUN_STATE", 86400))),
-            str(int(getattr(RedisTTL, "RUN_META", 86400))),
+            str(
+                int(
+                    getattr(
+                        RedisTTL,
+                        "RUN_STATE",
+                        86400,
+                    )
+                )
+            ),
+            str(
+                int(
+                    getattr(
+                        RedisTTL,
+                        "RUN_META",
+                        86400,
+                    )
+                )
+            ),
             "10000",
             "10000",
             getattr(dispatch, "trace_parent", "") or "",
             getattr(dispatch, "trace_state", "") or "",
-            getattr(dispatch, "policy", "") or "LEAST_LOADED",
+            (
+                getattr(dispatch, "policy", "")
+                or "LEAST_LOADED"
+            ),
             getattr(dispatch, "region", "") or "",
             getattr(dispatch, "payload_json", "") or "{}",
             scheduler_epoch,
+            str(getattr(dispatch, "attempt", 1)),
+            getattr(dispatch, "worker_id", "") or "",
+            (
+                getattr(
+                    dispatch,
+                    "canonical_transition_id",
+                    "",
+                )
+                or ""
+            ),
+            (
+                getattr(
+                    dispatch,
+                    "canonical_record_hash",
+                    "",
+                )
+                or ""
+            ),
+            (
+                getattr(
+                    dispatch,
+                    "canonical_command_hash",
+                    "",
+                )
+                or ""
+            ),
+            str(
+                getattr(
+                    dispatch,
+                    "canonical_revision",
+                    0,
+                )
+            ),
+            (
+                getattr(
+                    dispatch,
+                    "canonical_operation_id",
+                    "",
+                )
+                or ""
+            ),
         ]
-        raw = await self._dispatch_loader.run(num_keys=len(keys), keys=keys, args=args)
-        status = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])
-        committed = status == "committed"
+        raw = await self._dispatch_loader.run(
+            num_keys=len(keys),
+            keys=keys,
+            args=args,
+        )
+        status = (
+            raw[0].decode()
+            if isinstance(raw[0], bytes)
+            else str(raw[0])
+        )
+        committed = status in {
+            "committed",
+            "already_projected",
+        }
         reason = (
             raw[1].decode()
-            if len(raw) > 1 and isinstance(raw[1], bytes)
-            else (str(raw[1]) if len(raw) > 1 else "")
+            if len(raw) > 1
+            and isinstance(raw[1], bytes)
+            else (
+                str(raw[1])
+                if len(raw) > 1
+                else ""
+            )
         )
         return TaskDispatchCommitResult(
             committed=committed,

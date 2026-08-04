@@ -1,0 +1,364 @@
+name: Sprint 84.1 Canonical TASK_DISPATCH Binding
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - '.github/workflows/sprint84-1-canonical-task-dispatch-binding.yml'
+      - 'docs/implementation/sprint84/SPRINT84.1-canonical-task-dispatch-binding.md'
+      - 'hfa-control/src/hfa_control/dag_lua.py'
+      - 'hfa-control/src/hfa_control/dag_scheduler_bridge.py'
+      - 'hfa-control/src/hfa_control/dag_scheduler_dispatch_controller.py'
+      - 'hfa-control/src/hfa_control/scheduler.py'
+      - 'hfa-control/src/hfa_control/scheduler_reservation_dispatch.py'
+      - 'hfa-control/src/hfa_control/task_dispatch_authority.py'
+      - 'hfa-core/src/hfa/dag/schema.py'
+      - 'hfa-core/src/hfa/lua/task_dispatch_commit.lua'
+      - 'scripts/runtime_alpha_acceptance_84_1.py'
+      - 'tests/integration/test_task_dispatch_authority_binding_integration.py'
+      - 'tests/integration/test_dag_task_dispatch_integration.py'
+      - 'tests/integration/test_scheduler_dag_dispatch_writer_integration.py'
+      - 'tests/integration/test_scheduler_reservation_dispatch_integration.py'
+      - 'tests/integration/test_task_dispatch_identity_contract_integration.py'
+      - 'tests/unit/test_task_dispatch_authority_binding.py'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify Sprint 84.1 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = (
+              "sprint/84-1-canonical-task-dispatch-binding"
+          )
+          allowlist = {
+              ".github/workflows/"
+              "sprint84-1-canonical-task-dispatch-binding.yml",
+              "docs/implementation/sprint84/"
+              "SPRINT84.1-canonical-task-dispatch-binding.md",
+              "hfa-control/src/hfa_control/dag_lua.py",
+              "hfa-control/src/hfa_control/"
+              "dag_scheduler_bridge.py",
+              "hfa-control/src/hfa_control/"
+              "dag_scheduler_dispatch_controller.py",
+              "hfa-control/src/hfa_control/scheduler.py",
+              "hfa-control/src/hfa_control/"
+              "scheduler_reservation_dispatch.py",
+              "hfa-control/src/hfa_control/"
+              "task_dispatch_authority.py",
+              "hfa-core/src/hfa/dag/schema.py",
+              "hfa-core/src/hfa/lua/"
+              "task_dispatch_commit.lua",
+              "scripts/runtime_alpha_acceptance_84_1.py",
+              "tests/integration/"
+              "test_task_dispatch_authority_binding_integration.py",
+              "tests/integration/"
+              "test_dag_task_dispatch_integration.py",
+              "tests/integration/"
+              "test_scheduler_dag_dispatch_writer_integration.py",
+              "tests/integration/"
+              "test_scheduler_reservation_dispatch_integration.py",
+              "tests/integration/"
+              "test_task_dispatch_identity_contract_integration.py",
+              "tests/unit/"
+              "test_task_dispatch_authority_binding.py",
+              "tests/unit/"
+              "test_scheduler_runtime_truth_guard.py",
+          }
+          changed = set(
+              subprocess.check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert changed == allowlist, {
+                  "missing": sorted(allowlist - changed),
+                  "unexpected": sorted(changed - allowlist),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              protected = {
+                  "hfa-control/src/hfa_control/dag_lua.py",
+                  "hfa-control/src/hfa_control/"
+                  "dag_scheduler_bridge.py",
+                  "hfa-control/src/hfa_control/"
+                  "dag_scheduler_dispatch_controller.py",
+                  "hfa-control/src/hfa_control/scheduler.py",
+                  "hfa-control/src/hfa_control/"
+                  "scheduler_reservation_dispatch.py",
+                  "hfa-control/src/hfa_control/"
+                  "task_dispatch_authority.py",
+                  "hfa-core/src/hfa/dag/schema.py",
+                  "hfa-core/src/hfa/lua/"
+                  "task_dispatch_commit.lua",
+              }
+              assert changed & protected, sorted(changed)
+              mode = "RUNTIME_INTERSECTION"
+
+          forbidden = [
+              path
+              for path in changed
+              if path.startswith("local_out/")
+              or "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, forbidden
+          print(
+              "SPRINT84_1_SCOPE_OK",
+              mode,
+              f"changed_count={len(changed)}",
+          )
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -e hfa-core \
+            -e hfa-control \
+            -e hfa-worker \
+            -e hfa-tools
+          python -m pip install \
+            pytest \
+            pytest-asyncio \
+            redis \
+            fakeredis \
+            rfc8785 \
+            fastapi \
+            httpx \
+            uvicorn
+
+      - name: Dedicated unit and scheduler contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_task_dispatch_authority_binding.py \
+            tests/core/test_dag_scheduler_dispatch_writer_contract.py \
+            tests/core/test_scheduler_reservation_dispatch_core.py \
+            tests/core/test_scheduler_capability_fair_dispatch_core.py \
+            tests/core/test_scheduler_fairness_dispatch_core.py \
+            -q --tb=short
+
+      - name: Real Redis authority and dispatch regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/integration/test_task_dispatch_authority_binding_integration.py \
+            tests/integration/test_task_admit_authority_binding_integration.py \
+            tests/integration/test_dag_task_dispatch_integration.py \
+            tests/integration/test_scheduler_dag_dispatch_writer_integration.py \
+            tests/integration/test_scheduler_reservation_dispatch_integration.py \
+            tests/integration/test_scheduler_runtime_truth_guard_integration.py \
+            tests/integration/test_task_dispatch_identity_contract_integration.py \
+            -q --tb=short
+
+      - name: Deterministic Sprint 84.1 acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out/sprint84
+
+          python scripts/runtime_alpha_acceptance_84_1.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s84-1-ci \
+            --reset-test-db \
+            --out local_out/sprint84/sprint84_1.json \
+            --json \
+            > sprint84_1_stdout.json
+
+          python scripts/runtime_alpha_acceptance_84_1.py \
+            --redis-url "$REDIS_URL" \
+            --acceptance-id s84-1-ci \
+            --reset-test-db \
+            --out local_out/sprint84/sprint84_1_repeat.json \
+            --json \
+            > sprint84_1_repeat_stdout.json
+
+          cmp \
+            local_out/sprint84/sprint84_1.json \
+            local_out/sprint84/sprint84_1_repeat.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(
+              Path(
+                  "local_out/sprint84/sprint84_1.json"
+              ).read_text(encoding="utf-8")
+          )
+          assert report["status"] == "PASS_WITH_LIMITATIONS"
+          assert report["canonical_revision"] == 2
+          assert report["canonical_state"] == "scheduled"
+          assert report["replay_status"] == "already_projected"
+          assert report["replay_stream_reemission"] is False
+          assert (
+              report["same_attempt_changed_worker_status"]
+              == "IDEMPOTENCY_CONFLICT"
+          )
+          assert report["automatic_reassignment"] is False
+          assert report["automatic_repair"] is False
+          assert report["canonical_requeue_binding"] is False
+          assert report["production_ready"] is False
+          assert (
+              report["production_cutover_authorized"]
+              is False
+          )
+          print("SPRINT84_1_ACCEPTANCE_OK")
+          PY
+
+      - name: Authority boundary scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          authority_core = [
+              Path(
+                  "hfa-core/src/hfa/authority/"
+                  "canonical_transition.py"
+              ),
+              Path(
+                  "hfa-core/src/hfa/authority/"
+                  "redis_persistence.py"
+              ),
+          ]
+          changed = set(
+              __import__("subprocess").check_output(
+                  [
+                      "git",
+                      "diff",
+                      "--name-only",
+                      f"{__import__('os').environ['PR_BASE_SHA']}...HEAD",
+                  ],
+                  text=True,
+              ).splitlines()
+          )
+          assert not {
+              str(path) for path in authority_core
+          } & changed
+
+          scheduler = Path(
+              "hfa-control/src/hfa_control/scheduler.py"
+          ).read_text(encoding="utf-8")
+          dag_lua = Path(
+              "hfa-control/src/hfa_control/dag_lua.py"
+          ).read_text(encoding="utf-8")
+          binding = Path(
+              "hfa-control/src/hfa_control/"
+              "task_dispatch_authority.py"
+          ).read_text(encoding="utf-8")
+
+          def string_constants(source: str) -> set[str]:
+              tree = ast.parse(source)
+              return {
+                  node.value
+                  for node in ast.walk(tree)
+                  if isinstance(node, ast.Constant)
+                  and isinstance(node.value, str)
+              }
+
+          scheduler_strings = string_constants(scheduler)
+          dag_lua_strings = string_constants(dag_lua)
+
+          assert (
+              "HFA_CANONICAL_TASK_DISPATCH_BINDING requires "
+              "HFA_CANONICAL_TASK_ADMIT_BINDING"
+              in scheduler_strings
+          )
+          assert (
+              "canonical TASK_DISPATCH binding requires "
+              "canonical TASK_ADMIT binding"
+              in dag_lua_strings
+          )
+          assert "automatic_reassignment = True" not in binding
+          assert "automatic_repair = True" not in binding
+          print(
+              "SPRINT84_1_AUTHORITY_SCAN_OK",
+              "authority_core_diff=0",
+              "new_writer=0",
+              "automatic_reassignment=0",
+              "automatic_repair=0",
+          )
+          PY
+
+      - name: Compile and whitespace validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q \
+            hfa-control/src/hfa_control/dag_lua.py \
+            hfa-control/src/hfa_control/dag_scheduler_bridge.py \
+            hfa-control/src/hfa_control/dag_scheduler_dispatch_controller.py \
+            hfa-control/src/hfa_control/scheduler.py \
+            hfa-control/src/hfa_control/scheduler_reservation_dispatch.py \
+            hfa-control/src/hfa_control/task_dispatch_authority.py \
+            hfa-core/src/hfa/dag/schema.py \
+            scripts/runtime_alpha_acceptance_84_1.py \
+            tests/integration/test_task_dispatch_authority_binding_integration.py \
+            tests/unit/test_task_dispatch_authority_binding.py
+          git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint84-1-canonical-task-dispatch-binding
+          path: |
+            local_out/sprint84/sprint84_1.json
+            sprint84_1_stdout.json
+          if-no-files-found: warn

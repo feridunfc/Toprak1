@@ -66,6 +66,15 @@ class TaskMetaField:
     SHARD                = "shard"
     DISPATCH_POLICY      = "dispatch_policy"
     DISPATCH_REGION      = "dispatch_region"
+    DISPATCH_WORKER_ID   = "dispatch_worker_id"
+    DISPATCH_ATTEMPT     = "dispatch_attempt"
+
+    # Canonical TASK_DISPATCH projection proof (Sprint 84.1)
+    CANONICAL_TRANSITION_ID = "canonical_transition_id"
+    CANONICAL_RECORD_HASH   = "canonical_record_hash"
+    CANONICAL_COMMAND_HASH  = "canonical_command_hash"
+    CANONICAL_REVISION      = "canonical_revision"
+    CANONICAL_OPERATION_ID  = "canonical_operation_id"
 
 
 # ── DagRedisKey builders ──────────────────────────────────────────────────────
@@ -259,3 +268,9 @@ class DagTaskDispatchInput:
     trace_parent: str = ""
     trace_state: str = ""
     scheduler_epoch: str = ""
+    attempt: int = 1
+    canonical_transition_id: str = ""
+    canonical_record_hash: str = ""
+    canonical_command_hash: str = ""
+    canonical_revision: int = 0
+    canonical_operation_id: str = ""

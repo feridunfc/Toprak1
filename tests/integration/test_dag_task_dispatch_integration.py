@@ -31,6 +31,10 @@ async def _seed_root(redis_client, *, task_id: str = 'task-root-001', run_id: st
     )
     admitted = await lua.task_admit(seed)
     assert admitted.admitted is True
+    await redis_client.set(
+        RedisKey.run_state(run_id),
+        "admitted",
+    )
     return lua, seed
 
 

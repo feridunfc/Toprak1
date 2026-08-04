@@ -224,8 +224,12 @@ def build_production_scheduler(
 
     from hfa_control.dag_lua import DagLua
     from hfa_control.task_admit_authority import (
-        FEATURE_FLAG,
+        FEATURE_FLAG as TASK_ADMIT_FEATURE_FLAG,
         parse_task_admit_binding_flag,
+    )
+    from hfa_control.task_dispatch_authority import (
+        FEATURE_FLAG as TASK_DISPATCH_FEATURE_FLAG,
+        parse_task_dispatch_binding_flag,
     )
     from hfa_control.dag_scheduler_bridge import DagReadyQueue, DagSchedulerDispatchWriter
     from hfa_control.dag_scheduler_dispatch_controller import DagSchedulerDispatchController
@@ -235,11 +239,32 @@ def build_production_scheduler(
     from hfa_control.tenant_fairness import TenantFairnessTracker
     from hfa_control.worker_reservation import WorkerReservationManager
 
-    canonical_task_admit_binding = parse_task_admit_binding_flag(
-        os.getenv(FEATURE_FLAG)
+    canonical_task_admit_binding = (
+        parse_task_admit_binding_flag(
+            os.getenv(TASK_ADMIT_FEATURE_FLAG)
+        )
     )
+    canonical_task_dispatch_binding = (
+        parse_task_dispatch_binding_flag(
+            os.getenv(TASK_DISPATCH_FEATURE_FLAG)
+        )
+    )
+    if (
+        canonical_task_dispatch_binding
+        and not canonical_task_admit_binding
+    ):
+        raise ValueError(
+            "HFA_CANONICAL_TASK_DISPATCH_BINDING requires "
+            "HFA_CANONICAL_TASK_ADMIT_BINDING"
+        )
     dag_lua = DagLua(
-        redis, canonical_task_admit_binding=canonical_task_admit_binding
+        redis,
+        canonical_task_admit_binding=(
+            canonical_task_admit_binding
+        ),
+        canonical_task_dispatch_binding=(
+            canonical_task_dispatch_binding
+        ),
     )
     ready_queue = DagReadyQueue(redis)
     dispatch_writer = DagSchedulerDispatchWriter(ready_queue=ready_queue, dag_lua=dag_lua)
@@ -252,6 +277,7 @@ def build_production_scheduler(
         reservation_manager,
         dispatch_writer,
         event_store=event_store,
+        redis=redis,
     )
     pacing_controller = DispatchController(redis, config)
     tenant_fairness = TenantFairnessTracker()

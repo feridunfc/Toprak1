@@ -76,6 +76,10 @@ async def _seed_ready(
 
     assert result.admitted is True
     assert result.ready is True
+    await redis_client.set(
+        RedisKey.run_state(run_id),
+        "admitted",
+    )
 
     return dag, seed
 

@@ -4,6 +4,7 @@ import pytest
 from hfa_control.scheduler_reservation_dispatch import SchedulerReservationDispatcher
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.worker_reservation import WorkerReservationManager
+from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 
 pytestmark = pytest.mark.asyncio
@@ -15,6 +16,19 @@ async def test_reserve_then_dispatch_then_claim_consumes_reservation(redis_clien
         return True
 
     await redis_client.set(DagRedisKey.task_state("task-1"), "scheduled")
+    await redis_client.hset(
+        DagRedisKey.task_meta("task-1"),
+        mapping={
+            "task_id": "task-1",
+            "run_id": "task-1",
+            "tenant_id": "tenant-a",
+            "scheduler_epoch": "epoch-1",
+        },
+    )
+    await redis_client.set(
+        RedisKey.run_state("task-1"),
+        "scheduled",
+    )
 
     reservation_manager = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
     dispatcher = SchedulerReservationDispatcher(reservation_manager, dispatch_fn)
