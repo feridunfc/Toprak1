@@ -183,7 +183,7 @@ perform automatic repair.
 
 ## Exact source scope
 
-Exactly 17 files:
+Exactly 18 files:
 
 ```text
 .github/workflows/sprint84-1-canonical-task-dispatch-binding.yml
@@ -203,6 +203,7 @@ tests/integration/test_scheduler_dag_dispatch_writer_integration.py
 tests/integration/test_scheduler_reservation_dispatch_integration.py
 tests/integration/test_task_dispatch_identity_contract_integration.py
 tests/unit/test_task_dispatch_authority_binding.py
+tests/unit/test_scheduler_runtime_truth_guard.py
 ```
 
 `local_out/` remains untracked deterministic evidence.

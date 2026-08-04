@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,12 +68,47 @@ def test_lua_declares_run_and_global_conflict_keys():
 
 def test_lua_known_runtime_truth_state_sets_are_exact():
     source = LUA_PATH.read_text(encoding="utf-8")
-    for state in ("admitted", "queued", "scheduled", "running", "rescheduled"):
-        assert f"{state}=true" in source
-    for state in ("done", "failed", "rejected", "dead_lettered"):
-        assert f"{state}=true" in source
-    assert "blocked_by_failure=true" not in source
-    assert "skipped=true" not in source
+
+    nonterminal_start = source.index(
+        "local nonterminal = {"
+    )
+    terminal_start = source.index(
+        "local run_terminal = {",
+        nonterminal_start,
+    )
+    terminal_end = source.index(
+        "if run_terminal[run_state] then",
+        terminal_start,
+    )
+
+    nonterminal = source[
+        nonterminal_start:terminal_start
+    ]
+    run_terminal = source[
+        terminal_start:terminal_end
+    ]
+
+    for state in (
+        "admitted",
+        "queued",
+        "scheduled",
+        "running",
+        "rescheduled",
+    ):
+        assert f"{state}=true" in nonterminal
+
+    for state in (
+        "done",
+        "failed",
+        "rejected",
+        "dead_lettered",
+    ):
+        assert f"{state}=true" in run_terminal
+
+    assert "blocked_by_failure=true" not in nonterminal
+    assert "skipped=true" not in nonterminal
+    assert "blocked_by_failure=true" not in run_terminal
+    assert "skipped=true" not in run_terminal
 
 
 def test_lua_exposes_required_structured_statuses():
@@ -96,13 +132,33 @@ def test_lua_guard_precedes_first_lifecycle_mutation():
 
 def test_task_and_run_identity_validation_precedes_run_truth_read():
     source = LUA_PATH.read_text(encoding="utf-8")
-    task_state_read = source.index("local current = redis.call('GET', task_state_key)")
-    task_meta_required = source.index("redis.call('EXISTS', task_meta_key)")
-    authoritative_identity = source.index("local authoritative_identity = redis.call('HMGET'")
-    explicit_run_match = source.index("if authoritative_run_id ~= run_id then")
-    run_truth_type_read = source.index("local run_kind = redis_type(run_state_key)")
-    assert task_state_read < task_meta_required < authoritative_identity
-    assert authoritative_identity < explicit_run_match < run_truth_type_read
+    task_state_type_read = source.index(
+        "local state_kind = redis_type(task_state_key)"
+    )
+    task_meta_required = source.index(
+        "local meta_kind = redis_type(task_meta_key)"
+    )
+    task_state_read = source.index(
+        "local current = redis.call('GET', task_state_key)"
+    )
+    authoritative_identity = source.index(
+        "local authoritative_identity = redis.call("
+    )
+    explicit_run_match = source.index(
+        "if authoritative_run_id ~= run_id then"
+    )
+    run_truth_type_read = source.index(
+        "local run_kind = redis_type(run_state_key)"
+    )
+
+    assert (
+        task_state_type_read
+        < task_meta_required
+        < task_state_read
+        < authoritative_identity
+        < explicit_run_match
+        < run_truth_type_read
+    )
 
 
 def test_runtime_truth_conflict_identity_binds_task_dispatch_operation_in_fixed_order():
@@ -132,7 +188,12 @@ def test_conflict_identity_is_length_prefixed_deterministic_and_first_payload_wi
     assert "local conflict_id = redis.sha1hex(material)" in source
     assert "HSETNX" in source
     assert "if inserted == 1 then" in source
-    assert source.count("redis.call('XADD', truth_conflict_stream") == 1
+    conflict_stream_writes = re.findall(
+        r"redis\.call\(\s*'XADD'\s*,\s*"
+        r"truth_conflict_stream",
+        source,
+    )
+    assert len(conflict_stream_writes) == 1
 
 
 @pytest.mark.asyncio

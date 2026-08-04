@@ -100,6 +100,8 @@ jobs:
               "test_task_dispatch_identity_contract_integration.py",
               "tests/unit/"
               "test_task_dispatch_authority_binding.py",
+              "tests/unit/"
+              "test_scheduler_runtime_truth_guard.py",
           }
           changed = set(
               subprocess.check_output(
@@ -262,6 +264,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
+          import ast
           from pathlib import Path
 
           authority_core = [
@@ -300,15 +303,27 @@ jobs:
               "task_dispatch_authority.py"
           ).read_text(encoding="utf-8")
 
+          def string_constants(source: str) -> set[str]:
+              tree = ast.parse(source)
+              return {
+                  node.value
+                  for node in ast.walk(tree)
+                  if isinstance(node, ast.Constant)
+                  and isinstance(node.value, str)
+              }
+
+          scheduler_strings = string_constants(scheduler)
+          dag_lua_strings = string_constants(dag_lua)
+
           assert (
               "HFA_CANONICAL_TASK_DISPATCH_BINDING requires "
               "HFA_CANONICAL_TASK_ADMIT_BINDING"
-              in scheduler
+              in scheduler_strings
           )
           assert (
               "canonical TASK_DISPATCH binding requires "
               "canonical TASK_ADMIT binding"
-              in dag_lua
+              in dag_lua_strings
           )
           assert "automatic_reassignment = True" not in binding
           assert "automatic_repair = True" not in binding
