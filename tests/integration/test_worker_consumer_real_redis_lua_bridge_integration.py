@@ -93,7 +93,14 @@ async def test_worker_consumer_bridge_real_redis_lua_claim_complete_and_ack(
     await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
     await redis_client.hset(
         DagRedisKey.task_meta(task_id),
-        mapping={"run_id": run_id},
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+        },
+    )
+    await redis_client.set(
+        RedisKey.run_state(run_id),
+        "running",
     )
 
     reservation_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)

@@ -1,11 +1,36 @@
 
 import pytest
 
+from hfa.config.keys import RedisKey
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.worker_reservation import WorkerReservationManager
 from hfa.dag.schema import DagRedisKey
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _seed_claim_task(
+    redis_client,
+    *,
+    task_id: str,
+    run_id: str,
+    state: str,
+) -> None:
+    await redis_client.set(
+        DagRedisKey.task_state(task_id),
+        state,
+    )
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+        },
+    )
+    await redis_client.set(
+        RedisKey.run_state(run_id),
+        "running",
+    )
 
 
 async def _reserve_claim_context(
@@ -31,7 +56,12 @@ async def test_task_claim_start_scheduled_to_running(redis_client):
     task_id = "claim-001"
     tenant_id = "tenant-a"
 
-    await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
+    await _seed_claim_task(
+        redis_client,
+        task_id=task_id,
+        run_id="run-claim-001",
+        state="scheduled",
+    )
     await _reserve_claim_context(
         redis_client,
         worker_id="worker-1",
@@ -65,7 +95,12 @@ async def test_task_claim_start_rejects_duplicate_running(redis_client):
     task_id = "claim-002"
     tenant_id = "tenant-a"
 
-    await redis_client.set(DagRedisKey.task_state(task_id), "running")
+    await _seed_claim_task(
+        redis_client,
+        task_id=task_id,
+        run_id="run-claim-002",
+        state="running",
+    )
     await _reserve_claim_context(
         redis_client,
         worker_id="worker-1",
@@ -92,7 +127,12 @@ async def test_task_claim_start_rejects_terminal_state(redis_client):
     task_id = "claim-003"
     tenant_id = "tenant-a"
 
-    await redis_client.set(DagRedisKey.task_state(task_id), "failed")
+    await _seed_claim_task(
+        redis_client,
+        task_id=task_id,
+        run_id="run-claim-003",
+        state="failed",
+    )
     await _reserve_claim_context(
         redis_client,
         worker_id="worker-1",

@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
 from hfa_control.task_claim import TaskClaimManager
@@ -25,11 +26,26 @@ class OutputExecutor(TaskExecutor):
 @pytest.mark.integration
 async def test_task_consumer_executes_and_writes_fenced_completion(redis_client):
     task_id = "consumer-complete-63"
+    run_id = "run-complete-63"
     tenant_id = "tenant-a"
     worker_id = "worker-complete-63"
     scheduler_epoch = "epoch-complete-63"
 
-    await redis_client.set(DagRedisKey.task_state(task_id), "scheduled")
+    await redis_client.set(
+        DagRedisKey.task_state(task_id),
+        "scheduled",
+    )
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+        },
+    )
+    await redis_client.set(
+        RedisKey.run_state(run_id),
+        "running",
+    )
 
     reservation_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
     reserved = await reservation_mgr.reserve(
@@ -50,7 +66,7 @@ async def test_task_consumer_executes_and_writes_fenced_completion(redis_client)
 
     ctx = TaskContext(
         task_id=task_id,
-        run_id="run-complete-63",
+        run_id=run_id,
         tenant_id=tenant_id,
         agent_type="default",
         worker_group="grp-a",
