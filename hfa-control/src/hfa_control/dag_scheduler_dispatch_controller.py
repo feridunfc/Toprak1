@@ -298,13 +298,33 @@ class DagSchedulerDispatchController:
                 reason=reason,
             )
 
-        update = getattr(self._tenant_fairness, "update_on_dispatch", None)
-        if callable(update):
-            cost = self._safe_float(incoming_payload.get("estimated_cost_cents", 1.0), 1.0)
-            await self._maybe_await(update(tenant_id, cost))
-        await self.on_dispatch_success()
+        idempotent_replay = bool(
+            getattr(result, "idempotent_replay", False)
+        )
+        if not idempotent_replay:
+            update = getattr(
+                self._tenant_fairness,
+                "update_on_dispatch",
+                None,
+            )
+            if callable(update):
+                cost = self._safe_float(
+                    incoming_payload.get(
+                        "estimated_cost_cents",
+                        1.0,
+                    ),
+                    1.0,
+                )
+                await self._maybe_await(
+                    update(tenant_id, cost)
+                )
+            await self.on_dispatch_success()
         return self._record(
-            "committed",
+            (
+                "already_projected"
+                if idempotent_replay
+                else "committed"
+            ),
             dispatched=True,
             task_id=authoritative_task_id,
             run_id=authoritative_run_id,
