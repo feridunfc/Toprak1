@@ -2,6 +2,7 @@
 import asyncio
 import pytest
 
+from hfa.config.keys import RedisKey
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.worker_reservation import WorkerReservationManager
 from hfa_control.reservation_reaper import ReservationReaper
@@ -9,9 +10,36 @@ from hfa.dag.schema import DagRedisKey
 
 pytestmark = pytest.mark.asyncio
 
+
+async def _seed_claim_task(
+    redis_client,
+    *,
+    task_id: str,
+    run_id: str,
+) -> None:
+    await redis_client.set(
+        DagRedisKey.task_state(task_id),
+        "scheduled",
+    )
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+        },
+    )
+    await redis_client.set(
+        RedisKey.run_state(run_id),
+        "running",
+    )
+
 @pytest.mark.integration
 async def test_claim_with_matching_reservation_succeeds_and_consumes(redis_client):
-    await redis_client.set(DagRedisKey.task_state("task-1"), "scheduled")
+    await _seed_claim_task(
+        redis_client,
+        task_id="task-1",
+        run_id="run-task-1",
+    )
     res_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
     await res_mgr.reserve(worker_id="worker-1", task_id="task-1", scheduler_epoch="epoch-1", reserved_at_ms=123456)
     claim_mgr = TaskClaimManager(redis_client)
@@ -23,7 +51,11 @@ async def test_claim_with_matching_reservation_succeeds_and_consumes(redis_clien
 
 @pytest.mark.integration
 async def test_claim_without_reservation_rejected(redis_client):
-    await redis_client.set(DagRedisKey.task_state("task-2"), "scheduled")
+    await _seed_claim_task(
+        redis_client,
+        task_id="task-2",
+        run_id="run-task-2",
+    )
     claim_mgr = TaskClaimManager(redis_client)
     result = await claim_mgr.claim_start(task_id="task-2", tenant_id="tenant-a", worker_instance_id="worker-2", claimed_at_ms=123500, scheduler_epoch="epoch-1")
     assert result.ok is False
@@ -32,7 +64,11 @@ async def test_claim_without_reservation_rejected(redis_client):
 
 @pytest.mark.integration
 async def test_claim_with_wrong_epoch_rejected(redis_client):
-    await redis_client.set(DagRedisKey.task_state("task-3"), "scheduled")
+    await _seed_claim_task(
+        redis_client,
+        task_id="task-3",
+        run_id="run-task-3",
+    )
     res_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
     await res_mgr.reserve(worker_id="worker-3", task_id="task-3", scheduler_epoch="epoch-real", reserved_at_ms=123456)
     claim_mgr = TaskClaimManager(redis_client)
@@ -43,7 +79,11 @@ async def test_claim_with_wrong_epoch_rejected(redis_client):
 
 @pytest.mark.integration
 async def test_claim_with_wrong_worker_rejected(redis_client):
-    await redis_client.set(DagRedisKey.task_state("task-5"), "scheduled")
+    await _seed_claim_task(
+        redis_client,
+        task_id="task-5",
+        run_id="run-task-5",
+    )
     res_mgr = WorkerReservationManager(redis_client, reservation_ttl_seconds=30)
     await res_mgr.reserve(worker_id="worker-real", task_id="task-5", scheduler_epoch="epoch-1", reserved_at_ms=123456)
     claim_mgr = TaskClaimManager(redis_client)
