@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -45,8 +46,12 @@ def _claim(**changes) -> TaskClaimAuthorityInput:
         dispatch_revision=2,
         previous_claim_epoch=0,
         dispatch_transition_id="dispatch-transition-1",
-        dispatch_record_hash="dispatch-record-hash",
-        dispatch_command_hash="dispatch-command-hash",
+        dispatch_record_hash=hashlib.sha256(
+            b"dispatch-record"
+        ).hexdigest(),
+        dispatch_command_hash=hashlib.sha256(
+            b"dispatch-command"
+        ).hexdigest(),
         dispatch_operation_id=(
             f"task-dispatch:v1:{identity.sha256}:attempt:1"
         ),
@@ -158,6 +163,46 @@ def test_dispatch_operation_identity_mismatch_fails():
     ):
         normalize_task_claim_input(
             _claim(dispatch_operation_id="wrong")
+        )
+
+
+def test_non_sha_dispatch_record_hash_rejected_before_command_build():
+    with pytest.raises(
+        ValueError,
+        match="dispatch_record_hash",
+    ):
+        build_task_claim_command(
+            _claim(dispatch_record_hash="not-a-sha256")
+        )
+
+
+def test_uppercase_dispatch_record_hash_rejected_before_command_build():
+    with pytest.raises(
+        ValueError,
+        match="dispatch_record_hash",
+    ):
+        build_task_claim_command(
+            _claim(dispatch_record_hash=("a" * 64).upper())
+        )
+
+
+def test_non_sha_dispatch_command_hash_rejected_before_command_build():
+    with pytest.raises(
+        ValueError,
+        match="dispatch_command_hash",
+    ):
+        build_task_claim_command(
+            _claim(dispatch_command_hash="not-a-sha256")
+        )
+
+
+def test_uppercase_dispatch_command_hash_rejected_before_command_build():
+    with pytest.raises(
+        ValueError,
+        match="dispatch_command_hash",
+    ):
+        build_task_claim_command(
+            _claim(dispatch_command_hash=("b" * 64).upper())
         )
 
 

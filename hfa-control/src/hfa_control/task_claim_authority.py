@@ -149,11 +149,11 @@ def normalize_task_claim_input(
             claim.dispatch_transition_id,
             "dispatch_transition_id",
         ),
-        "dispatch_record_hash": _required_text(
+        "dispatch_record_hash": _required_sha256(
             claim.dispatch_record_hash,
             "dispatch_record_hash",
         ),
-        "dispatch_command_hash": _required_text(
+        "dispatch_command_hash": _required_sha256(
             claim.dispatch_command_hash,
             "dispatch_command_hash",
         ),
