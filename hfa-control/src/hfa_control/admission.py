@@ -43,6 +43,17 @@ except ImportError:
     TenantFormatError = Exception
 
 try:
+    from hfa_tools.middleware.tenant import (
+        TenantFormatError as CanonicalTenantFormatError,
+    )
+    from hfa_tools.middleware.tenant import (
+        validate_run_id_format as canonical_validate_run_id_format,
+    )
+except ImportError:
+    canonical_validate_run_id_format = None  # type: ignore
+    CanonicalTenantFormatError = Exception
+
+try:
     from hfa.obs.tracing import HFATracing, get_tracer  # type: ignore
 
     _tracer = get_tracer("hfa.admission")
@@ -59,6 +70,13 @@ from hfa_control.exceptions import (
 )
 from hfa_control.rate_limit import TenantRateLimiter
 from hfa_control.tenant_registry import TenantRegistry
+from hfa_control.run_create_authority import (
+    RUN_CREATE_DUPLICATE_STATUS,
+    RUN_CREATE_PROJECTED_STATUS,
+    RunCreateAuthorityBinding,
+    RunCreateAuthorityError,
+    RunCreateResourceError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +105,8 @@ class AdmissionController:
         tenant_registry: Optional[TenantRegistry] = None,
         rate_limiter: Optional[TenantRateLimiter] = None,
         audit=None,
+        canonical_run_create_binding: bool = False,
+        run_create_authority: Optional[RunCreateAuthorityBinding] = None,
     ) -> None:
         self._redis = redis
         self._config = config
@@ -94,6 +114,16 @@ class AdmissionController:
         self._tenant_registry = tenant_registry
         self._rate_limiter = rate_limiter
         self._audit = audit  # AuditLogger | None
+        if type(canonical_run_create_binding) is not bool:
+            raise ValueError("canonical_run_create_binding must be a boolean")
+        if canonical_run_create_binding and run_create_authority is None:
+            raise ValueError(
+                "canonical RUN_CREATE binding requires run_create_authority"
+            )
+        self._canonical_run_create_binding_enabled = (
+            canonical_run_create_binding
+        )
+        self._run_create_authority = run_create_authority
 
     async def initialise(self) -> None:
         """
@@ -106,6 +136,10 @@ class AdmissionController:
         if self._rate_limiter is not None:
             await self._rate_limiter.initialise()
             logger.info("AdmissionController: rate limiter initialised (EVALSHA ready)")
+        if self._canonical_run_create_binding_enabled:
+            assert self._run_create_authority is not None
+            await self._run_create_authority.initialise()
+            logger.info("AdmissionController: canonical RUN_CREATE binding initialised")
 
     async def _tenant_inflight_allowed(
         self, tenant_id: str
@@ -191,8 +225,153 @@ class AdmissionController:
             )
 
     async def admit(self, request) -> str:
+        """Dispatch to the default legacy path or flagged canonical RUN_CREATE."""
+        if not self._canonical_run_create_binding_enabled:
+            return await self._admit_legacy(request)
+        return await self._admit_canonical(request)
+
+    async def _validate_request_identity(self, request) -> None:
+        if canonical_validate_run_id_format:
+            try:
+                ext_tenant, _ = canonical_validate_run_id_format(request.run_id)
+                if ext_tenant != request.tenant_id:
+                    raise AdmissionError(
+                        f"run_id tenant mismatch: run_id encodes {ext_tenant!r}, "
+                        f"header says {request.tenant_id!r}"
+                    )
+            except CanonicalTenantFormatError as exc:
+                raise AdmissionError(str(exc)) from exc
+
+    async def _admit_canonical(self, request) -> str:
+        assert self._run_create_authority is not None
+        span = (
+            _tracer.start_as_current_span("hfa.admission.admit.canonical")
+            if _tracer
+            else _noop_span()
+        )
+        with span as sp:
+            _set_attr(sp, "hfa.run_id", request.run_id)
+            _set_attr(sp, "hfa.tenant_id", request.tenant_id)
+            _set_attr(sp, "hfa.agent_type", request.agent_type)
+            try:
+                await self._validate_request_identity(request)
+
+                tenant_config = (
+                    await self._tenant_registry.get_config(request.tenant_id)
+                    if self._tenant_registry is not None
+                    else None
+                )
+
+                # Request-attempt rate accounting is intentionally not refundable.
+                if (
+                    tenant_config is not None
+                    and tenant_config.max_runs_per_second is not None
+                    and self._rate_limiter is not None
+                ):
+                    allowed = await self._rate_limiter.check_and_consume(
+                        request.tenant_id,
+                        tenant_config.max_runs_per_second,
+                    )
+                    if not allowed:
+                        await self._reject_run(
+                            request,
+                            "tenant_rate_limit_exceeded",
+                        )
+                        raise RateLimitedError(
+                            f"Tenant rate limit exceeded: {request.tenant_id!r}"
+                        )
+
+                try:
+                    result = await self._run_create_authority.admit(
+                        request,
+                        tenant_inflight_limit=(
+                            None
+                            if tenant_config is None
+                            else tenant_config.max_inflight_runs
+                        ),
+                        # The exact parent has no canonical provider for these
+                        # two limits. Accounting remains active; enforcement is
+                        # intentionally unavailable rather than invented.
+                        concurrent_run_limit=None,
+                        budget_limit_cents=None,
+                    )
+                except RunCreateResourceError as exc:
+                    if exc.resource_status == "tenant_inflight_exceeded":
+                        await self._reject_run(
+                            request,
+                            "tenant_inflight_limit_exceeded",
+                        )
+                        raise QuotaExceededError(
+                            f"Tenant inflight limit exceeded: {request.tenant_id!r}"
+                        ) from exc
+                    if exc.resource_status == "concurrent_run_quota_exceeded":
+                        await self._reject_run(request, "system_quota_exceeded")
+                        raise QuotaExceededError(
+                            f"Concurrent run limit exceeded: {request.tenant_id!r}"
+                        ) from exc
+                    if exc.resource_status == "budget_exceeded":
+                        await self._reject_run(request, "budget_exceeded")
+                        raise BudgetExceededError(
+                            f"Budget exceeded: {request.tenant_id!r}"
+                        ) from exc
+                    raise
+
+                if result.status not in {
+                    RUN_CREATE_PROJECTED_STATUS,
+                    RUN_CREATE_DUPLICATE_STATUS,
+                }:
+                    raise RunCreateAuthorityError(
+                        status=result.status,
+                        detail="RUN_CREATE did not complete admitted projection",
+                        canonical_commit_durable=True,
+                    )
+
+                logger.info(
+                    "Canonical RUN_CREATE admitted: run=%s tenant=%s status=%s",
+                    request.run_id,
+                    request.tenant_id,
+                    result.status,
+                )
+                if self._audit and result.first_projection:
+                    try:
+                        await self._audit.admitted(
+                            run_id=request.run_id,
+                            tenant_id=request.tenant_id,
+                            agent_type=request.agent_type,
+                            priority=request.priority,
+                            estimated_cost_cents=int(
+                                getattr(request, "estimated_cost_cents", 0) or 0
+                            ),
+                        )
+                    except Exception as audit_exc:
+                        # Canonical authority, resource finalization and the
+                        # admitted projection are already durable. Audit failure
+                        # must not misreport the RUN as rejected or trigger any
+                        # compensation path.
+                        logger.error(
+                            "Canonical RUN_CREATE audit write failed: run=%s %s",
+                            request.run_id,
+                            audit_exc,
+                            exc_info=True,
+                        )
+                _set_attr(sp, "hfa.admitted", "true")
+                return result.run_id
+            except (AdmissionError, RunCreateAuthorityError):
+                _set_attr(sp, "hfa.admitted", "false")
+                raise
+            except Exception as exc:
+                _set_attr(sp, "hfa.admitted", "false")
+                logger.error(
+                    "AdmissionController canonical RUN_CREATE error: run=%s %s",
+                    request.run_id,
+                    exc,
+                    exc_info=True,
+                )
+                raise
+
+    async def _admit_legacy(self, request) -> str:
         """
-        Admit a RunRequest.
+        Admit a RunRequest through the exact legacy path.
         Returns run_id on success.
         Raises AdmissionError subclass on rejection.
 

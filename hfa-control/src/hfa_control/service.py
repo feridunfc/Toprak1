@@ -9,6 +9,9 @@ from typing import Optional
 from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.admission import AdmissionController
+from hfa.governance.admission_resource_reservation import (
+    AdmissionResourceReservationManager,
+)
 from hfa_control.audit import build_audit_logger
 from hfa_control.leader import LeaderElection
 from hfa_control.models import ControlPlaneConfig
@@ -23,7 +26,14 @@ from hfa_control.task_admit_authority import (
     FEATURE_FLAG as TASK_ADMIT_FEATURE_FLAG,
     parse_task_admit_binding_flag,
 )
+from hfa_control.run_create_authority import (
+    FEATURE_FLAG as RUN_CREATE_FEATURE_FLAG,
+    RunCreateAuthorityBinding,
+    parse_run_create_binding_flag,
+)
 from hfa_control.recovery import RecoveryService
+from hfa_control.rate_limit import TenantRateLimiter
+from hfa_control.tenant_registry import TenantRegistry
 from hfa_control.redis_resilience import RedisHealthMonitor
 from hfa_control.registry import WorkerRegistry
 from hfa_control.run_submission import (
@@ -87,6 +97,19 @@ class ControlPlaneService:
                 os.getenv(TASK_ADMIT_FEATURE_FLAG)
             )
         )
+        canonical_run_create_binding = (
+            parse_run_create_binding_flag(
+                os.getenv(RUN_CREATE_FEATURE_FLAG)
+            )
+        )
+        if (
+            canonical_run_create_binding
+            and not canonical_task_admit_binding
+        ):
+            raise ValueError(
+                "canonical RUN_CREATE binding requires canonical "
+                "TASK_ADMIT binding"
+            )
         self._product_profile = (
             validate_control_product_profile(
                 product_mode=self._config.product_mode,
@@ -104,7 +127,30 @@ class ControlPlaneService:
         self._registry = WorkerRegistry(redis, self._config)
         self._shards = ShardOwnershipManager(redis, self._config)
         self._audit = build_audit_logger(redis)
-        self._admitter = AdmissionController(redis, self._config, audit=self._audit)
+        if canonical_run_create_binding:
+            tenant_registry = TenantRegistry(redis)
+            tenant_rate_limiter = TenantRateLimiter(redis)
+            resource_manager = AdmissionResourceReservationManager(redis)
+            run_create_authority = RunCreateAuthorityBinding(
+                redis=redis,
+                resource_manager=resource_manager,
+                control_stream=self._config.control_stream,
+            )
+            self._admitter = AdmissionController(
+                redis,
+                self._config,
+                tenant_registry=tenant_registry,
+                rate_limiter=tenant_rate_limiter,
+                audit=self._audit,
+                canonical_run_create_binding=True,
+                run_create_authority=run_create_authority,
+            )
+        else:
+            self._admitter = AdmissionController(
+                redis,
+                self._config,
+                audit=self._audit,
+            )
         self._scheduler = build_production_scheduler(
             redis=redis,
             config=self._config,
