@@ -53,6 +53,9 @@ class RunSubmissionFailureCode(str, Enum):
     RUN_ADMISSION_IDENTITY_MISMATCH = (
         "RUN_ADMISSION_IDENTITY_MISMATCH"
     )
+    RUN_ADMISSION_PROJECTION_PENDING = (
+        "RUN_ADMISSION_PROJECTION_PENDING"
+    )
     TASK_ADMISSION_FAILED = "TASK_ADMISSION_FAILED"
     TASK_ADMISSION_NOT_COMMITTED = (
         "TASK_ADMISSION_NOT_COMMITTED"
@@ -628,6 +631,21 @@ class RunSubmissionCoordinator:
                 )
             )
         except Exception as exc:
+            if bool(getattr(exc, "canonical_commit_durable", False)):
+                return self._failure(
+                    status=RunSubmissionStatus.SUBMISSION_INCOMPLETE,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    run_admitted=True,
+                    task_admitted=False,
+                    task_ready=False,
+                    code=(
+                        RunSubmissionFailureCode
+                        .RUN_ADMISSION_PROJECTION_PENDING
+                    ),
+                    exc=exc,
+                )
             return self._failure(
                 status=RunSubmissionStatus.REJECTED,
                 tenant_id=tenant_id,

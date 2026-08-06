@@ -30,7 +30,10 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-hfa = ["lua/admission_resource_reservation.lua"]
+hfa = [
+    "lua/admission_resource_reservation.lua",
+    "lua/run_create_projection.lua",
+]
 
 [tool.ruff]
 exclude = [
