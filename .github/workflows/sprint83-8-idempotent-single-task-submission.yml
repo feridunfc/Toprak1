@@ -111,24 +111,13 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              protected_runtime = {
-                  "hfa-core/src/hfa/config/keys.py",
-                  "hfa-core/src/hfa/lua/"
-                  "submission_idempotency.lua",
-                  "hfa-control/src/hfa_control/api/router.py",
-                  "hfa-control/src/hfa_control/run_submission.py",
-                  "hfa-control/src/hfa_control/service.py",
-                  "hfa-control/src/hfa_control/"
-                  "submission_idempotency.py",
-              }
-              assert changed & protected_runtime, {
-                  "mode": "future_runtime_regression",
+              regression_touched = changed & allowlist
+              assert regression_touched, {
+                  "mode": "future_regression",
                   "changed": sorted(changed),
-                  "required_runtime_intersection": sorted(
-                      protected_runtime
-                  ),
+                  "required_regression_intersection": sorted(allowlist),
               }
-              mode = "RUNTIME_INTERSECTION"
+              mode = "REGRESSION_TRIGGER_INTERSECTION"
 
           forbidden = [
               path
@@ -249,22 +238,6 @@ jobs:
         run: |
           set -o pipefail
 
-          baseline_scheduler_node="tests/core/test_production_scheduler_composition_contract.py::test_production_graph_contains_canonical_components_only"
-          baseline_scheduler_paths=(
-            "tests/core/test_production_scheduler_composition_contract.py"
-            "hfa-control/src/hfa_control/scheduler.py"
-            "hfa-control/src/hfa_control/scheduler_reservation_dispatch.py"
-          )
-          baseline_pytest_args=()
-          expected_deselected=0
-          if git diff --quiet "$PR_BASE_SHA...HEAD" -- "${baseline_scheduler_paths[@]}"; then
-            baseline_pytest_args+=(--deselect="${baseline_scheduler_node}")
-            expected_deselected=1
-            echo "SPRINT83_8_KNOWN_BASELINE_SCHEDULER_CONTRACT_EXCLUDED ${baseline_scheduler_node}"
-          else
-            echo "SPRINT83_8_BASELINE_SCHEDULER_CONTRACT_REENABLED changed_scheduler_scope=true"
-          fi
-
           python -m pytest \
             tests/unit/test_product_alpha_profile.py \
             tests/unit/test_product_alpha_worker_capabilities.py \
@@ -280,18 +253,12 @@ jobs:
             tests/integration/test_run_status_result_read_model_integration.py \
             tests/integration/test_product_alpha_closure_e2e_83_7.py \
             tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py \
-            "${baseline_pytest_args[@]}" \
             -q --tb=short \
             | tee sprint83_8_regressions.txt
 
           ! grep -Eqi \
-            'skipped|xfailed|xpassed' \
+            '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' \
             sprint83_8_regressions.txt
-          if [ "$expected_deselected" -eq 1 ]; then
-            grep -Eq '(^|[^0-9])1 deselected' sprint83_8_regressions.txt
-          else
-            ! grep -Eqi 'deselected' sprint83_8_regressions.txt
-          fi
           passed_count="$(
             grep -Eo '[0-9]+ passed' \
               sprint83_8_regressions.txt \

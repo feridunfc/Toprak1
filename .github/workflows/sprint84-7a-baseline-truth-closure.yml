@@ -1,0 +1,225 @@
+name: Sprint 84.7A Baseline Truth Closure
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-control/src/hfa_control/scheduler.py'
+      - 'hfa-control/src/hfa_control/scheduler_reservation_dispatch.py'
+      - 'hfa-control/src/hfa_control/task_claim.py'
+      - 'tests/core/test_production_scheduler_composition_contract.py'
+      - 'tests/core/test_task_claim_service_legacy_quarantine_contract.py'
+      - '.github/workflows/sprint83-7-trusted-gateway-single-task-alpha.yml'
+      - '.github/workflows/sprint83-8-idempotent-single-task-submission.yml'
+      - '.github/workflows/sprint84-7a-baseline-truth-closure.yml'
+      - 'docs/implementation/sprint84/SPRINT84.7A-baseline-truth-closure.md'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact Sprint 84.7A scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = "sprint/84-7a-baseline-truth-closure"
+          allowlist = {
+              ".github/workflows/sprint83-7-trusted-gateway-single-task-alpha.yml",
+              ".github/workflows/sprint83-8-idempotent-single-task-submission.yml",
+              ".github/workflows/sprint84-7a-baseline-truth-closure.yml",
+              "docs/implementation/sprint84/SPRINT84.7A-baseline-truth-closure.md",
+              "hfa-control/src/hfa_control/scheduler_reservation_dispatch.py",
+              "hfa-control/src/hfa_control/task_claim.py",
+              "tests/core/test_production_scheduler_composition_contract.py",
+          }
+          changed = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{os.environ['PR_BASE_SHA']}...HEAD"],
+                  text=True,
+              ).splitlines()
+          )
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert changed == allowlist, {
+                  "missing": sorted(allowlist - changed),
+                  "unexpected": sorted(changed - allowlist),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              touched = changed & allowlist
+              assert touched, {
+                  "mode": "FUTURE_REGRESSION_TRIGGER",
+                  "changed": sorted(changed),
+                  "required_intersection": sorted(allowlist),
+              }
+              mode = "REGRESSION_TRIGGER_INTERSECTION"
+          forbidden = [
+              path for path in changed
+              if path.startswith("local_out/")
+              or "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, sorted(forbidden)
+          print("SPRINT84_7A_SCOPE_OK", mode, sorted(changed))
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Focused baseline truth closure
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/core/test_production_scheduler_composition_contract.py \
+            tests/core/test_task_claim_service_legacy_quarantine_contract.py \
+            tests/unit/test_task_dispatch_authority_binding.py \
+            -q --tb=short | tee sprint84_7a_focused.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7a_focused.txt
+
+      - name: TASK_CLAIM regression with zero exclusions
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_task_claim_authority_binding.py \
+            tests/unit/test_task_claim_authority_contract.py \
+            tests/core/test_task_claim_legacy_direct_gate_contract.py \
+            tests/core/test_task_claim_reservation_owner_lookup_contract.py \
+            tests/core/test_task_claim_service_legacy_quarantine_contract.py \
+            tests/core/test_task_claim_start_contract.py \
+            tests/core/test_task_claim_status_taxonomy_contract.py \
+            tests/integration/test_task_claim_authority_binding_integration.py \
+            tests/integration/test_task_claim_authority_projection_integration.py \
+            tests/integration/test_task_claim_legacy_direct_gate_integration.py \
+            tests/integration/test_task_claim_reservation_integration.py \
+            tests/integration/test_task_claim_start_integration.py \
+            -q --tb=short | tee sprint84_7a_task_claim.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7a_task_claim.txt
+          grep -Eq '(^|[^0-9])81 passed' sprint84_7a_task_claim.txt
+
+      - name: Sprint 83.7 regression without baseline deselection
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/core/test_production_scheduler_composition_contract.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            -q --tb=short | tee sprint84_7a_83_7.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7a_83_7.txt
+          grep -Eq '(^|[^0-9])174 passed' sprint84_7a_83_7.txt
+
+      - name: Sprint 83.8 regression without baseline deselection
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/unit/test_submission_idempotency.py \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/core/test_production_scheduler_composition_contract.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py \
+            -q --tb=short | tee sprint84_7a_83_8.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7a_83_8.txt
+          grep -Eq '(^|[^0-9])199 passed' sprint84_7a_83_8.txt
+
+      - name: Static authority boundary
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('hfa-control/src/hfa_control/scheduler_reservation_dispatch.py').read_text(encoding='utf-8')
+          assert 'RedisKey.run_state(' not in source
+          assert '_check_run_state_is_dispatchable' not in source
+          assert 'occ_state_conflict' not in source
+          assert '"requeue_count"' in source
+          claim = Path('hfa-control/src/hfa_control/task_claim.py').read_text(encoding='utf-8')
+          assert 'Canonical runtime code must not use' in claim
+          assert 'This is intentionally not named claim().' in claim
+          for workflow in (
+              '.github/workflows/sprint83-7-trusted-gateway-single-task-alpha.yml',
+              '.github/workflows/sprint83-8-idempotent-single-task-submission.yml',
+          ):
+              text = Path(workflow).read_text(encoding='utf-8')
+              assert '--deselect=' not in text
+              assert 'KNOWN_BASELINE_SCHEDULER_CONTRACT_EXCLUDED' not in text
+          print('SPRINT84_7A_STATIC_BOUNDARY_OK')
+          PY
+
+      - name: Authority audit
+        shell: bash
+        run: |
+          python scripts/authority_audit.py --repo-root . --format dashboard --output /tmp/authority.json --fail-on banned
+          python - <<'PY'
+          import json
+          data=json.load(open('/tmp/authority.json', encoding='utf-8'))
+          banned=(data.get('summary') or {}).get('banned', data.get('banned'))
+          assert int(banned or 0) == 0, data
+          print('SPRINT84_7A_AUTHORITY_BANNED_0')
+          PY
+
+      - name: Compile and diff hygiene
+        shell: bash
+        run: |
+          python -m compileall -q hfa-core/src hfa-control/src hfa-worker/src
+          git diff --check origin/${{ github.base_ref }}...HEAD

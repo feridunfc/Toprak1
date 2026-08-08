@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Callable
 
@@ -164,12 +165,18 @@ def test_production_graph_contains_canonical_components_only() -> None:
     assert int(getattr(manager, "_reservation_ttl_seconds", 0)) == int(ttl)
 
     dispatcher = components["reservation_dispatcher"]
-    legacy_redis = getattr(dispatcher, "redis", None)
-    if legacy_redis is None:
-        legacy_redis = getattr(dispatcher, "_redis", None)
-    assert legacy_redis is None, (
-        "legacy RedisKey.run_state(run_id) OCC dependency must not be injected"
+    assert getattr(dispatcher, "_task_attempt_redis", None) is redis, (
+        "production dispatcher must retain TASK attempt/requeue metadata access"
     )
+    dispatcher_source = Path(
+        "hfa-control/src/hfa_control/scheduler_reservation_dispatch.py"
+    ).read_text(encoding="utf-8")
+    assert "RedisKey.run_state(" not in dispatcher_source, (
+        "legacy RUN-state OCC/precheck must not live in reservation dispatch"
+    )
+    assert "_check_run_state_is_dispatchable" not in dispatcher_source
+    assert "occ_state_conflict" not in dispatcher_source
+    assert '"requeue_count"' in dispatcher_source
     assert components.get("tenant_queue") is None
     assert components.get("injected_dispatch_callback") is None
 
