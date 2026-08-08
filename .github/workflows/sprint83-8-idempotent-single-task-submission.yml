@@ -111,24 +111,13 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              protected_runtime = {
-                  "hfa-core/src/hfa/config/keys.py",
-                  "hfa-core/src/hfa/lua/"
-                  "submission_idempotency.lua",
-                  "hfa-control/src/hfa_control/api/router.py",
-                  "hfa-control/src/hfa_control/run_submission.py",
-                  "hfa-control/src/hfa_control/service.py",
-                  "hfa-control/src/hfa_control/"
-                  "submission_idempotency.py",
-              }
-              assert changed & protected_runtime, {
-                  "mode": "future_runtime_regression",
+              regression_touched = changed & allowlist
+              assert regression_touched, {
+                  "mode": "future_regression",
                   "changed": sorted(changed),
-                  "required_runtime_intersection": sorted(
-                      protected_runtime
-                  ),
+                  "required_regression_intersection": sorted(allowlist),
               }
-              mode = "RUNTIME_INTERSECTION"
+              mode = "REGRESSION_TRIGGER_INTERSECTION"
 
           forbidden = [
               path
