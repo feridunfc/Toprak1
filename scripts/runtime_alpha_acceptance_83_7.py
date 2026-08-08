@@ -38,6 +38,7 @@ from hfa_control.product_profile import (
     TenantIdentityBoundary,
 )
 from hfa_control.run_submission import RunSubmissionCoordinator
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_control.service import ControlPlaneService
 from hfa_control.shard import ShardOwnershipManager
 from hfa_worker.consumer import CONSUMER_GROUP
@@ -1320,6 +1321,7 @@ async def build_acceptance_report(
         await redis_client.ping()
         if reset_test_db:
             await redis_client.flushdb()
+            await ensure_terminal_event_index(redis_client)
 
         scenario = await _product_alpha_scenario(
             redis_client,
