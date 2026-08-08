@@ -100,10 +100,12 @@ class RunTerminationCoordinator:
         task_completion_gateway: Any,
         *,
         enabled: bool = False,
+        authority_binding: Any | None = None,
     ) -> None:
         self._redis = redis
         self._task_completion_gateway = task_completion_gateway
         self._enabled = bool(enabled)
+        self._authority_binding = authority_binding
         self._loader: Optional[LuaScriptLoader] = None
 
     @property
@@ -117,6 +119,8 @@ class RunTerminationCoordinator:
         )
         await loader.load()
         self._loader = loader
+        if self._authority_binding is not None:
+            await self._authority_binding.initialise()
 
     async def _ensure_initialised(self) -> None:
         if self._loader is None:
@@ -141,6 +145,28 @@ class RunTerminationCoordinator:
             )
 
         await self._ensure_initialised()
+        if self._authority_binding is not None:
+            canonical = await self._authority_binding.terminate(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                trigger_task_id=trigger_task_id,
+                finalized_at_ms=finalized_at_ms,
+                worker_instance_id=worker_instance_id,
+                trigger_terminal_state=trigger_terminal_state,
+            )
+            return RunTerminationResult(
+                finalized=bool(canonical.finalized),
+                status=str(canonical.status),
+                run_id=run_id,
+                final_state=str(canonical.final_state),
+                task_count=int(canonical.task_count),
+                done_count=int(canonical.done_count),
+                failed_count=int(canonical.failed_count),
+                skipped_count=int(canonical.skipped_count),
+                already_finalized=bool(canonical.already_finalized),
+                ack_allowed=bool(canonical.ack_allowed),
+            )
+
         assert self._loader is not None
         keys = [
             RedisKey.run_state(run_id),
@@ -151,6 +177,7 @@ class RunTerminationCoordinator:
             RedisKey.stream_results(),
             RedisKey.runtime_truth_conflict_index(),
             RedisKey.runtime_truth_conflict_stream(),
+            RedisKey.run_terminal_event_index(),
         ]
         args = [
             run_id,

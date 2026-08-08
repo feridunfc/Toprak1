@@ -14,6 +14,7 @@
 --  6 results_stream
 --  7 runtime_truth_conflict_index
 --  8 runtime_truth_conflict_stream
+--  9 terminal-event evidence/readiness index HASH
 --
 -- ARGV
 --  1 run_id
@@ -43,6 +44,7 @@ local run_tasks_set = KEYS[5]
 local results_stream = KEYS[6]
 local conflict_index = KEYS[7]
 local conflict_stream = KEYS[8]
+local terminal_event_index_key = KEYS[9]
 
 local run_id = ARGV[1] or ""
 local tenant_id = ARGV[2] or ""
@@ -325,6 +327,40 @@ if failed_count > 0 then
     final_state = "failed"
 end
 
+local event_type = "RunCompleted"
+if final_state == "failed" then
+    event_type = "RunFailed"
+end
+local event_id = redis.sha1hex(
+    "RUN_TERMINATE\31" .. run_id .. "\31" .. final_state .. "\31" .. tostring(task_count)
+)
+local evidence_field = "run:" .. run_id
+
+local function validate_terminal_event_index()
+    if type_of(terminal_event_index_key) ~= "hash" then
+        return false, "terminal_event_index_missing_or_wrong_type"
+    end
+    if redis.call("TTL", terminal_event_index_key) ~= -1 then
+        return false, "terminal_event_index_not_persistent"
+    end
+    if redis.call("HGET", terminal_event_index_key, "__contract__:schema_version") ~= "1" or
+       redis.call("HGET", terminal_event_index_key, "__contract__:producer_contract_version") ~= "1" then
+        return false, "terminal_event_index_contract_invalid"
+    end
+    return true, ""
+end
+
+local function decode_terminal_evidence(raw)
+    if not raw or raw == "" then
+        return nil, "terminal_event_evidence_missing"
+    end
+    local ok, decoded = pcall(cjson.decode, raw)
+    if not ok or type(decoded) ~= "table" then
+        return nil, "terminal_event_evidence_malformed"
+    end
+    return decoded, ""
+end
+
 local terminal_run_states = {
     done = true,
     failed = true,
@@ -355,6 +391,33 @@ if terminal_run_states[observed_run_state] then
        result_status ~= final_state or finalization_source ~= "terminal_task_aggregate" then
         return persist_conflict("run_truth_corruption_conflict", "terminal_run_result_mismatch", observed_run_state)
     end
+    local index_ok, index_detail = validate_terminal_event_index()
+    if not index_ok then
+        return persist_conflict("run_truth_corruption_conflict", index_detail, observed_run_state)
+    end
+    local evidence, evidence_detail = decode_terminal_evidence(
+        redis.call("HGET", terminal_event_index_key, evidence_field)
+    )
+    if not evidence then
+        return persist_conflict("run_truth_corruption_conflict", evidence_detail, observed_run_state)
+    end
+    local evidence_expected = {
+        "schema_version", "1",
+        "run_id", run_id,
+        "tenant_id", tenant_id,
+        "event_type", event_type,
+        "final_state", final_state,
+        "event_id", event_id,
+    }
+    for index = 1, #evidence_expected, 2 do
+        if evidence[evidence_expected[index]] ~= evidence_expected[index + 1] then
+            return persist_conflict("run_truth_corruption_conflict", "terminal_event_evidence_mismatch", observed_run_state)
+        end
+    end
+    local evidence_source = evidence["source"] or ""
+    if evidence_source ~= "legacy_run_terminate" and evidence_source ~= "historical_backfill" then
+        return persist_conflict("run_truth_corruption_conflict", "terminal_event_evidence_source_mismatch", observed_run_state)
+    end
     return result(1, "already_finalized", final_state, task_count, done_count,
                   failed_count, skipped_count, 1, 1)
 end
@@ -367,6 +430,19 @@ if run_result_type == "hash" and redis.call("HLEN", run_result_key) > 0 then
     return persist_conflict("run_truth_corruption_conflict", "run_result_preexists_before_terminal", observed_run_state)
 end
 
+local index_ok, index_detail = validate_terminal_event_index()
+if not index_ok then
+    return persist_conflict("run_truth_corruption_conflict", index_detail, observed_run_state)
+end
+local preexisting_evidence = redis.call("HGET", terminal_event_index_key, evidence_field)
+if preexisting_evidence then
+    local decoded, decode_detail = decode_terminal_evidence(preexisting_evidence)
+    if not decoded then
+        return persist_conflict("run_truth_corruption_conflict", decode_detail, observed_run_state)
+    end
+    return persist_conflict("run_truth_terminal_conflict", "terminal_event_evidence_preexists", observed_run_state)
+end
+
 local summary = {
     task_count = task_count,
     done_count = done_count,
@@ -376,16 +452,11 @@ local summary = {
     trigger_terminal_state = trigger_terminal_state,
 }
 local payload = cjson.encode(summary)
-local event_type = "RunCompleted"
 local error_text = ""
 if final_state == "failed" then
-    event_type = "RunFailed"
     error_text = "aggregate_task_failure"
 end
 local completed_at = tostring(finalized_at_ms / 1000.0)
-local event_id = redis.sha1hex(
-    "RUN_TERMINATE\31" .. run_id .. "\31" .. final_state .. "\31" .. tostring(task_count)
-)
 
 -- Every operation below is type-validated before the first write. Redis Lua
 -- executes this commit without yielding, so RUN state/result/event/projection
@@ -431,7 +502,7 @@ redis.call(
 )
 redis.call("EXPIRE", run_result_key, run_result_ttl)
 redis.call("ZREM", cp_running_zset, run_id)
-redis.call(
+local stream_entry_id = redis.call(
     "XADD",
     results_stream,
     "MAXLEN", "~", results_stream_maxlen,
@@ -455,6 +526,18 @@ redis.call(
     "failed_count", tostring(failed_count),
     "skipped_count", tostring(skipped_count)
 )
+local evidence_json = cjson.encode({
+    schema_version = "1",
+    run_id = run_id,
+    tenant_id = tenant_id,
+    event_type = event_type,
+    final_state = final_state,
+    event_id = event_id,
+    source = "legacy_run_terminate",
+    stream_entry_id = stream_entry_id
+})
+redis.call("HSET", terminal_event_index_key, evidence_field, evidence_json)
+redis.call("PERSIST", terminal_event_index_key)
 
 return result(1, "finalized", final_state, task_count, done_count,
               failed_count, skipped_count, 0, 1)

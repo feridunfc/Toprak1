@@ -17,11 +17,12 @@ both RunRequestedEvent and the old ExecutionRequest continue to work.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Optional, Set
 
-from redis.exceptions import ResponseError
+from redis.exceptions import ResponseError, WatchError
 
 from hfa.config.keys import RedisKey
 from hfa_control.dag_lua import (
@@ -85,6 +86,87 @@ def _identity_mapping_value(mapping: object, key: str) -> str:
         or mapping.get(key.encode("utf-8"))
         or ""
     )
+
+
+def _terminal_event_evidence_fields(event: object) -> dict[str, str]:
+    event_type = _identity_text(getattr(event, "event_type", ""))
+    if event_type not in {"RunCompleted", "RunFailed"}:
+        raise ValueError("terminal evidence helper accepts only terminal RUN events")
+    run_id = _identity_text(getattr(event, "run_id", ""))
+    tenant_id = _identity_text(getattr(event, "tenant_id", ""))
+    event_id = _identity_text(getattr(event, "event_id", ""))
+    if not run_id or not tenant_id or not event_id:
+        raise ValueError("terminal event identity is incomplete")
+    return {
+        "schema_version": "1",
+        "run_id": run_id,
+        "tenant_id": tenant_id,
+        "event_type": event_type,
+        "final_state": "done" if event_type == "RunCompleted" else "failed",
+        "event_id": event_id,
+        "source": "worker_consumer_compat",
+    }
+
+
+async def _append_terminal_event_with_evidence(redis: object, event: object) -> None:
+    """Atomically append a compatibility terminal event and durable evidence.
+
+    The versioned evidence HASH must be explicitly prepared before patched
+    terminal writers run.  Writers never recreate a missing index: if Redis
+    eviction/data loss removes the index, readiness disappears with it and
+    terminal emission fails closed instead of risking a duplicate event.
+    """
+
+    fields = _terminal_event_evidence_fields(event)
+    index_key = RedisKey.run_terminal_event_index()
+    evidence_field = RedisKey.run_terminal_event_evidence_field(fields["run_id"])
+    encoded = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    pipeline_factory = getattr(redis, "pipeline", None)
+    if not callable(pipeline_factory):
+        raise RuntimeError("terminal event evidence requires Redis transaction support")
+
+    for _attempt in range(4):
+        async with pipeline_factory(transaction=True) as pipe:
+            try:
+                await pipe.watch(index_key)
+                if _identity_text(await pipe.type(index_key)) != "hash":
+                    raise RuntimeError("terminal event index is not prepared")
+                contract = await pipe.hmget(
+                    index_key,
+                    "__contract__:schema_version",
+                    "__contract__:producer_contract_version",
+                )
+                if [_identity_text(value) for value in contract] != ["1", "1"]:
+                    raise RuntimeError("terminal event index contract is invalid")
+                if int(await pipe.ttl(index_key)) != -1:
+                    raise RuntimeError("terminal event index must be persistent")
+
+                existing_raw = await pipe.hget(index_key, evidence_field)
+                if existing_raw is not None:
+                    try:
+                        existing = json.loads(_identity_text(existing_raw))
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError("terminal event evidence is malformed") from exc
+                    identity_fields = (
+                        "schema_version", "run_id", "tenant_id", "event_type",
+                        "final_state", "event_id",
+                    )
+                    if not isinstance(existing, dict) or any(existing.get(k) != fields[k] for k in identity_fields):
+                        raise RuntimeError("conflicting terminal event evidence already exists")
+                    if existing.get("source") not in {"worker_consumer_compat", "historical_backfill"}:
+                        raise RuntimeError("conflicting terminal event evidence source already exists")
+                    await pipe.unwatch()
+                    return
+
+                pipe.multi()
+                pipe.xadd(RedisKey.stream_results(), serialize_event(event))
+                pipe.hset(index_key, evidence_field, encoded)
+                pipe.persist(index_key)
+                await pipe.execute()
+                return
+            except WatchError:
+                continue
+    raise RuntimeError("terminal event evidence transaction conflicted repeatedly")
 
 
 async def _verify_run_requested_task_identity(
@@ -827,7 +909,7 @@ class WorkerConsumer:
                         _M.runs_failed_total.inc()
                         _M.run_execution_duration_ms.record(duration_ms)
 
-                await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                await _append_terminal_event_with_evidence(self._redis, evt)
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
 
@@ -846,7 +928,7 @@ class WorkerConsumer:
                     )
                     # Sprint 5: permanent failure is reported as an effect event;
                     # no direct terminal truth is authored by the worker.
-                    await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                    await _append_terminal_event_with_evidence(self._redis, evt)
                     await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
                     return
                 await self._state.store_result(
@@ -863,7 +945,7 @@ class WorkerConsumer:
                     tokens_used=0,
                     payload={},
                 )
-                await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                await _append_terminal_event_with_evidence(self._redis, evt)
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
                 if _M:
@@ -890,7 +972,7 @@ class WorkerConsumer:
                     )
                     # Sprint 5: terminal failure is reported as an effect event;
                     # no direct terminal truth is authored by the worker.
-                    await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                    await _append_terminal_event_with_evidence(self._redis, evt)
                     await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
                     return
                 await self._state.store_result(
@@ -907,7 +989,7 @@ class WorkerConsumer:
                     cost_cents=exc.cost_cents,
                     tokens_used=exc.tokens_used,
                 )
-                await self._redis.xadd(RedisKey.stream_results(), serialize_event(evt))
+                await _append_terminal_event_with_evidence(self._redis, evt)
                 await self._state.mark_completed(event.run_id)
                 await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
                 if _M:

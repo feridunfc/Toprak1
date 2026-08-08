@@ -22,6 +22,7 @@ from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey, DagTaskDispatchInput, DagTaskSeed
 from hfa_control.dag_lua import DagLua
 from hfa_control.run_termination import RunTerminationCoordinator
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_control.models import ControlPlaneConfig
 from hfa_control.service import ControlPlaneService
 from hfa_control.task_claim import TaskClaimManager
@@ -86,6 +87,56 @@ async def _build_runtime(redis_client, *, worker_id: str):
     )
     await worker.prepare_consumer_groups()
     return dag, reservation, executor, worker
+
+
+async def _wait_for_run_finalization_convergence(
+    redis_client,
+    *,
+    run_id: str,
+    stream: str,
+    expected_state: str = "done",
+    timeout_seconds: float = 5.0,
+) -> None:
+    """Wait for the full Sprint 83.2 completion boundary before worker shutdown.
+
+    TASK state convergence alone is not sufficient: task_complete() writes the
+    terminal TASK state before RUN_TERMINATE finishes and before the stream
+    message is ACKed. Closing the worker at TASK=done therefore creates a
+    timing race in the acceptance harness.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    observed_state = ""
+    observed_result: dict[str, str] = {}
+    observed_pending = -1
+
+    while loop.time() < deadline:
+        observed_state = _decode(await redis_client.get(RedisKey.run_state(run_id)))
+        observed_result = _decode_mapping(
+            await redis_client.hgetall(RedisKey.run_result(run_id))
+        )
+        observed_pending = await _pending_count(redis_client, stream)
+
+        if (
+            observed_state == expected_state
+            and observed_result.get("status") == expected_state
+            and observed_result.get("finalization_operation") == "RUN_TERMINATE"
+            and observed_result.get("finalization_source")
+            == "terminal_task_aggregate"
+            and observed_pending == 0
+        ):
+            return
+
+        await asyncio.sleep(0.02)
+
+    raise TimeoutError(
+        "RUN finalization did not converge before worker shutdown: "
+        f"run_id={run_id} expected_state={expected_state} "
+        f"observed_state={observed_state} "
+        f"result_status={observed_result.get('status', '')} "
+        f"pending_count={observed_pending}"
+    )
 
 
 async def _healthy_finalization_scenario(
@@ -172,6 +223,12 @@ async def _healthy_finalization_scenario(
             redis_client,
             task_id=task_id,
             expected="done",
+        )
+        await _wait_for_run_finalization_convergence(
+            redis_client,
+            run_id=run_id,
+            stream=stream,
+            expected_state="done",
         )
     finally:
         await worker.close()
@@ -296,6 +353,7 @@ async def build_acceptance_report(
         await redis_client.ping()
         if reset_test_db:
             await redis_client.flushdb()
+        await ensure_terminal_event_index(redis_client)
 
         healthy = await _healthy_finalization_scenario(
             redis_client,

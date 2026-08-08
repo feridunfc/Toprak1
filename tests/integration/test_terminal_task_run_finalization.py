@@ -9,6 +9,7 @@ from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
 from hfa_control.run_termination import RunTerminationCoordinator
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_worker.consumer import CONSUMER_GROUP
 from hfa_worker.run_finalizing_runtime import (
     RunFinalizingTaskConsumer,
@@ -25,6 +26,7 @@ class _UnusedExecutor:
 
 
 async def _dag(redis_client) -> RunTerminationCoordinator:
+    await ensure_terminal_event_index(redis_client)
     dag = DagLua(redis_client)
     await dag.initialise()
     coordinator = RunTerminationCoordinator(redis_client, dag, enabled=True)

@@ -132,6 +132,16 @@ class RedisKey:
         return f"{cls.PREFIX}:run:result:{run_id}"
 
     @classmethod
+    def run_terminal_event_index(cls) -> str:
+        """Durable terminal-event evidence + readiness HASH (Sprint 84.6)."""
+        return f"{cls.PREFIX}:run:terminal-event:v1:index"
+
+    @classmethod
+    def run_terminal_event_evidence_field(cls, run_id: str) -> str:
+        """Per-RUN field inside the terminal-event evidence HASH."""
+        return f"run:{run_id}"
+
+    @classmethod
     def run_claim(cls, run_id: str) -> str:
         """hfa:run:claim:{run_id}"""
         return f"{cls.PREFIX}:run:claim:{run_id}"

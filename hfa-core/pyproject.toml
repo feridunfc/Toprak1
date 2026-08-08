@@ -33,6 +33,9 @@ where = ["src"]
 hfa = [
     "lua/admission_resource_reservation.lua",
     "lua/run_create_projection.lua",
+    "lua/run_terminate_terminal_proof.lua",
+    "lua/run_terminate_projection.lua",
+    "lua/run_terminate_from_tasks.lua",
 ]
 
 [tool.ruff]

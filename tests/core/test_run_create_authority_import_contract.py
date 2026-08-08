@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -10,6 +11,18 @@ from pathlib import Path
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
+
+
+def isolated_hfa_core_copy(root: Path, tmp_path: Path) -> Path:
+    source_copy = tmp_path / "hfa-core-source"
+    shutil.copytree(
+        root / "hfa-core",
+        source_copy,
+        ignore=shutil.ignore_patterns(
+            "build", "dist", "*.egg-info", "__pycache__", "*.pyc"
+        ),
+    )
+    return source_copy
 
 def test_module_import_does_not_restore_legacy_quota_manager():
     module = importlib.import_module("hfa_control.run_create_authority")
@@ -30,6 +43,7 @@ def test_built_wheel_contains_both_admission_lua_resources(tmp_path):
     root = repo_root()
     wheel_dir = tmp_path / "wheel"
     wheel_dir.mkdir()
+    package_source = isolated_hfa_core_copy(root, tmp_path)
     subprocess.run(
         [
             sys.executable,
@@ -40,7 +54,7 @@ def test_built_wheel_contains_both_admission_lua_resources(tmp_path):
             "--no-build-isolation",
             "--wheel-dir",
             str(wheel_dir),
-            str(root / "hfa-core"),
+            str(package_source),
         ],
         check=True,
         cwd=tmp_path,
@@ -59,6 +73,7 @@ def test_projection_path_resolves_from_isolated_wheel_install(tmp_path, monkeypa
     target = tmp_path / "target"
     wheel_dir.mkdir()
     target.mkdir()
+    package_source = isolated_hfa_core_copy(root, tmp_path)
     subprocess.run(
         [
             sys.executable,
@@ -69,7 +84,7 @@ def test_projection_path_resolves_from_isolated_wheel_install(tmp_path, monkeypa
             "--no-build-isolation",
             "--wheel-dir",
             str(wheel_dir),
-            str(root / "hfa-core"),
+            str(package_source),
         ],
         check=True,
         cwd=tmp_path,

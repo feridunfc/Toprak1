@@ -42,10 +42,73 @@ class RecordingFakeExecutor(FakeExecutor):
         return await super().execute(run_event)
 
 
+class FakePipeline:
+    def __init__(self, redis: "FakeRedis") -> None:
+        self._redis = redis
+        self._commands: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def watch(self, *keys: str) -> None:
+        return None
+
+    async def unwatch(self) -> None:
+        return None
+
+    async def type(self, key: str) -> str:
+        return "hash" if key in self._redis.hashes else "none"
+
+    async def hmget(self, key: str, *fields: str):
+        values = self._redis.hashes.get(key, {})
+        return [values.get(field) for field in fields]
+
+    async def ttl(self, key: str) -> int:
+        return -1 if key in self._redis.hashes else -2
+
+    async def hget(self, key: str, field: str):
+        return self._redis.hashes.get(key, {}).get(field)
+
+    def multi(self) -> None:
+        self._commands.clear()
+
+    def xadd(self, *args: Any, **kwargs: Any):
+        self._commands.append(("xadd", args, kwargs))
+        return self
+
+    def hset(self, *args: Any, **kwargs: Any):
+        self._commands.append(("hset", args, kwargs))
+        return self
+
+    def persist(self, *args: Any, **kwargs: Any):
+        self._commands.append(("persist", args, kwargs))
+        return self
+
+    async def execute(self):
+        results = []
+        for operation, args, kwargs in self._commands:
+            method = getattr(self._redis, operation)
+            results.append(await method(*args, **kwargs))
+        self._commands.clear()
+        return results
+
+
 class FakeRedis:
     def __init__(self) -> None:
         self.xack_calls: list[tuple[str, str, str]] = []
         self.xadd_calls: list[tuple[str, dict[str, Any]]] = []
+        self.hashes: dict[str, dict[str, Any]] = {
+            RedisKey.run_terminal_event_index(): {
+                "__contract__:schema_version": "1",
+                "__contract__:producer_contract_version": "1",
+            }
+        }
+
+    def pipeline(self, *, transaction: bool = True) -> FakePipeline:
+        return FakePipeline(self)
 
     async def xack(self, stream: str, group: str, message_id: str) -> int:
         self.xack_calls.append((stream, group, message_id))
@@ -55,11 +118,28 @@ class FakeRedis:
         self.xadd_calls.append((stream, fields))
         return "2-0"
 
-    async def hget(self, *args, **kwargs):
-        return None
+    async def hget(self, key: str, field: str):
+        return self.hashes.get(key, {}).get(field)
 
-    async def hset(self, *args, **kwargs):
-        return 1
+    async def hset(
+        self,
+        key: str,
+        field: str | None = None,
+        value: Any = None,
+        *,
+        mapping: dict[str, Any] | None = None,
+    ) -> int:
+        target = self.hashes.setdefault(key, {})
+        if mapping is not None:
+            target.update(mapping)
+            return len(mapping)
+        if field is not None:
+            target[field] = value
+            return 1
+        return 0
+
+    async def persist(self, key: str) -> bool:
+        return key in self.hashes
 
     async def hincrby(self, *args, **kwargs):
         return 0
