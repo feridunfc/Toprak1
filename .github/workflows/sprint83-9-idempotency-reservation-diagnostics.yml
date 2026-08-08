@@ -98,19 +98,13 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              protected_runtime = {
-                  "hfa-core/src/hfa/lua/"
-                  "submission_idempotency.lua",
-                  "hfa-control/src/hfa_control/api/models.py",
-                  "hfa-control/src/hfa_control/run_submission.py",
-                  "hfa-control/src/hfa_control/"
-                  "submission_idempotency.py",
-              }
-              assert changed & protected_runtime, {
-                  "mode": "FUTURE_RUNTIME_REGRESSION",
+              touched = changed & allowlist
+              assert touched, {
+                  "mode": "FUTURE_REGRESSION_TRIGGER",
                   "changed": sorted(changed),
+                  "required_intersection": sorted(allowlist),
               }
-              mode = "RUNTIME_INTERSECTION"
+              mode = "REGRESSION_TRIGGER_INTERSECTION"
 
           forbidden = [
               path
