@@ -20,6 +20,7 @@ for rel in ("hfa-core/src", "hfa-worker/src", "hfa-control/src"):
 import redis.asyncio as redis_async
 
 from hfa.config.keys import RedisKey
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_control.scheduler_lua import SchedulerLua
 from hfa_worker.consumer import CONSUMER_GROUP, WorkerConsumer
 from hfa_worker.fake_executor import FakeExecutor
@@ -175,6 +176,7 @@ async def build_artifact(redis_url: str | None = None, payload: dict[str, Any] |
 
     try:
         await redis.flushdb()
+        await ensure_terminal_event_index(redis)
 
         scheduler = SchedulerLua(redis)
         await scheduler.initialise()
