@@ -127,7 +127,11 @@ class TaskClaimService:
         now_ms: int = 0,
         run_id: str = "",
     ) -> TaskClaimResult:
-        """Explicit compatibility surface; Lua still validates task/run identity."""
+        """Explicit compatibility surface; Lua still validates task/run identity.
+
+        Canonical runtime code must not use this compatibility-only entrypoint.
+        This is intentionally not named claim().
+        """
         assert self._dag_lua is not None, "DagLua not configured"
         result = await self._dag_lua.claim_task(
             task_id=task_id,

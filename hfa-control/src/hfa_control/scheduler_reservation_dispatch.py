@@ -17,9 +17,6 @@ from hfa_control.event_store import EventStore
 
 logger = logging.getLogger(__name__)
 
-_DISPATCHABLE_STATES = frozenset({"queued", "admitted"})
-
-
 def _decode(value) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
@@ -57,7 +54,9 @@ class SchedulerReservationDispatcher:
         self._dispatch_fn = dispatch_fn
         self._event_store = event_store
         self._effect_ledger = effect_ledger
-        self._redis = redis
+        # Redis is retained only for TASK-scoped dispatch-attempt metadata.
+        # RUN lifecycle authority/prechecks belong to the canonical transition path.
+        self._task_attempt_redis = redis
 
     @staticmethod
     def _dispatch_token(
@@ -72,51 +71,14 @@ class SchedulerReservationDispatcher:
             f"attempt:{attempt}:epoch:{scheduler_epoch}"
         )
 
-    async def _check_run_state_is_dispatchable(
-        self,
-        run_id: str,
-    ) -> Optional[str]:
-        if self._redis is None:
-            return "queued"
-
-        try:
-            from hfa.config.keys import RedisKey
-
-            state_key = RedisKey.run_state(run_id)
-        except Exception:
-            return "queued"
-
-        try:
-            raw = await self._redis.get(state_key)
-            state = _decode(raw)
-            if state in _DISPATCHABLE_STATES:
-                return state
-            logger.info(
-                "SchedulerReservationDispatcher: OCC pre-check "
-                "rejected run=%s state=%s (not in %s)",
-                run_id,
-                state,
-                _DISPATCHABLE_STATES,
-            )
-            return None
-        except Exception as exc:
-            logger.warning(
-                "SchedulerReservationDispatcher: OCC pre-check "
-                "failed for run=%s: %s — proceeding without "
-                "pre-check",
-                run_id,
-                exc,
-            )
-            return "queued"
-
     async def _resolve_dispatch_attempt(
         self,
         task_id: str,
     ) -> int | None:
-        if self._redis is None:
+        if self._task_attempt_redis is None:
             return 1
         try:
-            raw = await self._redis.hget(
+            raw = await self._task_attempt_redis.hget(
                 DagRedisKey.task_meta(task_id),
                 "requeue_count",
             )
@@ -310,23 +272,6 @@ class SchedulerReservationDispatcher:
         # User payload is not authoritative for attempt or dispatch time.
         payload["attempt"] = attempt
         payload["scheduled_at"] = scheduled_at_ms
-
-        current_state = (
-            await self._check_run_state_is_dispatchable(
-                run_id
-            )
-        )
-        if current_state is None:
-            return ReservationDispatchResult(
-                ok=False,
-                status="occ_state_conflict",
-                worker_id=worker_id,
-                task_id=task_id,
-                run_id=run_id,
-                tenant_id=tenant_id,
-                scheduler_epoch=scheduler_epoch,
-                reason="run_not_in_dispatchable_state",
-            )
 
         if self._effect_ledger is not None:
             token = self._dispatch_token(
