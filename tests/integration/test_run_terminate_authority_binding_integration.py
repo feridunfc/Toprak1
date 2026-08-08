@@ -101,7 +101,24 @@ async def _seed_canonical_run(
     return store
 
 
+async def _set_terminal_event_migration_ready(redis_client):
+    # Synthetic readiness for Sprint 84.5 regression tests only. Production
+    # readiness must be created by the bounded Sprint 84.6 backfill tool.
+    await redis_client.hset(
+        RedisKey.run_terminal_event_index(),
+        mapping={
+            "__contract__:schema_version": "1",
+            "__contract__:producer_contract_version": "1",
+            "__migration__:status": "ready",
+            "__migration__:results_stream_key": RedisKey.stream_results(),
+            "__migration__:source_history_complete": "1",
+        },
+    )
+    await redis_client.persist(RedisKey.run_terminal_event_index())
+
+
 async def _binding(redis_client, store=None, projection=None):
+    await _set_terminal_event_migration_ready(redis_client)
     binding = RunTerminateAuthorityBinding(
         redis_client,
         store=store,

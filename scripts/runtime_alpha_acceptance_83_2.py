@@ -22,6 +22,7 @@ from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey, DagTaskDispatchInput, DagTaskSeed
 from hfa_control.dag_lua import DagLua
 from hfa_control.run_termination import RunTerminationCoordinator
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_control.models import ControlPlaneConfig
 from hfa_control.service import ControlPlaneService
 from hfa_control.task_claim import TaskClaimManager
@@ -352,6 +353,7 @@ async def build_acceptance_report(
         await redis_client.ping()
         if reset_test_db:
             await redis_client.flushdb()
+        await ensure_terminal_event_index(redis_client)
 
         healthy = await _healthy_finalization_scenario(
             redis_client,

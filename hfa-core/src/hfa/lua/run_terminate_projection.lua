@@ -1,15 +1,18 @@
--- Sprint 84.5: replay-safe canonical RUN_TERMINATE legacy projection.
+-- Sprint 84.6: bounded, replay-safe canonical RUN_TERMINATE projection.
 --
 -- This script never reads TASK state. Canonical authority plus the immutable
--- terminal aggregate proof are the sole inputs to this projection.
+-- terminal aggregate proof are the sole inputs to this projection. Historical
+-- terminal-event discovery is performed off-path by bounded migration; online
+-- projection consults only an O(1) durable evidence HASH.
 --
 -- KEYS
 --  1 projection receipt HASH
---  2 RUN state STRING
---  3 RUN metadata HASH
---  4 RUN result HASH
---  5 cp_running ZSET
---  6 results STREAM
+--  2 terminal-event evidence/readiness index HASH
+--  3 RUN state STRING
+--  4 RUN metadata HASH
+--  5 RUN result HASH
+--  6 cp_running ZSET
+--  7 results STREAM
 --
 -- ARGV
 --  1 operation_id
@@ -39,11 +42,12 @@
 -- Return: [status, stream_entry_id, detail]
 
 local receipt_key = KEYS[1]
-local run_state_key = KEYS[2]
-local run_meta_key = KEYS[3]
-local run_result_key = KEYS[4]
-local cp_running_key = KEYS[5]
-local results_stream = KEYS[6]
+local terminal_event_index_key = KEYS[2]
+local run_state_key = KEYS[3]
+local run_meta_key = KEYS[4]
+local run_result_key = KEYS[5]
+local cp_running_key = KEYS[6]
+local results_stream = KEYS[7]
 
 local operation_id = ARGV[1] or ""
 local proof_sha256 = ARGV[2] or ""
@@ -135,6 +139,71 @@ end
 local event_id = redis.sha1hex(
     "RUN_TERMINATE\31" .. run_id .. "\31" .. final_state .. "\31" .. task_count
 )
+local event_type = "RunCompleted"
+if final_state == "failed" then
+    event_type = "RunFailed"
+end
+local evidence_field = "run:" .. run_id
+
+local function validate_index_contract()
+    if type_of(terminal_event_index_key) ~= "hash" then
+        return false, "terminal_event_index_missing_or_wrong_type"
+    end
+    if redis.call("TTL", terminal_event_index_key) ~= -1 then
+        return false, "terminal_event_index_not_persistent"
+    end
+    if redis.call("HGET", terminal_event_index_key, "__contract__:schema_version") ~= "1" or
+       redis.call("HGET", terminal_event_index_key, "__contract__:producer_contract_version") ~= "1" then
+        return false, "terminal_event_index_contract_invalid"
+    end
+    return true, ""
+end
+
+local function decode_evidence(raw)
+    if not raw or raw == "" then
+        return nil, "terminal_event_evidence_missing"
+    end
+    local ok, decoded = pcall(cjson.decode, raw)
+    if not ok or type(decoded) ~= "table" then
+        return nil, "terminal_event_evidence_malformed"
+    end
+    return decoded, ""
+end
+
+local function validate_canonical_evidence(stream_entry_id)
+    local contract_ok, contract_detail = validate_index_contract()
+    if not contract_ok then
+        return false, contract_detail
+    end
+    local evidence, evidence_detail = decode_evidence(
+        redis.call("HGET", terminal_event_index_key, evidence_field)
+    )
+    if not evidence then
+        return false, evidence_detail
+    end
+    local expected = {
+        "schema_version", "1",
+        "run_id", run_id,
+        "tenant_id", tenant_id,
+        "event_type", event_type,
+        "final_state", final_state,
+        "event_id", event_id,
+        "source", "canonical_run_terminate",
+        "operation_id", operation_id,
+        "terminal_proof_sha256", proof_sha256,
+        "canonical_transition_id", transition_id,
+        "canonical_record_hash", record_hash,
+        "canonical_command_hash", command_hash,
+        "canonical_revision", revision,
+        "stream_entry_id", stream_entry_id,
+    }
+    for index = 1, #expected, 2 do
+        if evidence[expected[index]] ~= expected[index + 1] then
+            return false, "terminal_event_evidence_mismatch"
+        end
+    end
+    return true, ""
+end
 
 if receipt_type == "hash" then
     local expected = {
@@ -160,6 +229,10 @@ if receipt_type == "hash" then
     local stream_entry_id = redis.call("HGET", receipt_key, "stream_entry_id") or ""
     if stream_entry_id == "" then
         return conflict("projection_receipt_missing_stream_entry_id")
+    end
+    local evidence_ok, evidence_detail = validate_canonical_evidence(stream_entry_id)
+    if not evidence_ok then
+        return conflict(evidence_detail)
     end
 
     if type_of(run_state_key) ~= "string" or redis.call("GET", run_state_key) ~= final_state then
@@ -214,26 +287,45 @@ if receipt_type == "hash" then
     if duplicate_running_type == "zset" and redis.call("ZSCORE", cp_running_key, run_id) then
         return conflict("projected_running_index_not_cleared")
     end
-    if type_of(results_stream) ~= "stream" then
-        return conflict("projected_results_stream_missing_or_wrong_type")
+    local replay_stream_type = type_of(results_stream)
+    if replay_stream_type ~= "none" and replay_stream_type ~= "stream" then
+        return conflict("projected_results_stream_wrong_type")
     end
-    local rows = redis.call("XRANGE", results_stream, stream_entry_id, stream_entry_id)
-    if #rows ~= 1 then
-        return conflict("projected_terminal_event_missing")
-    end
-    local fields = rows[1][2]
-    local observed = {}
-    for index = 1, #fields, 2 do
-        observed[fields[index]] = fields[index + 1]
-    end
-    if observed["event_id"] ~= event_id or observed["run_id"] ~= run_id or
-       observed["terminal_proof_sha256"] ~= proof_sha256 or
-       observed["canonical_transition_id"] ~= transition_id or
-       observed["canonical_record_hash"] ~= record_hash or
-       observed["canonical_revision"] ~= revision then
-        return conflict("projected_terminal_event_mismatch")
+    if replay_stream_type == "stream" then
+        local rows = redis.call("XRANGE", results_stream, stream_entry_id, stream_entry_id)
+        if #rows == 1 then
+            local fields = rows[1][2]
+            local observed = {}
+            for index = 1, #fields, 2 do
+                observed[fields[index]] = fields[index + 1]
+            end
+            if observed["event_id"] ~= event_id or observed["run_id"] ~= run_id or
+               observed["terminal_proof_sha256"] ~= proof_sha256 or
+               observed["canonical_transition_id"] ~= transition_id or
+               observed["canonical_record_hash"] ~= record_hash or
+               observed["canonical_revision"] ~= revision then
+                return conflict("projected_terminal_event_mismatch")
+            end
+        elseif #rows > 1 then
+            return conflict("projected_terminal_event_duplicate_stream_id")
+        end
+        -- Zero rows is allowed after stream trimming. The exact receipt and
+        -- co-evicted durable evidence index remain the replay authority proof.
     end
     return result("canonical_run_terminate_already_projected", stream_entry_id, "")
+end
+
+local contract_ok, contract_detail = validate_index_contract()
+if not contract_ok then
+    return conflict(contract_detail)
+end
+local existing_evidence = redis.call("HGET", terminal_event_index_key, evidence_field)
+if existing_evidence then
+    local decoded, decode_detail = decode_evidence(existing_evidence)
+    if not decoded then
+        return conflict(decode_detail)
+    end
+    return conflict("preexisting_terminal_event_evidence")
 end
 
 local run_state_type = type_of(run_state_key)
@@ -284,31 +376,15 @@ if meta_type == "hash" then
     end
 end
 
-if stream_type == "stream" then
-    local rows = redis.call("XRANGE", results_stream, "-", "+")
-    for _, row in ipairs(rows) do
-        local fields = row[2]
-        local observed_run_id = ""
-        local observed_event_type = ""
-        for index = 1, #fields, 2 do
-            if fields[index] == "run_id" then
-                observed_run_id = fields[index + 1]
-            elseif fields[index] == "event_type" then
-                observed_event_type = fields[index + 1]
-            end
-        end
-        if observed_run_id == run_id and
-           (observed_event_type == "RunCompleted" or observed_event_type == "RunFailed") then
-            return conflict("legacy_terminal_event_without_projection_receipt")
-        end
-    end
+if redis.call("HGET", terminal_event_index_key, "__migration__:status") ~= "ready" or
+   redis.call("HGET", terminal_event_index_key, "__migration__:results_stream_key") ~= results_stream or
+   redis.call("HGET", terminal_event_index_key, "__migration__:source_history_complete") ~= "1" then
+    return conflict("terminal_event_migration_not_ready")
 end
 
 local error_text = ""
-local event_type = "RunCompleted"
 if final_state == "failed" then
     error_text = "aggregate_task_failure"
-    event_type = "RunFailed"
 end
 local completed_at = tostring(tonumber(finalized_at_ms) / 1000.0)
 
@@ -386,6 +462,24 @@ local stream_entry_id = redis.call(
     "canonical_record_hash", record_hash,
     "canonical_revision", revision
 )
+local evidence_json = cjson.encode({
+    schema_version = "1",
+    run_id = run_id,
+    tenant_id = tenant_id,
+    event_type = event_type,
+    final_state = final_state,
+    event_id = event_id,
+    source = "canonical_run_terminate",
+    operation_id = operation_id,
+    terminal_proof_sha256 = proof_sha256,
+    canonical_transition_id = transition_id,
+    canonical_record_hash = record_hash,
+    canonical_command_hash = command_hash,
+    canonical_revision = revision,
+    stream_entry_id = stream_entry_id
+})
+redis.call("HSET", terminal_event_index_key, evidence_field, evidence_json)
+redis.call("PERSIST", terminal_event_index_key)
 redis.call(
     "HSET", receipt_key,
     "operation_id", operation_id,

@@ -33,6 +33,7 @@ from hfa_control.shard import ShardOwnershipManager
 from hfa_control.worker_reservation import (
     WorkerReservationManager,
 )
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_worker.consumer import CONSUMER_GROUP
 from hfa_worker.main import WorkerService
 from hfa_worker.process_root import config_from_env
@@ -532,6 +533,7 @@ async def build_acceptance_report(
         await redis_client.ping()
         if reset_test_db:
             await redis_client.flushdb()
+        await ensure_terminal_event_index(redis_client)
 
         scenario = await _production_binding_scenario(
             redis_client,

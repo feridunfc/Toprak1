@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -10,6 +11,18 @@ from pathlib import Path
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
+
+
+def isolated_package_copy(root: Path, package_name: str, tmp_path: Path) -> Path:
+    source_root = tmp_path / "source"
+    source_root.mkdir(exist_ok=True)
+    destination = source_root / package_name
+    shutil.copytree(
+        root / package_name,
+        destination,
+        ignore=shutil.ignore_patterns("build", "__pycache__", ".pytest_cache"),
+    )
+    return destination
 
 def test_run_terminate_authority_module_imports_without_worker_composition_changes():
     module = importlib.import_module("hfa_control.run_terminate_authority")
@@ -27,6 +40,7 @@ def test_built_hfa_core_wheel_contains_run_terminate_lua_resources(tmp_path):
     root = repo_root()
     wheel_dir = tmp_path / "wheel"
     wheel_dir.mkdir()
+    package_source = isolated_package_copy(root, "hfa-core", tmp_path)
     subprocess.run(
         [
             sys.executable,
@@ -37,7 +51,7 @@ def test_built_hfa_core_wheel_contains_run_terminate_lua_resources(tmp_path):
             "--no-build-isolation",
             "--wheel-dir",
             str(wheel_dir),
-            str(root / "hfa-core"),
+            str(package_source),
         ],
         check=True,
         cwd=tmp_path,
@@ -53,6 +67,7 @@ def test_built_hfa_control_wheel_contains_authority_adapter(tmp_path):
     root = repo_root()
     wheel_dir = tmp_path / "wheel"
     wheel_dir.mkdir()
+    package_source = isolated_package_copy(root, "hfa-control", tmp_path)
     subprocess.run(
         [
             sys.executable,
@@ -63,7 +78,7 @@ def test_built_hfa_control_wheel_contains_authority_adapter(tmp_path):
             "--no-build-isolation",
             "--wheel-dir",
             str(wheel_dir),
-            str(root / "hfa-control"),
+            str(package_source),
         ],
         check=True,
         cwd=tmp_path,
@@ -80,6 +95,7 @@ def test_lua_paths_resolve_from_isolated_hfa_core_wheel_install(tmp_path, monkey
     target = tmp_path / "target"
     wheel_dir.mkdir()
     target.mkdir()
+    package_source = isolated_package_copy(root, "hfa-core", tmp_path)
     subprocess.run(
         [
             sys.executable,
@@ -90,7 +106,7 @@ def test_lua_paths_resolve_from_isolated_hfa_core_wheel_install(tmp_path, monkey
             "--no-build-isolation",
             "--wheel-dir",
             str(wheel_dir),
-            str(root / "hfa-core"),
+            str(package_source),
         ],
         check=True,
         cwd=tmp_path,
@@ -121,4 +137,4 @@ def test_lua_paths_resolve_from_isolated_hfa_core_wheel_install(tmp_path, monkey
     assert proof == target / "hfa/lua/run_terminate_terminal_proof.lua"
     assert projection == target / "hfa/lua/run_terminate_projection.lua"
     assert proof.read_text().startswith("-- Sprint 84.5")
-    assert projection.read_text().startswith("-- Sprint 84.5")
+    assert projection.read_text().startswith("-- Sprint 84.6")

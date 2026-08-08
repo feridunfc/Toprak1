@@ -18,6 +18,7 @@ from hfa.dag.schema import (
 )
 from hfa_control.shard import ShardOwnershipManager
 from hfa_control.worker_reservation import WorkerReservationManager
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_worker.consumer import CONSUMER_GROUP
 from hfa_worker.main import WorkerService
 
@@ -156,6 +157,7 @@ async def test_production_worker_enabled_binding_finalizes_run(
         "prompt": "Sprint 83.4 production composition binding",
     }
 
+    await ensure_terminal_event_index(redis_client)
     await redis_client.set(
         RedisKey.run_state(run_id),
         "running",

@@ -586,9 +586,10 @@ class RunTerminateProjectionManager:
         payload_json = canonical_json_bytes(payload).decode("utf-8")
         payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         raw = await self._loader.run(
-            num_keys=6,
+            num_keys=7,
             keys=[
                 self.receipt_key(operation_id),
+                RedisKey.run_terminal_event_index(),
                 RedisKey.run_state(proof.run_id),
                 RedisKey.run_meta(proof.run_id),
                 RedisKey.run_result(proof.run_id),

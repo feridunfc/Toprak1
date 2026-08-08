@@ -35,6 +35,7 @@ hfa = [
     "lua/run_create_projection.lua",
     "lua/run_terminate_terminal_proof.lua",
     "lua/run_terminate_projection.lua",
+    "lua/run_terminate_from_tasks.lua",
 ]
 
 [tool.ruff]

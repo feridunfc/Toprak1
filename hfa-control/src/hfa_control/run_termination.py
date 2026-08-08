@@ -177,6 +177,7 @@ class RunTerminationCoordinator:
             RedisKey.stream_results(),
             RedisKey.runtime_truth_conflict_index(),
             RedisKey.runtime_truth_conflict_stream(),
+            RedisKey.run_terminal_event_index(),
         ]
         args = [
             run_id,
