@@ -6,9 +6,15 @@ import pytest
 
 from hfa_control.dag_lua import DagLua
 from hfa_control.task_terminal_authority import TaskTerminalAuthorityBinding
+from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding
+from hfa_control.run_termination import RunTerminationCoordinator
 from hfa_worker.main import (
     WorkerService,
     _CanonicalTaskTerminalCompletionGateway,
+)
+from hfa_worker.run_finalizing_runtime import (
+    RunFinalizingTaskConsumer,
+    RunFinalizingWorkerConsumer,
 )
 from hfa_worker.task_consumer import TaskConsumer
 from hfa_worker.task_executor import TaskExecutionResult
@@ -136,12 +142,24 @@ def test_terminal_binding_requires_accepted_canonical_dependency_chain(overrides
         )
 
 
-def test_terminal_binding_rejects_run_termination_stacking() -> None:
-    with pytest.raises(ValueError, match="cannot be combined with run_termination_binding_enabled"):
-        WorkerService(
-            RedisProbe(),
-            _canonical_terminal_config(run_termination_binding_enabled=True),
-        )
+def test_terminal_binding_combines_with_canonical_run_termination() -> None:
+    service = WorkerService(
+        RedisProbe(),
+        _canonical_terminal_config(run_termination_binding_enabled=True),
+    )
+
+    gateway = service._task_terminal_completion_gateway
+    coordinator = service._run_termination_coordinator
+    run_authority = service._run_terminate_authority_binding
+
+    assert isinstance(gateway, _CanonicalTaskTerminalCompletionGateway)
+    assert isinstance(run_authority, RunTerminateAuthorityBinding)
+    assert isinstance(coordinator, RunTerminationCoordinator)
+    assert coordinator._task_completion_gateway is gateway
+    assert coordinator._authority_binding is run_authority
+    assert isinstance(service._task_consumer, RunFinalizingTaskConsumer)
+    assert service._task_consumer._completion_manager is coordinator
+    assert isinstance(service._consumer, RunFinalizingWorkerConsumer)
 
 
 def test_enabled_terminal_profile_constructs_binding_and_gateway() -> None:
