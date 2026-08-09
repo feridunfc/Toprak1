@@ -2,6 +2,7 @@
 import time
 import pytest
 
+from hfa.config.keys import RedisKey
 from hfa.dag.reasons import TASK_OWNER_MISMATCH
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
@@ -18,15 +19,24 @@ async def _lua(redis_client) -> DagLua:
 @pytest.mark.integration
 async def test_correct_owner_can_complete(redis_client):
     task_id = "complete-owner-001"
+    run_id = "run-1"
     tenant_id = "tenant-a"
 
     await redis_client.set(DagRedisKey.task_state(task_id), "running")
-    await redis_client.hset(DagRedisKey.task_meta(task_id), mapping={"worker_instance_id": "worker-1"})
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+            "worker_instance_id": "worker-1",
+        },
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
 
     lua = await _lua(redis_client)
     result = await lua.task_complete(
         task_id=task_id,
-        run_id="run-1",
+        run_id=run_id,
         tenant_id=tenant_id,
         terminal_state="done",
         finished_at_ms=int(time.time() * 1000),
@@ -40,15 +50,24 @@ async def test_correct_owner_can_complete(redis_client):
 @pytest.mark.integration
 async def test_wrong_owner_rejected(redis_client):
     task_id = "complete-owner-002"
+    run_id = "run-1"
     tenant_id = "tenant-a"
 
     await redis_client.set(DagRedisKey.task_state(task_id), "running")
-    await redis_client.hset(DagRedisKey.task_meta(task_id), mapping={"worker_instance_id": "worker-1"})
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+            "worker_instance_id": "worker-1",
+        },
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
 
     lua = await _lua(redis_client)
     result = await lua.task_complete(
         task_id=task_id,
-        run_id="run-1",
+        run_id=run_id,
         tenant_id=tenant_id,
         terminal_state="done",
         finished_at_ms=int(time.time() * 1000),
@@ -63,15 +82,24 @@ async def test_wrong_owner_rejected(redis_client):
 @pytest.mark.integration
 async def test_late_completion_after_requeue_rejected(redis_client):
     task_id = "complete-owner-003"
+    run_id = "run-1"
     tenant_id = "tenant-a"
 
     await redis_client.set(DagRedisKey.task_state(task_id), "running")
-    await redis_client.hset(DagRedisKey.task_meta(task_id), mapping={"worker_instance_id": "worker-b"})
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+            "worker_instance_id": "worker-b",
+        },
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
 
     lua = await _lua(redis_client)
     result = await lua.task_complete(
         task_id=task_id,
-        run_id="run-1",
+        run_id=run_id,
         tenant_id=tenant_id,
         terminal_state="done",
         finished_at_ms=int(time.time() * 1000),

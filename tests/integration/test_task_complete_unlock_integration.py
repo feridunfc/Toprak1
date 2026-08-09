@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
 
@@ -24,6 +25,11 @@ async def test_task_complete_done_unlocks_direct_child(redis_client):
     child = "task-child"
 
     await redis_client.set(DagRedisKey.task_state(parent), "running")
+    await redis_client.hset(
+        DagRedisKey.task_meta(parent),
+        mapping={"task_id": parent, "run_id": run_id},
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
     await redis_client.set(DagRedisKey.task_state(child), "pending")
     await redis_client.sadd(DagRedisKey.task_children(parent), child)
     await redis_client.set(DagRedisKey.task_remaining_deps(child), 1)
@@ -51,6 +57,11 @@ async def test_task_complete_failed_does_not_unlock_children(redis_client):
     child = "task-child-f"
 
     await redis_client.set(DagRedisKey.task_state(parent), "running")
+    await redis_client.hset(
+        DagRedisKey.task_meta(parent),
+        mapping={"task_id": parent, "run_id": run_id},
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
     await redis_client.set(DagRedisKey.task_state(child), "pending")
     await redis_client.sadd(DagRedisKey.task_children(parent), child)
     await redis_client.set(DagRedisKey.task_remaining_deps(child), 1)
@@ -79,6 +90,11 @@ async def test_task_complete_is_idempotent(redis_client):
     child = "task-child-i"
 
     await redis_client.set(DagRedisKey.task_state(parent), "running")
+    await redis_client.hset(
+        DagRedisKey.task_meta(parent),
+        mapping={"task_id": parent, "run_id": run_id},
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
     await redis_client.set(DagRedisKey.task_state(child), "pending")
     await redis_client.sadd(DagRedisKey.task_children(parent), child)
     await redis_client.set(DagRedisKey.task_remaining_deps(child), 1)
