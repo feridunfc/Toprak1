@@ -12,6 +12,7 @@ from hfa_control.dag_lua import DagLua
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.task_recovery import TaskHeartbeatManager
 from hfa_control.task_terminal_authority import TaskTerminalAuthorityBinding
+from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding
 from hfa_control.run_termination import RunTerminationCoordinator
 from hfa_control.product_profile import (
     ProductMode,
@@ -257,15 +258,6 @@ class WorkerService:
                 "canonical_task_terminal_binding requires the canonical "
                 "TASK_ADMIT/TASK_DISPATCH/TASK_CLAIM dependency chain"
             )
-        if (
-            self._canonical_task_terminal_binding_enabled
-            and self._run_termination_binding_enabled
-        ):
-            raise ValueError(
-                "canonical_task_terminal_binding cannot be combined with "
-                "run_termination_binding_enabled before Sprint 84.7D"
-            )
-
         configured_worker_id = str(config.get("worker_id") or "").strip()
         if self._production and not configured_worker_id:
             raise ValueError(
@@ -363,6 +355,7 @@ class WorkerService:
         self._task_heartbeat_manager: TaskHeartbeatManager | None = None
         self._task_consumer: TaskConsumer | None = None
         self._run_termination_coordinator: RunTerminationCoordinator | None = None
+        self._run_terminate_authority_binding: RunTerminateAuthorityBinding | None = None
         self._task_terminal_authority_binding: (
             TaskTerminalAuthorityBinding | None
         ) = None
@@ -406,6 +399,19 @@ class WorkerService:
                     )
                 )
                 completion_manager = self._task_terminal_completion_gateway
+                if self._run_termination_binding_enabled:
+                    self._run_terminate_authority_binding = (
+                        RunTerminateAuthorityBinding(redis)
+                    )
+                    self._run_termination_coordinator = RunTerminationCoordinator(
+                        redis,
+                        self._task_terminal_completion_gateway,
+                        enabled=True,
+                        authority_binding=self._run_terminate_authority_binding,
+                    )
+                    completion_manager = self._run_termination_coordinator
+                    task_consumer_type = RunFinalizingTaskConsumer
+                    worker_consumer_type = RunFinalizingWorkerConsumer
             elif self._run_termination_binding_enabled:
                 self._run_termination_coordinator = RunTerminationCoordinator(
                     redis,
