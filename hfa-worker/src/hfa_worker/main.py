@@ -133,6 +133,50 @@ class WorkerService:
                 "run_termination_binding_enabled requires production=True"
             )
 
+        canonical_binding_names = (
+            "canonical_task_admit_binding",
+            "canonical_task_dispatch_binding",
+            "canonical_task_claim_binding",
+        )
+        canonical_bindings: dict[str, bool] = {}
+        for name in canonical_binding_names:
+            value = config.get(name, False)
+            if type(value) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+            canonical_bindings[name] = value
+
+        self._canonical_task_admit_binding_enabled = canonical_bindings[
+            "canonical_task_admit_binding"
+        ]
+        self._canonical_task_dispatch_binding_enabled = canonical_bindings[
+            "canonical_task_dispatch_binding"
+        ]
+        self._canonical_task_claim_binding_enabled = canonical_bindings[
+            "canonical_task_claim_binding"
+        ]
+
+        if (
+            self._canonical_task_dispatch_binding_enabled
+            and not self._canonical_task_admit_binding_enabled
+        ):
+            raise ValueError(
+                "canonical_task_dispatch_binding requires "
+                "canonical_task_admit_binding=True"
+            )
+        if self._canonical_task_claim_binding_enabled and not self._production:
+            raise ValueError(
+                "canonical_task_claim_binding requires production=True"
+            )
+        if self._canonical_task_claim_binding_enabled and not (
+            self._canonical_task_admit_binding_enabled
+            and self._canonical_task_dispatch_binding_enabled
+        ):
+            raise ValueError(
+                "canonical_task_claim_binding requires both "
+                "canonical_task_admit_binding=True and "
+                "canonical_task_dispatch_binding=True"
+            )
+
         configured_worker_id = str(config.get("worker_id") or "").strip()
         if self._production and not configured_worker_id:
             raise ValueError(
@@ -267,7 +311,18 @@ class WorkerService:
                 task_consumer_type = RunFinalizingTaskConsumer
                 worker_consumer_type = RunFinalizingWorkerConsumer
 
-            self._task_claim_manager = TaskClaimManager(self._dag_lua)
+            self._task_claim_manager = TaskClaimManager(
+                self._dag_lua,
+                canonical_task_claim_binding=(
+                    self._canonical_task_claim_binding_enabled
+                ),
+                canonical_task_admit_binding=(
+                    self._canonical_task_admit_binding_enabled
+                ),
+                canonical_task_dispatch_binding=(
+                    self._canonical_task_dispatch_binding_enabled
+                ),
+            )
             self._task_heartbeat_manager = TaskHeartbeatManager(
                 redis,
                 policy=HeartbeatPolicy(
@@ -296,6 +351,9 @@ class WorkerService:
             shards=self._shards,
             executor=executor,
             task_consumer=self._task_consumer,
+            canonical_task_claim_binding_enabled=(
+                self._canonical_task_claim_binding_enabled
+            ),
         )
 
         self._heartbeat = WorkerHeartbeatPublisher(
@@ -369,6 +427,10 @@ class WorkerService:
     @property
     def run_termination_binding_enabled(self) -> bool:
         return self._run_termination_binding_enabled
+
+    @property
+    def canonical_task_claim_binding_enabled(self) -> bool:
+        return self._canonical_task_claim_binding_enabled
 
     @property
     def product_profile(self) -> WorkerProductProfile:

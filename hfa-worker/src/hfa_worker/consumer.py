@@ -226,8 +226,9 @@ class WorkerConsumer:
     It must not be mistaken for the canonical TaskConsumer.consume_once() ->
     TaskClaimManager.claim_start() path.
 
-    Product target for a future bridge:
-    RunRequestedEvent -> TaskContext -> TaskConsumer.consume_once().
+    Canonical TASK_CLAIM mode explicitly routes supported request envelopes to
+    TaskConsumer.consume_once(). Legacy/default mode retains the compatibility
+    behavior unless the historical bridge flag is enabled.
     """
 
     def __init__(
@@ -239,6 +240,7 @@ class WorkerConsumer:
         executor: BaseExecutor,
         reclaim_idle_ms: int = 60000,
         task_consumer: Any | None = None,
+        canonical_task_claim_binding_enabled: bool = False,
     ):
         self._redis = redis
         self._worker_id = worker_id
@@ -247,6 +249,13 @@ class WorkerConsumer:
         self._executor = executor
         self._reclaim_idle_ms = reclaim_idle_ms
         self._task_consumer = task_consumer
+        if type(canonical_task_claim_binding_enabled) is not bool:
+            raise ValueError(
+                "canonical_task_claim_binding_enabled must be a boolean"
+            )
+        self._canonical_task_claim_binding_enabled = (
+            canonical_task_claim_binding_enabled
+        )
 
         self._state = StateStore(redis)
         self._guard = IdempotencyGuard(redis)
@@ -796,6 +805,7 @@ class WorkerConsumer:
 
             if (
                 event_type == "TaskRequested"
+                or self._canonical_task_claim_binding_enabled
                 or is_worker_task_consumer_bridge_enabled()
             ):
                 await self._process_message_via_task_consumer(event, msg_id, stream, shard)
