@@ -11,6 +11,7 @@ on:
       - 'tests/core/test_production_worker_process_root_contract.py'
       - 'tests/integration/test_worker_task_claim_canonical_composition_integration.py'
       - '.github/workflows/sprint84-7b-task-claim-production-composition.yml'
+      - '.github/workflows/sprint83-4-production-run-finalization-binding.yml'
       - 'docs/implementation/sprint84/SPRINT84.7B-task-claim-production-composition.md'
 
 permissions:
@@ -58,6 +59,7 @@ jobs:
           feature_branch = "sprint/84-7b-task-claim-production-composition"
           allowlist = {
               ".github/workflows/sprint84-7b-task-claim-production-composition.yml",
+              ".github/workflows/sprint83-4-production-run-finalization-binding.yml",
               "docs/implementation/sprint84/SPRINT84.7B-task-claim-production-composition.md",
               "hfa-worker/src/hfa_worker/consumer.py",
               "hfa-worker/src/hfa_worker/main.py",

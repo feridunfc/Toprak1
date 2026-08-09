@@ -120,6 +120,7 @@ existing behavior unless the canonical claim chain is explicitly enabled.
 
 ```text
 .github/workflows/sprint84-7b-task-claim-production-composition.yml
+.github/workflows/sprint83-4-production-run-finalization-binding.yml
 docs/implementation/sprint84/SPRINT84.7B-task-claim-production-composition.md
 hfa-worker/src/hfa_worker/consumer.py
 hfa-worker/src/hfa_worker/main.py
@@ -128,6 +129,10 @@ tests/core/test_production_worker_composition_contract.py
 tests/core/test_production_worker_process_root_contract.py
 tests/integration/test_worker_task_claim_canonical_composition_integration.py
 ```
+
+The Sprint 83.4 workflow entry is regression-gate maintenance only: the
+production regression suite expanded from 31 to 43 tests and all 43 pass. No
+Sprint 83.4 runtime behavior is changed by this maintenance update.
 
 ## Explicit non-claims
 
