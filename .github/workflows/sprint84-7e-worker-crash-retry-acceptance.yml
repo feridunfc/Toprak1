@@ -1,16 +1,16 @@
-name: Sprint 84.7D Canonical RUN_TERMINATE Production Injection
+name: Sprint 84.7E Worker Crash / Redelivery Safety Acceptance
 
 on:
   pull_request:
     branches: [baseline/local-import]
     paths:
       - 'hfa-worker/src/hfa_worker/main.py'
-      - 'tests/core/test_production_worker_terminal_composition_contract.py'
-      - '.github/workflows/sprint84-7c2-task-terminal-production-composition.yml'
-      - 'tests/core/test_production_worker_run_terminate_canonical_composition_contract.py'
-      - 'tests/integration/test_worker_run_terminate_canonical_composition_integration.py'
+      - 'hfa-worker/src/hfa_worker/run_finalizing_runtime.py'
+      - 'tests/core/test_production_worker_crash_retry_contract.py'
+      - 'tests/integration/test_worker_crash_retry_canonical_composition_integration.py'
       - '.github/workflows/sprint84-7d-run-terminate-production-injection.yml'
-      - 'docs/implementation/sprint84/SPRINT84.7D-run-terminate-production-injection.md'
+      - '.github/workflows/sprint84-7e-worker-crash-retry-acceptance.yml'
+      - 'docs/implementation/sprint84/SPRINT84.7E-worker-crash-retry-acceptance.md'
 
 permissions:
   contents: read
@@ -22,7 +22,7 @@ env:
   PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
   PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
   PR_HEAD_BRANCH: ${{ github.head_ref }}
-  ACCEPTED_PARENT: bcf1a1770426ca2525a0dc4804c8560f7256929c
+  ACCEPTED_PARENT: 9a0ab239a8733e7ad5a3675217a4c34bad72e308
 
 jobs:
   verify:
@@ -46,7 +46,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - name: Verify accepted parent and exact D scope
+      - name: Verify accepted parent and exact E scope
         shell: bash
         run: |
           set -euo pipefail
@@ -54,15 +54,15 @@ jobs:
           git merge-base --is-ancestor "$ACCEPTED_PARENT" HEAD
           python - <<'PY'
           import os, subprocess
-          feature_branch = "sprint/84-7d-run-terminate-production-injection"
+          feature_branch = "sprint/84-7e-worker-crash-retry-acceptance"
           allowlist = {
-              ".github/workflows/sprint84-7c2-task-terminal-production-composition.yml",
               ".github/workflows/sprint84-7d-run-terminate-production-injection.yml",
-              "docs/implementation/sprint84/SPRINT84.7D-run-terminate-production-injection.md",
+              ".github/workflows/sprint84-7e-worker-crash-retry-acceptance.yml",
+              "docs/implementation/sprint84/SPRINT84.7E-worker-crash-retry-acceptance.md",
               "hfa-worker/src/hfa_worker/main.py",
-              "tests/core/test_production_worker_terminal_composition_contract.py",
-              "tests/core/test_production_worker_run_terminate_canonical_composition_contract.py",
-              "tests/integration/test_worker_run_terminate_canonical_composition_integration.py",
+              "hfa-worker/src/hfa_worker/run_finalizing_runtime.py",
+              "tests/core/test_production_worker_crash_retry_contract.py",
+              "tests/integration/test_worker_crash_retry_canonical_composition_integration.py",
           }
           changed=set(subprocess.check_output(["git","diff","--name-only",f"{os.environ['PR_BASE_SHA']}...HEAD"],text=True).splitlines())
           if os.environ["PR_HEAD_BRANCH"] == feature_branch:
@@ -74,48 +74,35 @@ jobs:
               mode="REGRESSION_TRIGGER_INTERSECTION"
           forbidden=[p for p in changed if p.startswith("local_out/") or "__pycache__" in p or ".pytest_cache" in p or p.endswith(".pyc")]
           assert not forbidden, forbidden
-          print("SPRINT84_7D_SCOPE_OK",mode,sorted(changed))
+          print("SPRINT84_7E_SCOPE_OK",mode,sorted(changed))
           PY
 
-      - name: Verify frozen RUN and TASK authority parity
+      - name: Verify frozen canonical authority and retry boundaries
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          from hashlib import sha256
-          from pathlib import Path
           import os, subprocess
-          blobs={
-            "hfa-control/src/hfa_control/run_terminate_authority.py":"44771d524ecefa7c7a22ba6c79fcd86b5be4ec4d",
-            "hfa-control/src/hfa_control/run_termination.py":"53df1fd3eae3cfbe9b6e8110d0355968f08f3364",
-          }
-          for path,wanted in blobs.items():
-              observed=subprocess.check_output(["git","hash-object",path],text=True).strip()
-              assert observed == wanted, (path,observed,wanted)
-          # Sprint 84.7E intentionally evolves the worker redelivery adapter.
-          # Keep the old byte lock only for the original 84.7D feature branch.
-          d_feature_branch = "sprint/84-7d-run-terminate-production-injection"
-          runtime_path = "hfa-worker/src/hfa_worker/run_finalizing_runtime.py"
-          if os.environ["PR_HEAD_BRANCH"] == d_feature_branch:
-              wanted = "73bc970091eac60777fcddbb322f16bfcd075c06"
-              observed = subprocess.check_output(["git","hash-object",runtime_path], text=True).strip()
-              assert observed == wanted, (runtime_path, observed, wanted)
-          hashes={
-            "hfa-control/src/hfa_control/task_terminal_authority.py":"a5abd71bbb64410dc837fac625a3d0b0aa824d3fee0e3f68092066d1f2134778",
-            "hfa-core/src/hfa/lua/task_complete.lua":"4bfcab69627f1b5fcc79331c13854f66f90cf8f437beff84c74b2f24f685ab48",
-          }
-          for path,wanted in hashes.items():
-              raw=Path(path).read_bytes().replace(b"\r\n",b"\n").replace(b"\r",b"\n")
-              observed=sha256(raw).hexdigest(); assert observed == wanted,(path,observed,wanted)
-          frozen=list(blobs)+list(hashes)+[
-            "hfa-worker/src/hfa_worker/consumer.py","hfa-worker/src/hfa_worker/task_consumer.py",
-            "hfa-core/src/hfa/lua/task_claim_start.lua",
+          frozen = [
+              "hfa-control/src/hfa_control/task_terminal_authority.py",
+              "hfa-control/src/hfa_control/task_claim_authority.py",
+              "hfa-control/src/hfa_control/task_claim.py",
+              "hfa-control/src/hfa_control/run_terminate_authority.py",
+              "hfa-control/src/hfa_control/run_termination.py",
+              "hfa-worker/src/hfa_worker/consumer.py",
+              "hfa-worker/src/hfa_worker/task_consumer.py",
+              "hfa-control/src/hfa_control/task_recovery.py",
+              "hfa-control/src/hfa_control/recovery.py",
+              "hfa-core/src/hfa/lua/task_requeue.lua",
+              "hfa-core/src/hfa/lua/task_complete.lua",
           ]
-          if os.environ["PR_HEAD_BRANCH"] == d_feature_branch:
-              frozen.append(runtime_path)
+          parent=os.environ["ACCEPTED_PARENT"]
           for path in frozen:
-              assert subprocess.run(["git","diff","--quiet",f"{os.environ['PR_BASE_SHA']}...HEAD","--",path]).returncode==0,path
-          print("SPRINT84_7D_FROZEN_PARITY_OK")
+              expected=subprocess.check_output(["git","rev-parse",f"{parent}:{path}"],text=True).strip()
+              observed=subprocess.check_output(["git","hash-object",path],text=True).strip()
+              assert observed == expected, (path, observed, expected)
+              assert subprocess.run(["git","diff","--quiet",f"{os.environ['PR_BASE_SHA']}...HEAD","--",path]).returncode == 0, path
+          print("SPRINT84_7E_FROZEN_PARITY_OK", len(frozen))
           PY
 
       - uses: actions/setup-python@v6
@@ -128,55 +115,89 @@ jobs:
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
 
-      - name: Static D architecture guards
+      - name: Static E crash/retry architecture guards
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
+          import ast
           from pathlib import Path
           main=Path("hfa-worker/src/hfa_worker/main.py").read_text(encoding="utf-8")
-          core=Path("tests/core/test_production_worker_run_terminate_canonical_composition_contract.py").read_text(encoding="utf-8")
-          integ=Path("tests/integration/test_worker_run_terminate_canonical_composition_integration.py").read_text(encoding="utf-8")
-          assert "from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding" in main
-          assert "class RunTerminateAuthorityBinding" not in main
-          assert "canonical_task_terminal_binding cannot be combined" not in main
-          assert "RunTerminateAuthorityBinding(redis)" in main
-          assert "authority_binding=self._run_terminate_authority_binding" in main
-          assert "self._task_terminal_completion_gateway" in main
-          assert "RunFinalizingTaskConsumer" in main and "RunFinalizingWorkerConsumer" in main
-          assert "OperationType.RUN_TERMINATE" not in main
-          assert "canonical_run_terminate_binding" not in main
-          assert "HFA_CANONICAL_RUN_TERMINATE_BINDING" not in main
-          assert "test_profile_a_default" in core and "test_profile_b_canonical" in core and "test_profile_c_historical" in core and "test_profile_d_composes" in core
+          runtime=Path("hfa-worker/src/hfa_worker/run_finalizing_runtime.py").read_text(encoding="utf-8")
+          core=Path("tests/core/test_production_worker_crash_retry_contract.py").read_text(encoding="utf-8")
+          integ=Path("tests/integration/test_worker_crash_retry_canonical_composition_integration.py").read_text(encoding="utf-8")
+          assert 'config.get("reclaim_idle_ms", 60_000)' in main
+          assert 'reclaim_idle_ms=self._reclaim_idle_ms' in main
+          assert '"task_terminal_authority_binding": (' in main
+          assert 'if worker_consumer_type is RunFinalizingWorkerConsumer' in main
+          for token in (
+              "binding.replay_terminal_projection(",
+              "TASK_TERMINAL_NOT_COMMITTED_STATUS",
+              "DagRedisKey.task_meta(ctx.task_id)",
+              'lookup["worker_instance_id"]',
+              'lookup["scheduler_epoch"]',
+              'lookup["claim_epoch"]',
+              "await self._finalize_run_and_ack(",
+          ):
+              assert token in runtime, token
+          forbidden=(
+              "requeue_stale_task", "task_requeue.lua", "TASK_EXECUTION", "TASK_RETRY",
+              "TASK_RECOVER", "TASK_REDELIVER", "WORKER_RETRY", "RecoveryService",
+          )
+          product=main+"\n"+runtime
+          for token in forbidden:
+              assert token not in product, token
+          assert "TaskRecoveryManager" in integ and "TASK_REQUEUE must be unreachable" in integ
+          assert "xpending_range" in integ and "reclaim_idle_ms=0" in integ
+          assert "executor must not run on redelivery" in integ
           assert "DagLua.task_complete must be unreachable" in integ
           assert "legacy run_terminate_from_tasks.lua must be unreachable" in integ
-          assert "RUN-only redelivery recovery" in integ
-          print("SPRINT84_7D_STATIC_GUARDS_OK")
+          tests=[n for n in ast.parse(integ).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith("test_")]
+          assert len(tests)==7, [n.name for n in tests]
+          core_tests=[n for n in ast.parse(core).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith("test_")]
+          assert len(core_tests)==8, [n.name for n in core_tests]
+          print("SPRINT84_7E_STATIC_GUARDS_OK")
           PY
+
+      - name: E focused crash/retry contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_production_worker_crash_retry_contract.py -q --tb=short | tee sprint84_7e_focused.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7e_focused.txt
+          grep -Eq '(^|[^0-9])8 passed' sprint84_7e_focused.txt
+
+      - name: E real Redis restart/reclaim acceptance
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_worker_crash_retry_canonical_composition_integration.py -q --tb=short | tee sprint84_7e_redis.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7e_redis.txt
+          grep -Eq '(^|[^0-9])7 passed' sprint84_7e_redis.txt
 
       - name: D focused composition contracts
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest tests/core/test_production_worker_run_terminate_canonical_composition_contract.py -q --tb=short | tee sprint84_7d_focused.txt
-          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7d_focused.txt
-          grep -Eq '(^|[^0-9])7 passed' sprint84_7d_focused.txt
+          python -m pytest tests/core/test_production_worker_run_terminate_canonical_composition_contract.py -q --tb=short | tee sprint84_7e_d_focused.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7e_d_focused.txt
+          grep -Eq '(^|[^0-9])7 passed' sprint84_7e_d_focused.txt
 
       - name: D real Redis production composition acceptance
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest tests/integration/test_worker_run_terminate_canonical_composition_integration.py -q --tb=short | tee sprint84_7d_redis.txt
-          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7d_redis.txt
-          grep -Eq '(^|[^0-9])6 passed' sprint84_7d_redis.txt
+          python -m pytest tests/integration/test_worker_run_terminate_canonical_composition_integration.py -q --tb=short | tee sprint84_7e_d_redis.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7e_d_redis.txt
+          grep -Eq '(^|[^0-9])6 passed' sprint84_7e_d_redis.txt
 
       - name: Canonical RUN_TERMINATE authority regression
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest tests/unit/test_run_terminate_authority_binding.py tests/integration/test_run_terminate_authority_binding_integration.py -q --tb=short | tee sprint84_7d_run_authority.txt
-          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7d_run_authority.txt
-          grep -Eq '(^|[^0-9])23 passed' sprint84_7d_run_authority.txt
+          python -m pytest tests/unit/test_run_terminate_authority_binding.py tests/integration/test_run_terminate_authority_binding_integration.py -q --tb=short | tee sprint84_7e_run_authority.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7e_run_authority.txt
+          grep -Eq '(^|[^0-9])23 passed' sprint84_7e_run_authority.txt
 
       - name: C2 focused composition contracts
         shell: bash
@@ -345,16 +366,16 @@ jobs:
           python scripts/authority_audit.py \
             --repo-root . \
             --format dashboard \
-            --output sprint84_7d_authority.json \
+            --output sprint84_7e_authority.json \
             --fail-on banned
           python - <<'PY'
           import json
           from pathlib import Path
-          data = json.loads(Path("sprint84_7d_authority.json").read_text(encoding="utf-8"))
+          data = json.loads(Path("sprint84_7e_authority.json").read_text(encoding="utf-8"))
           counts = data.get("counts") or data.get("summary") or {}
           banned = int(counts.get("banned", data.get("banned", 0)) or 0)
           assert banned == 0, data
-          print("SPRINT84_7D_AUTHORITY", {
+          print("SPRINT84_7E_AUTHORITY", {
               "status": data.get("authority_status") or data.get("status"),
               "allowed": counts.get("allowed", data.get("allowed")),
               "banned": banned,
@@ -367,21 +388,20 @@ jobs:
           })
           PY
 
-      - name: Workflow YAML, compile, and diff hygiene
+      - name: Workflow YAML, compileall, and diff hygiene
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
           import yaml
-          path = Path(".github/workflows/sprint84-7d-run-terminate-production-injection.yml")
+          path = Path(".github/workflows/sprint84-7e-worker-crash-retry-acceptance.yml")
           loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
           assert isinstance(loaded, dict) and "jobs" in loaded
-          print("SPRINT84_7D_WORKFLOW_YAML_OK")
+          print("SPRINT84_7E_WORKFLOW_YAML_OK")
           PY
-          python -m compileall -q \
-            hfa-worker/src/hfa_worker/main.py \
-            tests/core/test_production_worker_terminal_composition_contract.py \
-            tests/core/test_production_worker_run_terminate_canonical_composition_contract.py \
-            tests/integration/test_worker_run_terminate_canonical_composition_integration.py
+          python -m compileall -q hfa-core/src hfa-control/src hfa-worker/src
+          python -m py_compile \
+            tests/core/test_production_worker_crash_retry_contract.py \
+            tests/integration/test_worker_crash_retry_canonical_composition_integration.py
           git diff --check "$PR_BASE_SHA...HEAD"
