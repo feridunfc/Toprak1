@@ -277,6 +277,17 @@ class WorkerService:
         )
         self._shards: list[int] = list(config.get("shards") or [0])
         self._capacity = int(config.get("capacity") or 10)
+        reclaim_idle_ms = config.get("reclaim_idle_ms", 60_000)
+        if type(reclaim_idle_ms) is bool:
+            raise ValueError("reclaim_idle_ms must be a non-negative integer")
+        try:
+            self._reclaim_idle_ms = int(reclaim_idle_ms)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "reclaim_idle_ms must be a non-negative integer"
+            ) from exc
+        if self._reclaim_idle_ms < 0:
+            raise ValueError("reclaim_idle_ms must be a non-negative integer")
         self._shard_renew_interval = float(
             config.get("shard_renew_interval", OWNER_TTL / 2)
         )
@@ -461,9 +472,19 @@ class WorkerService:
             worker_group=self._worker_group,
             shards=self._shards,
             executor=executor,
+            reclaim_idle_ms=self._reclaim_idle_ms,
             task_consumer=self._task_consumer,
             canonical_task_claim_binding_enabled=(
                 self._canonical_task_claim_binding_enabled
+            ),
+            **(
+                {
+                    "task_terminal_authority_binding": (
+                        self._task_terminal_authority_binding
+                    )
+                }
+                if worker_consumer_type is RunFinalizingWorkerConsumer
+                else {}
             ),
         )
 
