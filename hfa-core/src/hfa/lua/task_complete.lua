@@ -1,5 +1,6 @@
 -- hfa-core/src/hfa/lua/task_complete.lua
 -- IRONCLAD Sprint 82.2 — Owner-fenced task completion with RUN truth guard.
+-- Sprint 84.7C1 — optional proof-bound canonical TASK terminal projection.
 --
 -- KEYS
 -- 1  task_state_key
@@ -33,9 +34,23 @@
 -- 18  child_ready_emitted_suffix
 -- 19  expected_scheduler_epoch
 -- 20  expected_claim_epoch
+-- 21  canonical_projection_enabled
+-- 22  canonical_transition_id
+-- 23  canonical_record_hash
+-- 24  canonical_command_hash
+-- 25  canonical_revision
+-- 26  canonical_operation_id
+-- 27  canonical_operation_type
+-- 28  claim_transition_id
+-- 29  claim_record_hash
+-- 30  claim_command_hash
+-- 31  claim_revision
+-- 32  claim_operation_id
+-- 33  canonical_claim_epoch
+-- 34  output_sha256
 --
 -- RETURN
--- { committed_flag, status_string, unlocked_count, already_terminal_flag }
+-- { committed_flag, status_string, unlocked_count, already_terminal_flag, blocked_count }
 
 local task_state_key            = KEYS[1]
 local task_meta_key             = KEYS[2]
@@ -67,9 +82,23 @@ local child_ready_emitted_pfx   = ARGV[17]
 local child_ready_emitted_sfx   = ARGV[18]
 local expected_scheduler_epoch  = ARGV[19]
 local expected_claim_epoch      = ARGV[20]
+local canonical_projection      = ARGV[21] == '1'
+local canonical_transition_id   = ARGV[22] or ''
+local canonical_record_hash     = ARGV[23] or ''
+local canonical_command_hash    = ARGV[24] or ''
+local canonical_revision        = ARGV[25] or ''
+local canonical_operation_id    = ARGV[26] or ''
+local canonical_operation_type  = ARGV[27] or ''
+local claim_transition_id       = ARGV[28] or ''
+local claim_record_hash         = ARGV[29] or ''
+local claim_command_hash        = ARGV[30] or ''
+local claim_revision            = ARGV[31] or ''
+local claim_operation_id        = ARGV[32] or ''
+local canonical_claim_epoch     = ARGV[33] or ''
+local output_sha256             = ARGV[34] or ''
 
 if terminal_state ~= 'done' and terminal_state ~= 'failed' then
-    return {0, 'invalid_terminal_state', 0, 0}
+    return {0, 'invalid_terminal_state', 0, 0, 0}
 end
 
 local OPERATION = terminal_state == 'done' and 'TASK_COMPLETE' or 'TASK_FAIL'
@@ -95,7 +124,207 @@ local function is_terminal(s)
 end
 
 local function completion_failure(status)
-    return {0, status, 0, 0}
+    return {0, status, 0, 0, 0}
+end
+
+local MAX_SAFE_INTEGER = 9007199254740991
+
+local function exact_safe_integer(value)
+    local number = tonumber(value)
+    return value ~= ''
+        and number ~= nil
+        and number >= 0
+        and number <= MAX_SAFE_INTEGER
+        and number % 1 == 0
+end
+
+local function valid_sha256(value)
+    return type(value) == 'string'
+        and string.len(value) == 64
+        and string.match(value, '^[0-9a-f]+$') ~= nil
+end
+
+local function canonical_projection_input_valid()
+    if not canonical_projection then return true end
+    if task_id == ''
+        or run_id == ''
+        or tenant_id == ''
+        or expected_worker_id == ''
+        or expected_scheduler_epoch == ''
+        or expected_scheduler_epoch == '0'
+        or canonical_transition_id == ''
+        or canonical_operation_id == ''
+        or claim_transition_id == ''
+        or claim_operation_id == ''
+        or not valid_sha256(canonical_record_hash)
+        or not valid_sha256(canonical_command_hash)
+        or not valid_sha256(claim_record_hash)
+        or not valid_sha256(claim_command_hash) then
+        return false
+    end
+    if not exact_safe_integer(canonical_revision)
+        or not exact_safe_integer(claim_revision)
+        or not exact_safe_integer(canonical_claim_epoch) then
+        return false
+    end
+    if tonumber(claim_revision) < 1
+        or tonumber(canonical_revision) ~= tonumber(claim_revision) + 1
+        or tonumber(canonical_claim_epoch) < 1 then
+        return false
+    end
+    if canonical_claim_epoch ~= expected_claim_epoch then
+        return false
+    end
+    if terminal_state == 'done' then
+        return canonical_operation_type == 'TASK_COMPLETE'
+            and valid_sha256(output_sha256)
+    end
+    return canonical_operation_type == 'TASK_FAIL' and output_sha256 == ''
+end
+
+local function canonical_claim_proof_matches()
+    local values = redis.call('HMGET', task_meta_key,
+        'tenant_id',
+        'worker_instance_id',
+        'scheduler_epoch',
+        'claim_epoch',
+        'claim_canonical_transition_id',
+        'claim_canonical_record_hash',
+        'claim_canonical_command_hash',
+        'claim_canonical_revision',
+        'claim_canonical_operation_id',
+        'canonical_transition_id',
+        'canonical_record_hash',
+        'canonical_command_hash',
+        'canonical_revision',
+        'canonical_operation_id'
+    )
+    return values[1] == tenant_id
+        and values[2] == expected_worker_id
+        and values[3] == expected_scheduler_epoch
+        and values[4] == canonical_claim_epoch
+        and values[5] == claim_transition_id
+        and values[6] == claim_record_hash
+        and values[7] == claim_command_hash
+        and values[8] == claim_revision
+        and values[9] == claim_operation_id
+        and values[10] == claim_transition_id
+        and values[11] == claim_record_hash
+        and values[12] == claim_command_hash
+        and values[13] == claim_revision
+        and values[14] == claim_operation_id
+end
+
+local function canonical_terminal_exact_duplicate()
+    local values = redis.call('HMGET', task_meta_key,
+        'completed_at_ms',
+        'terminal_state',
+        'completion_reason',
+        'worker_instance_id',
+        'scheduler_epoch',
+        'claim_epoch',
+        'terminal_canonical_transition_id',
+        'terminal_canonical_record_hash',
+        'terminal_canonical_command_hash',
+        'terminal_canonical_revision',
+        'terminal_canonical_operation_id',
+        'terminal_canonical_operation_type',
+        'terminal_output_sha256',
+        'claim_canonical_transition_id',
+        'claim_canonical_record_hash',
+        'claim_canonical_command_hash',
+        'claim_canonical_revision',
+        'claim_canonical_operation_id',
+        'canonical_transition_id',
+        'canonical_record_hash',
+        'canonical_command_hash',
+        'canonical_revision',
+        'canonical_operation_id'
+    )
+    if values[1] ~= finished_at_ms
+        or values[2] ~= terminal_state
+        or values[3] ~= reason_code
+        or values[4] ~= expected_worker_id
+        or values[5] ~= expected_scheduler_epoch
+        or values[6] ~= canonical_claim_epoch
+        or values[7] ~= canonical_transition_id
+        or values[8] ~= canonical_record_hash
+        or values[9] ~= canonical_command_hash
+        or values[10] ~= canonical_revision
+        or values[11] ~= canonical_operation_id
+        or values[12] ~= canonical_operation_type
+        or values[13] ~= output_sha256
+        or values[14] ~= claim_transition_id
+        or values[15] ~= claim_record_hash
+        or values[16] ~= claim_command_hash
+        or values[17] ~= claim_revision
+        or values[18] ~= claim_operation_id
+        or values[19] ~= canonical_transition_id
+        or values[20] ~= canonical_record_hash
+        or values[21] ~= canonical_command_hash
+        or values[22] ~= canonical_revision
+        or values[23] ~= canonical_operation_id then
+        return false
+    end
+    if terminal_state == 'done' then
+        if redis_type(task_output_key) ~= 'string' then
+            return false
+        end
+        return redis.call('GET', task_output_key) == output_json
+    end
+    return true
+end
+
+local function canonical_projection_preflight()
+    if not canonical_projection then return true, {} end
+
+    local running_kind = redis_type(task_running_zset)
+    if running_kind ~= 'none' and running_kind ~= 'zset' then
+        return false, {}
+    end
+    local ready_kind = redis_type(tenant_ready_queue)
+    if ready_kind ~= 'none' and ready_kind ~= 'zset' then
+        return false, {}
+    end
+    local children_kind = redis_type(task_children_key)
+    if children_kind ~= 'none' and children_kind ~= 'set' then
+        return false, {}
+    end
+    if terminal_state == 'done' then
+        local output_kind = redis_type(task_output_key)
+        if output_kind ~= 'none' and output_kind ~= 'string' then
+            return false, {}
+        end
+    end
+
+    local children = redis.call('SMEMBERS', task_children_key)
+    for _, child_id in ipairs(children) do
+        local child_state_key = child_state_pfx .. child_id .. child_state_sfx
+        local child_state_kind = redis_type(child_state_key)
+        if child_state_kind ~= 'none' and child_state_kind ~= 'string' then
+            return false, {}
+        end
+        local child_state = redis.call('GET', child_state_key)
+        if terminal_state == 'done' and child_state == 'pending' then
+            local child_remaining_key = child_remaining_pfx .. child_id .. child_remaining_sfx
+            local child_emitted_key = child_ready_emitted_pfx .. child_id .. child_ready_emitted_sfx
+            if redis_type(child_remaining_key) ~= 'string' then
+                return false, {}
+            end
+            local remaining_raw = redis.call('GET', child_remaining_key)
+            if type(remaining_raw) ~= 'string'
+                or string.match(remaining_raw, '^%d+$') == nil
+                or not exact_safe_integer(remaining_raw)
+                or tonumber(remaining_raw) < 1 then
+                return false, {}
+            end
+            local emitted_kind = redis_type(child_emitted_key)
+            if emitted_kind ~= 'none' and emitted_kind ~= 'string' then
+                return false, {}
+            end
+        end
+    end
+    return true, children
 end
 
 local function truth_conflict_pair_state()
@@ -187,13 +416,25 @@ end
 
 local current_state = redis.call('GET', task_state_key)
 if not current_state then
-    return {0, 'missing_task', 0, 0}
+    return {0, 'missing_task', 0, 0, 0}
+end
+if canonical_projection and not canonical_projection_input_valid() then
+    return {0, 'canonical_projection_conflict', 0, 0, 0}
 end
 if is_terminal(current_state) then
-    return {0, 'already_terminal', 0, 1}
+    if canonical_projection then
+        if canonical_terminal_exact_duplicate() then
+            return {1, 'canonical_terminal_already_projected', 0, 1, 0}
+        end
+        return {0, 'canonical_projection_conflict', 0, 1, 0}
+    end
+    return {0, 'already_terminal', 0, 1, 0}
 end
 if current_state ~= 'running' then
-    return {0, 'illegal_transition', 0, 0}
+    return {0, 'illegal_transition', 0, 0, 0}
+end
+if canonical_projection and not canonical_claim_proof_matches() then
+    return {0, 'canonical_projection_conflict', 0, 0, 0}
 end
 
 if redis.call('EXISTS', task_meta_key) == 0 then
@@ -249,13 +490,22 @@ local stored_sched_ep = fence[2] or ''
 local stored_claim_ep = fence[3] or ''
 
 if expected_claim_epoch ~= '' and stored_claim_ep ~= expected_claim_epoch then
-    return {0, 'claim_epoch_mismatch', 0, 0}
+    return {0, 'claim_epoch_mismatch', 0, 0, 0}
 end
 if expected_scheduler_epoch ~= '' and stored_sched_ep ~= expected_scheduler_epoch then
-    return {0, 'scheduler_epoch_mismatch', 0, 0}
+    return {0, 'scheduler_epoch_mismatch', 0, 0, 0}
 end
 if expected_worker_id ~= '' and stored_worker ~= expected_worker_id then
-    return {0, 'task_owner_mismatch', 0, 0}
+    return {0, 'task_owner_mismatch', 0, 0, 0}
+end
+
+local canonical_children = {}
+if canonical_projection then
+    local preflight_ok, preflight_children = canonical_projection_preflight()
+    if not preflight_ok then
+        return {0, 'canonical_projection_conflict', 0, 0, 0}
+    end
+    canonical_children = preflight_children
 end
 
 redis.call('SET', task_state_key, terminal_state, 'EX', state_ttl)
@@ -265,6 +515,22 @@ redis.call('HSET', task_meta_key,
     'completion_reason', reason_code,
     'worker_instance_id', expected_worker_id
 )
+if canonical_projection then
+    redis.call('HSET', task_meta_key,
+        'terminal_canonical_transition_id', canonical_transition_id,
+        'terminal_canonical_record_hash', canonical_record_hash,
+        'terminal_canonical_command_hash', canonical_command_hash,
+        'terminal_canonical_revision', canonical_revision,
+        'terminal_canonical_operation_id', canonical_operation_id,
+        'terminal_canonical_operation_type', canonical_operation_type,
+        'terminal_output_sha256', output_sha256,
+        'canonical_transition_id', canonical_transition_id,
+        'canonical_record_hash', canonical_record_hash,
+        'canonical_command_hash', canonical_command_hash,
+        'canonical_revision', canonical_revision,
+        'canonical_operation_id', canonical_operation_id
+    )
+end
 redis.call('EXPIRE', task_meta_key, meta_ttl)
 redis.call('ZREM', task_running_zset, task_id)
 
@@ -273,11 +539,38 @@ if terminal_state == 'done' and output_json ~= '' then
 end
 
 if terminal_state ~= 'done' then
-    return {1, 'committed', 0, 0}
+    if not canonical_projection then
+        -- Preserve the locked legacy behavior. Historical failure propagation
+        -- remains outside this script when canonical TASK terminal authority
+        -- is disabled.
+        return {1, 'committed', 0, 0, 0}
+    end
+
+    local children = canonical_children
+    -- Canonical TASK_FAIL carries DEPENDENCY_FAILURE_FANOUT_INTENT. Apply the
+    -- direct-child projection in the same Redis/Lua transaction as the parent
+    -- terminal state so the durable intent is never acknowledged without its
+    -- corresponding projection. This is subordinate to canonical TASK_FAIL
+    -- authority in C1 foundation mode; FailureSweeper remains legacy/default.
+    local blocked = 0
+    for _, child_id in ipairs(children) do
+        local child_state_key = child_state_pfx .. child_id .. child_state_sfx
+        local child_state = redis.call('GET', child_state_key)
+        if child_state == 'pending' or child_state == 'ready' then
+            redis.call('SET', child_state_key, 'blocked_by_failure', 'EX', state_ttl)
+            if child_state == 'ready' then
+                redis.call('ZREM', tenant_ready_queue, child_id)
+            end
+            blocked = blocked + 1
+        end
+    end
+    return {1, 'task_terminal_projected', 0, 0, blocked}
 end
 
 local unlocked = 0
-local children = redis.call('SMEMBERS', task_children_key)
+local children = canonical_projection
+    and canonical_children
+    or redis.call('SMEMBERS', task_children_key)
 for _, child_id in ipairs(children) do
     local child_state_key = child_state_pfx .. child_id .. child_state_sfx
     local child_remaining_key = child_remaining_pfx .. child_id .. child_remaining_sfx
@@ -299,4 +592,4 @@ for _, child_id in ipairs(children) do
     end
 end
 
-return {1, 'committed', unlocked, 0}
+return {1, canonical_projection and 'task_terminal_projected' or 'committed', unlocked, 0, 0}

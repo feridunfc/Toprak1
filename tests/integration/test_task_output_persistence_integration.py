@@ -2,6 +2,7 @@
 import time
 import pytest
 
+from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
 
@@ -15,13 +16,22 @@ async def _lua(redis_client) -> DagLua:
 @pytest.mark.integration
 async def test_successful_task_saves_output(redis_client):
     task_id = "output-001"
+    run_id = "run-1"
     tenant_id = "tenant-a"
     output = '{"code":"print(1)","status":"ok"}'
     await redis_client.set(DagRedisKey.task_state(task_id), "running")
-    await redis_client.hset(DagRedisKey.task_meta(task_id), mapping={"worker_instance_id": "worker-1"})
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+            "worker_instance_id": "worker-1",
+        },
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
     lua = await _lua(redis_client)
     result = await lua.task_complete(
-        task_id=task_id, run_id="run-1", tenant_id=tenant_id, terminal_state="done",
+        task_id=task_id, run_id=run_id, tenant_id=tenant_id, terminal_state="done",
         finished_at_ms=int(time.time() * 1000), worker_instance_id="worker-1", output_data=output,
     )
     assert result.completed is True
@@ -31,13 +41,22 @@ async def test_successful_task_saves_output(redis_client):
 @pytest.mark.integration
 async def test_failed_task_does_not_save_output(redis_client):
     task_id = "output-002"
+    run_id = "run-1"
     tenant_id = "tenant-a"
     output = '{"error":"boom"}'
     await redis_client.set(DagRedisKey.task_state(task_id), "running")
-    await redis_client.hset(DagRedisKey.task_meta(task_id), mapping={"worker_instance_id": "worker-1"})
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+            "worker_instance_id": "worker-1",
+        },
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
     lua = await _lua(redis_client)
     result = await lua.task_complete(
-        task_id=task_id, run_id="run-1", tenant_id=tenant_id, terminal_state="failed",
+        task_id=task_id, run_id=run_id, tenant_id=tenant_id, terminal_state="failed",
         finished_at_ms=int(time.time() * 1000), worker_instance_id="worker-1", output_data=output,
     )
     assert result.completed is True
@@ -47,13 +66,22 @@ async def test_failed_task_does_not_save_output(redis_client):
 @pytest.mark.integration
 async def test_output_ttl_matches_dag(redis_client):
     task_id = "output-003"
+    run_id = "run-1"
     tenant_id = "tenant-a"
     output = '{"result":42}'
     await redis_client.set(DagRedisKey.task_state(task_id), "running")
-    await redis_client.hset(DagRedisKey.task_meta(task_id), mapping={"worker_instance_id": "worker-1"})
+    await redis_client.hset(
+        DagRedisKey.task_meta(task_id),
+        mapping={
+            "task_id": task_id,
+            "run_id": run_id,
+            "worker_instance_id": "worker-1",
+        },
+    )
+    await redis_client.set(RedisKey.run_state(run_id), "running")
     lua = await _lua(redis_client)
     result = await lua.task_complete(
-        task_id=task_id, run_id="run-1", tenant_id=tenant_id, terminal_state="done",
+        task_id=task_id, run_id=run_id, tenant_id=tenant_id, terminal_state="done",
         finished_at_ms=int(time.time() * 1000), worker_instance_id="worker-1", output_data=output,
     )
     assert result.completed is True

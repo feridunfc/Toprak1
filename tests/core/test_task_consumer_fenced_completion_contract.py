@@ -16,6 +16,7 @@ class FakeClaimManager:
         self,
         *,
         task_id: str,
+        run_id: str = "",
         tenant_id: str,
         worker_instance_id: str,
         claimed_at_ms: int,
