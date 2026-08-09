@@ -109,6 +109,11 @@ def config_from_env(
             source.get("HFA_CANONICAL_TASK_CLAIM_BINDING"),
             default=False,
         ),
+        "canonical_task_terminal_binding": _parse_strict_bool_env(
+            "HFA_CANONICAL_TASK_TERMINAL_BINDING",
+            source.get("HFA_CANONICAL_TASK_TERMINAL_BINDING"),
+            default=False,
+        ),
         "shard_renew_interval": float(
             source.get("WORKER_SHARD_RENEW_INTERVAL", "30")
         ),

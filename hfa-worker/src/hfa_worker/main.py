@@ -11,6 +11,7 @@ from hfa.events.schema import RunRequestedEvent
 from hfa_control.dag_lua import DagLua
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.task_recovery import TaskHeartbeatManager
+from hfa_control.task_terminal_authority import TaskTerminalAuthorityBinding
 from hfa_control.run_termination import RunTerminationCoordinator
 from hfa_control.product_profile import (
     ProductMode,
@@ -104,6 +105,54 @@ class _BaseExecutorTaskAdapter(TaskExecutor):
         )
 
 
+class _CanonicalTaskTerminalCompletionGateway:
+    """Adapt TaskConsumer completion calls to canonical TASK terminal authority."""
+
+    def __init__(self, binding: TaskTerminalAuthorityBinding) -> None:
+        self._binding = binding
+
+    async def task_complete(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        tenant_id: str,
+        terminal_state: str,
+        finished_at_ms: int,
+        reason_code: str,
+        worker_instance_id: str,
+        output_data: str,
+        expected_scheduler_epoch: str,
+        expected_claim_epoch: str | int,
+    ):
+        if terminal_state == "done":
+            return await self._binding.complete(
+                task_id=task_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                finished_at_ms=finished_at_ms,
+                worker_instance_id=worker_instance_id,
+                scheduler_epoch=expected_scheduler_epoch,
+                claim_epoch=expected_claim_epoch,
+                output_data=output_data,
+                reason_code=reason_code,
+            )
+        if terminal_state == "failed":
+            return await self._binding.fail(
+                task_id=task_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                finished_at_ms=finished_at_ms,
+                worker_instance_id=worker_instance_id,
+                scheduler_epoch=expected_scheduler_epoch,
+                claim_epoch=expected_claim_epoch,
+                reason_code=reason_code,
+            )
+        raise RuntimeError(
+            "canonical task terminal gateway accepts only done or failed"
+        )
+
+
 def _require_env(name: str) -> str:
     val = os.environ.get(name, "")
     if not val:
@@ -175,6 +224,46 @@ class WorkerService:
                 "canonical_task_claim_binding requires both "
                 "canonical_task_admit_binding=True and "
                 "canonical_task_dispatch_binding=True"
+            )
+
+        canonical_task_terminal_binding = config.get(
+            "canonical_task_terminal_binding",
+            False,
+        )
+        if type(canonical_task_terminal_binding) is not bool:
+            raise ValueError(
+                "canonical_task_terminal_binding must be a boolean"
+            )
+        self._canonical_task_terminal_binding_enabled = (
+            canonical_task_terminal_binding
+        )
+        if self._canonical_task_terminal_binding_enabled and not self._production:
+            raise ValueError(
+                "canonical_task_terminal_binding requires production=True"
+            )
+        if (
+            self._canonical_task_terminal_binding_enabled
+            and not self._canonical_task_claim_binding_enabled
+        ):
+            raise ValueError(
+                "canonical_task_terminal_binding requires "
+                "canonical_task_claim_binding=True"
+            )
+        if self._canonical_task_terminal_binding_enabled and not (
+            self._canonical_task_admit_binding_enabled
+            and self._canonical_task_dispatch_binding_enabled
+        ):
+            raise ValueError(
+                "canonical_task_terminal_binding requires the canonical "
+                "TASK_ADMIT/TASK_DISPATCH/TASK_CLAIM dependency chain"
+            )
+        if (
+            self._canonical_task_terminal_binding_enabled
+            and self._run_termination_binding_enabled
+        ):
+            raise ValueError(
+                "canonical_task_terminal_binding cannot be combined with "
+                "run_termination_binding_enabled before Sprint 84.7D"
             )
 
         configured_worker_id = str(config.get("worker_id") or "").strip()
@@ -274,6 +363,12 @@ class WorkerService:
         self._task_heartbeat_manager: TaskHeartbeatManager | None = None
         self._task_consumer: TaskConsumer | None = None
         self._run_termination_coordinator: RunTerminationCoordinator | None = None
+        self._task_terminal_authority_binding: (
+            TaskTerminalAuthorityBinding | None
+        ) = None
+        self._task_terminal_completion_gateway: (
+            _CanonicalTaskTerminalCompletionGateway | None
+        ) = None
         worker_consumer_type = WorkerConsumer
 
         if self._production:
@@ -301,7 +396,17 @@ class WorkerService:
             completion_manager: Any = self._dag_lua
             task_consumer_type = TaskConsumer
 
-            if self._run_termination_binding_enabled:
+            if self._canonical_task_terminal_binding_enabled:
+                self._task_terminal_authority_binding = (
+                    TaskTerminalAuthorityBinding(redis)
+                )
+                self._task_terminal_completion_gateway = (
+                    _CanonicalTaskTerminalCompletionGateway(
+                        self._task_terminal_authority_binding
+                    )
+                )
+                completion_manager = self._task_terminal_completion_gateway
+            elif self._run_termination_binding_enabled:
                 self._run_termination_coordinator = RunTerminationCoordinator(
                     redis,
                     self._dag_lua,
@@ -431,6 +536,10 @@ class WorkerService:
     @property
     def canonical_task_claim_binding_enabled(self) -> bool:
         return self._canonical_task_claim_binding_enabled
+
+    @property
+    def canonical_task_terminal_binding_enabled(self) -> bool:
+        return self._canonical_task_terminal_binding_enabled
 
     @property
     def product_profile(self) -> WorkerProductProfile:
@@ -746,6 +855,9 @@ class WorkerService:
             try:
                 if self._production and self._dag_lua is not None:
                     await self._dag_lua.initialise()
+
+                if self._task_terminal_authority_binding is not None:
+                    await self._task_terminal_authority_binding.initialise()
 
                 if self._run_termination_coordinator is not None:
                     await self._run_termination_coordinator.initialise()
