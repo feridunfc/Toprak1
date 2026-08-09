@@ -59,6 +59,7 @@ def _production_config(
     *,
     worker_id: str | None = "worker-prod-79",
     task_executor: object | None = None,
+    **overrides,
 ) -> dict:
     config = {
         "production": True,
@@ -72,6 +73,7 @@ def _production_config(
     }
     if worker_id is not None:
         config["worker_id"] = worker_id
+    config.update(overrides)
     return config
 
 
@@ -96,6 +98,102 @@ def test_production_worker_service_constructs_canonical_task_graph() -> None:
     assert isinstance(getattr(service, "_dag_lua", None), DagLua)
     assert isinstance(getattr(service, "_task_claim_manager", None), TaskClaimManager)
     assert isinstance(getattr(service, "_task_consumer", None), TaskConsumer)
+
+
+def test_production_worker_preserves_safe_legacy_claim_default() -> None:
+    service, _, _ = _build_service()
+
+    manager = service._task_claim_manager
+    assert manager is not None
+    assert service.canonical_task_claim_binding_enabled is False
+    assert manager._canonical_task_claim_binding_enabled is False
+
+
+def test_worker_consumer_preserves_safe_legacy_claim_routing_default() -> None:
+    service, _, _ = _build_service()
+
+    worker_consumer = service._consumer
+    assert worker_consumer is not None
+    assert worker_consumer._canonical_task_claim_binding_enabled is False
+
+
+def test_canonical_claim_binding_is_forwarded_to_worker_consumer_routing() -> None:
+    service = WorkerService(
+        RedisProbe(),
+        _production_config(
+            canonical_task_admit_binding=True,
+            canonical_task_dispatch_binding=True,
+            canonical_task_claim_binding=True,
+        ),
+    )
+
+    worker_consumer = service._consumer
+    assert worker_consumer is not None
+    assert worker_consumer._canonical_task_claim_binding_enabled is True
+
+
+def test_production_worker_injects_canonical_task_claim_dependencies() -> None:
+    redis = RedisProbe()
+    service = WorkerService(
+        redis,
+        _production_config(
+            canonical_task_admit_binding=True,
+            canonical_task_dispatch_binding=True,
+            canonical_task_claim_binding=True,
+        ),
+    )
+
+    manager = service._task_claim_manager
+    assert manager is not None
+    assert service.canonical_task_claim_binding_enabled is True
+    assert manager._canonical_task_claim_binding_enabled is True
+    assert manager._canonical_task_admit_binding_enabled is True
+    assert manager._canonical_task_dispatch_binding_enabled is True
+    assert manager._dag_lua is service._dag_lua
+    assert manager._redis() is redis
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {
+                "canonical_task_admit_binding": False,
+                "canonical_task_dispatch_binding": True,
+                "canonical_task_claim_binding": True,
+            },
+            "canonical_task_dispatch_binding requires",
+        ),
+        (
+            {
+                "canonical_task_admit_binding": True,
+                "canonical_task_dispatch_binding": False,
+                "canonical_task_claim_binding": True,
+            },
+            "canonical_task_claim_binding requires both",
+        ),
+    ],
+)
+def test_production_worker_rejects_incomplete_canonical_claim_dependencies(
+    overrides: dict,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        WorkerService(
+            RedisProbe(),
+            _production_config(**overrides),
+        )
+
+
+def test_worker_rejects_non_boolean_canonical_claim_config() -> None:
+    with pytest.raises(
+        ValueError,
+        match="canonical_task_claim_binding must be a boolean",
+    ):
+        WorkerService(
+            RedisProbe(),
+            _production_config(canonical_task_claim_binding="true"),
+        )
 
 
 def test_production_worker_service_injects_task_consumer_into_worker_consumer() -> None:

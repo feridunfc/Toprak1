@@ -82,3 +82,54 @@ async def test_process_root_owns_redis_close(monkeypatch) -> None:
         "service.close",
         "redis.close",
     ]
+
+
+def test_process_root_canonical_claim_flags_default_false() -> None:
+    module = _load_process_root()
+    config = module.config_from_env(
+        {
+            "WORKER_EXECUTOR_MODE": "fake",
+            "WORKER_ID": "worker-root-defaults",
+        }
+    )
+
+    assert config["canonical_task_admit_binding"] is False
+    assert config["canonical_task_dispatch_binding"] is False
+    assert config["canonical_task_claim_binding"] is False
+
+
+def test_process_root_parses_canonical_claim_dependency_chain() -> None:
+    module = _load_process_root()
+    config = module.config_from_env(
+        {
+            "WORKER_EXECUTOR_MODE": "fake",
+            "WORKER_ID": "worker-root-canonical",
+            "HFA_CANONICAL_TASK_ADMIT_BINDING": "true",
+            "HFA_CANONICAL_TASK_DISPATCH_BINDING": "1",
+            "HFA_CANONICAL_TASK_CLAIM_BINDING": "on",
+        }
+    )
+
+    assert config["canonical_task_admit_binding"] is True
+    assert config["canonical_task_dispatch_binding"] is True
+    assert config["canonical_task_claim_binding"] is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HFA_CANONICAL_TASK_ADMIT_BINDING",
+        "HFA_CANONICAL_TASK_DISPATCH_BINDING",
+        "HFA_CANONICAL_TASK_CLAIM_BINDING",
+    ],
+)
+def test_process_root_rejects_invalid_canonical_binding_env(name: str) -> None:
+    module = _load_process_root()
+    env = {
+        "WORKER_EXECUTOR_MODE": "fake",
+        "WORKER_ID": "worker-root-invalid",
+        name: "maybe",
+    }
+
+    with pytest.raises(RuntimeError, match=name):
+        module.config_from_env(env)
