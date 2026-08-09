@@ -1,0 +1,389 @@
+name: Sprint 84.7C2 TASK Terminal Production Composition
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-worker/src/hfa_worker/main.py'
+      - 'hfa-worker/src/hfa_worker/process_root.py'
+      - 'tests/core/test_production_worker_terminal_composition_contract.py'
+      - 'tests/core/test_production_worker_process_root_terminal_contract.py'
+      - 'tests/integration/test_worker_task_terminal_canonical_composition_integration.py'
+      - '.github/workflows/sprint84-7c2-task-terminal-production-composition.yml'
+      - 'docs/implementation/sprint84/SPRINT84.7C2-task-terminal-production-composition.md'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+  ACCEPTED_PARENT: a5cb395df414c773db56c0e57e8e07e43c7f3e73
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify accepted parent and exact C2 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          git merge-base --is-ancestor "$ACCEPTED_PARENT" HEAD
+          python - <<'PY'
+          import os
+          import subprocess
+
+          feature_branch = "sprint/84-7c2-task-terminal-production-composition"
+          allowlist = {
+              ".github/workflows/sprint84-7c2-task-terminal-production-composition.yml",
+              "docs/implementation/sprint84/SPRINT84.7C2-task-terminal-production-composition.md",
+              "hfa-worker/src/hfa_worker/main.py",
+              "hfa-worker/src/hfa_worker/process_root.py",
+              "tests/core/test_production_worker_terminal_composition_contract.py",
+              "tests/core/test_production_worker_process_root_terminal_contract.py",
+              "tests/integration/test_worker_task_terminal_canonical_composition_integration.py",
+          }
+          changed = set(
+              subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{os.environ['PR_BASE_SHA']}...HEAD"],
+                  text=True,
+              ).splitlines()
+          )
+          if os.environ["PR_HEAD_BRANCH"] == feature_branch:
+              assert os.environ["PR_BASE_SHA"] == os.environ["ACCEPTED_PARENT"], {
+                  "observed_base": os.environ["PR_BASE_SHA"],
+                  "expected_base": os.environ["ACCEPTED_PARENT"],
+              }
+              assert changed == allowlist, {
+                  "missing": sorted(allowlist - changed),
+                  "unexpected": sorted(changed - allowlist),
+              }
+              mode = "FEATURE_EXACT_SCOPE"
+          else:
+              assert changed & allowlist, {
+                  "mode": "FUTURE_REGRESSION_TRIGGER",
+                  "changed": sorted(changed),
+              }
+              mode = "REGRESSION_TRIGGER_INTERSECTION"
+          forbidden = [
+              path for path in changed
+              if path.startswith("local_out/")
+              or "__pycache__" in path
+              or ".pytest_cache" in path
+              or path.endswith(".pyc")
+          ]
+          assert not forbidden, forbidden
+          print("SPRINT84_7C2_SCOPE_OK", mode, sorted(changed))
+          PY
+
+      - name: Verify C1 product byte parity and forbidden-file freeze
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+          import os
+          import subprocess
+
+          expected = {
+              "hfa-control/src/hfa_control/task_terminal_authority.py": "a5abd71bbb64410dc837fac625a3d0b0aa824d3fee0e3f68092066d1f2134778",
+              "hfa-core/src/hfa/lua/task_complete.lua": "4bfcab69627f1b5fcc79331c13854f66f90cf8f437beff84c74b2f24f685ab48",
+          }
+          for name, wanted in expected.items():
+              raw = Path(name).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              observed = sha256(raw).hexdigest()
+              assert observed == wanted, (name, observed, wanted)
+
+          frozen = [
+              "hfa-worker/src/hfa_worker/consumer.py",
+              "hfa-worker/src/hfa_worker/task_consumer.py",
+              "hfa-control/src/hfa_control/task_terminal_authority.py",
+              "hfa-control/src/hfa_control/run_termination.py",
+              "hfa-core/src/hfa/lua/task_complete.lua",
+              "hfa-core/src/hfa/lua/task_claim_start.lua",
+          ]
+          for path in frozen:
+              result = subprocess.run(
+                  ["git", "diff", "--quiet", f"{os.environ['PR_BASE_SHA']}...HEAD", "--", path]
+              )
+              assert result.returncode == 0, path
+          print("SPRINT84_7C2_C1_BYTE_AND_FROZEN_FILE_PARITY_OK")
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
+
+      - name: Static C2 architecture guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path("hfa-worker/src/hfa_worker/main.py").read_text(encoding="utf-8")
+          root = Path("hfa-worker/src/hfa_worker/process_root.py").read_text(encoding="utf-8")
+          integration = Path(
+              "tests/integration/test_worker_task_terminal_canonical_composition_integration.py"
+          ).read_text(encoding="utf-8")
+
+          assert "TaskTerminalAuthorityBinding" in main
+          assert "canonical_task_terminal_binding" in main
+          assert "HFA_CANONICAL_TASK_TERMINAL_BINDING" in root
+          assert "_CanonicalTaskTerminalCompletionGateway" in main
+          assert "await self._binding.complete(" in main
+          assert "await self._binding.fail(" in main
+          assert "canonical_task_terminal_binding cannot be combined" in main
+          assert "await self._task_terminal_authority_binding.initialise()" in main
+          assert main.index("await self._task_terminal_authority_binding.initialise()") < main.index(
+              "await self._prepare_consumer_groups()"
+          )
+          assert "class TaskTerminalAuthorityBinding" not in main
+          assert "class RedisCanonicalAuthorityStore" not in main
+          assert "RunTerminateAuthorityBinding" not in main
+          assert "OperationType.RUN_TERMINATE" not in main
+          assert "DagLua.task_complete must be unreachable" in integration
+          assert 'event_type="TaskRequested"' in integration
+          assert 'event_type="RunRequested"' in integration
+          assert "projection failure" in integration.lower()
+          print("SPRINT84_7C2_STATIC_GUARDS_OK")
+          PY
+
+      - name: C2 focused composition contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/core/test_production_worker_terminal_composition_contract.py \
+            tests/core/test_production_worker_process_root_terminal_contract.py \
+            -q --tb=short | tee sprint84_7c2_focused.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_focused.txt
+          grep -Eq '(^|[^0-9])22 passed' sprint84_7c2_focused.txt
+
+      - name: C2 real Redis production composition acceptance
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/integration/test_worker_task_terminal_canonical_composition_integration.py \
+            -q --tb=short | tee sprint84_7c2_redis.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_redis.txt
+          grep -Eq '(^|[^0-9])3 passed' sprint84_7c2_redis.txt
+
+      - name: C1 authority unit regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_task_terminal_authority_contract.py -q --tb=short | tee sprint84_7c2_c1_unit.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_c1_unit.txt
+          grep -Eq '(^|[^0-9])7 passed' sprint84_7c2_c1_unit.txt
+
+      - name: C1 real Redis authority regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_task_terminal_authority_integration.py -q --tb=short | tee sprint84_7c2_c1_redis.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_c1_redis.txt
+          grep -Eq '(^|[^0-9])23 passed' sprint84_7c2_c1_redis.txt
+
+      - name: Legacy terminal regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/core/test_task_complete_lua_contract.py \
+            tests/core/test_task_consumer_fenced_completion_contract.py \
+            tests/integration/test_task_complete_owner_integration.py \
+            tests/integration/test_task_complete_unlock_integration.py \
+            tests/integration/test_task_output_persistence_integration.py \
+            tests/integration/test_failure_sweeper_integration.py \
+            -q --tb=short | tee sprint84_7c2_legacy_terminal.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_legacy_terminal.txt
+          grep -Eq '(^|[^0-9])18 passed' sprint84_7c2_legacy_terminal.txt
+
+      - name: Sprint 84.7B focused regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/core/test_production_worker_composition_contract.py \
+            tests/core/test_production_worker_process_root_contract.py \
+            tests/core/test_task_claim_service_legacy_quarantine_contract.py \
+            tests/core/test_task_requested_routing_contract.py \
+            tests/unit/test_task_claim_authority_binding.py \
+            tests/unit/test_task_claim_authority_contract.py \
+            -q --tb=short | tee sprint84_7c2_84_7b.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_84_7b.txt
+          grep -Eq '(^|[^0-9])76 passed' sprint84_7c2_84_7b.txt
+
+      - name: Full TASK_CLAIM regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_task_claim_authority_binding.py \
+            tests/unit/test_task_claim_authority_contract.py \
+            tests/core/test_task_claim_legacy_direct_gate_contract.py \
+            tests/core/test_task_claim_reservation_owner_lookup_contract.py \
+            tests/core/test_task_claim_service_legacy_quarantine_contract.py \
+            tests/core/test_task_claim_start_contract.py \
+            tests/core/test_task_claim_status_taxonomy_contract.py \
+            tests/integration/test_task_claim_authority_binding_integration.py \
+            tests/integration/test_task_claim_authority_projection_integration.py \
+            tests/integration/test_task_claim_legacy_direct_gate_integration.py \
+            tests/integration/test_task_claim_reservation_integration.py \
+            tests/integration/test_task_claim_start_integration.py \
+            tests/integration/test_worker_task_claim_canonical_composition_integration.py \
+            -q --tb=short | tee sprint84_7c2_task_claim.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_task_claim.txt
+          grep -Eq '(^|[^0-9])83 passed' sprint84_7c2_task_claim.txt
+
+      - name: RUN finalization regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/integration/test_production_run_finalization_binding_integration.py \
+            tests/integration/test_terminal_task_run_finalization.py \
+            tests/integration/test_runtime_alpha_product_acceptance_83_2.py \
+            -q --tb=short | tee sprint84_7c2_run_finalization.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_run_finalization.txt
+          grep -Eq '(^|[^0-9])41 passed' sprint84_7c2_run_finalization.txt
+
+      - name: Existing production worker regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/core/test_production_worker_composition_contract.py \
+            tests/core/test_production_worker_process_root_contract.py \
+            tests/core/test_worker_service_lifecycle_contract.py \
+            tests/core/test_worker_startup_failure_projection_red.py \
+            tests/core/test_worker_ack_authority_contract.py \
+            -q --tb=short | tee sprint84_7c2_worker.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_worker.txt
+          grep -Eq '(^|[^0-9])43 passed' sprint84_7c2_worker.txt
+
+      - name: Sprint 83.7 regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/core/test_production_scheduler_composition_contract.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            -q --tb=short | tee sprint84_7c2_83_7.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_83_7.txt
+          grep -Eq '(^|[^0-9])174 passed' sprint84_7c2_83_7.txt
+
+      - name: Sprint 83.8 regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_product_alpha_profile.py \
+            tests/unit/test_product_alpha_worker_capabilities.py \
+            tests/unit/test_product_alpha_readiness.py \
+            tests/unit/test_product_alpha_run_shape.py \
+            tests/unit/test_product_alpha_failure_contract.py \
+            tests/unit/test_submission_idempotency.py \
+            tests/core/test_production_run_finalization_binding.py \
+            tests/core/test_production_scheduler_composition_contract.py \
+            tests/unit/test_run_submission_coordinator.py \
+            tests/unit/test_run_status_result_read_model.py \
+            tests/unit/test_user_facing_run_result.py \
+            tests/integration/test_run_status_result_read_model_integration.py \
+            tests/integration/test_product_alpha_closure_e2e_83_7.py \
+            tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py \
+            -q --tb=short | tee sprint84_7c2_83_8.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7c2_83_8.txt
+          grep -Eq '(^|[^0-9])199 passed' sprint84_7c2_83_8.txt
+
+      - name: Authority audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/authority_audit.py \
+            --repo-root . \
+            --format dashboard \
+            --output sprint84_7c2_authority.json \
+            --fail-on banned
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("sprint84_7c2_authority.json").read_text(encoding="utf-8"))
+          counts = data.get("counts") or data.get("summary") or {}
+          banned = int(counts.get("banned", data.get("banned", 0)) or 0)
+          assert banned == 0, data
+          print("SPRINT84_7C2_AUTHORITY", {
+              "status": data.get("authority_status") or data.get("status"),
+              "allowed": counts.get("allowed", data.get("allowed")),
+              "banned": banned,
+              "scanned": counts.get("scanned", data.get("scanned")),
+              "suspicious": counts.get("suspicious", data.get("suspicious")),
+              "risk_bearing_suspicious": counts.get(
+                  "risk_bearing_suspicious",
+                  data.get("risk_bearing_suspicious"),
+              ),
+          })
+          PY
+
+      - name: Workflow YAML, compile, and diff hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          path = Path(".github/workflows/sprint84-7c2-task-terminal-production-composition.yml")
+          loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+          assert isinstance(loaded, dict) and "jobs" in loaded
+          print("SPRINT84_7C2_WORKFLOW_YAML_OK")
+          PY
+          python -m compileall -q \
+            hfa-worker/src/hfa_worker/main.py \
+            hfa-worker/src/hfa_worker/process_root.py \
+            tests/core/test_production_worker_terminal_composition_contract.py \
+            tests/core/test_production_worker_process_root_terminal_contract.py \
+            tests/integration/test_worker_task_terminal_canonical_composition_integration.py
+          git diff --check "$PR_BASE_SHA...HEAD"
