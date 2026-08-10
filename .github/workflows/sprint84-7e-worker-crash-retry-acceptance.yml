@@ -5,6 +5,7 @@ on:
     branches: [baseline/local-import]
     paths:
       - 'hfa-worker/src/hfa_worker/main.py'
+      - 'hfa-control/src/hfa_control/run_terminate_authority.py'
       - 'hfa-worker/src/hfa_worker/run_finalizing_runtime.py'
       - 'tests/core/test_production_worker_crash_retry_contract.py'
       - 'tests/integration/test_worker_crash_retry_canonical_composition_integration.py'
@@ -87,7 +88,6 @@ jobs:
               "hfa-control/src/hfa_control/task_terminal_authority.py",
               "hfa-control/src/hfa_control/task_claim_authority.py",
               "hfa-control/src/hfa_control/task_claim.py",
-              "hfa-control/src/hfa_control/run_terminate_authority.py",
               "hfa-control/src/hfa_control/run_termination.py",
               "hfa-worker/src/hfa_worker/consumer.py",
               "hfa-worker/src/hfa_worker/task_consumer.py",
@@ -96,6 +96,13 @@ jobs:
               "hfa-core/src/hfa/lua/task_requeue.lua",
               "hfa-core/src/hfa/lua/task_complete.lua",
           ]
+          # Sprint 84.8 adds only optional settlement composition to RUN_TERMINATE.
+          # Preserve the original byte lock on the original E feature branch,
+          # while later regression branches prove E behavior instead of stale bytes.
+          if os.environ["PR_HEAD_BRANCH"] == "sprint/84-7e-worker-crash-retry-acceptance":
+              frozen.append(
+                  "hfa-control/src/hfa_control/run_terminate_authority.py"
+              )
           parent=os.environ["ACCEPTED_PARENT"]
           for path in frozen:
               expected=subprocess.check_output(["git","rev-parse",f"{parent}:{path}"],text=True).strip()

@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from hfa.dag.heartbeat import HeartbeatPolicy
 from hfa.events.schema import RunRequestedEvent
+from hfa.governance.admission_resource_reservation import AdmissionResourceReservationManager
 from hfa_control.dag_lua import DagLua
 from hfa_control.task_claim import TaskClaimManager
 from hfa_control.task_recovery import TaskHeartbeatManager
@@ -258,6 +259,29 @@ class WorkerService:
                 "canonical_task_terminal_binding requires the canonical "
                 "TASK_ADMIT/TASK_DISPATCH/TASK_CLAIM dependency chain"
             )
+        canonical_resource_settlement_binding = config.get(
+            "canonical_resource_settlement_binding",
+            False,
+        )
+        if type(canonical_resource_settlement_binding) is not bool:
+            raise ValueError(
+                "canonical_resource_settlement_binding must be a boolean"
+            )
+        self._canonical_resource_settlement_binding_enabled = (
+            canonical_resource_settlement_binding
+        )
+        if self._canonical_resource_settlement_binding_enabled and not self._production:
+            raise ValueError(
+                "canonical_resource_settlement_binding requires production=True"
+            )
+        if self._canonical_resource_settlement_binding_enabled and not self._canonical_task_terminal_binding_enabled:
+            raise ValueError(
+                "canonical_resource_settlement_binding requires canonical_task_terminal_binding=True"
+            )
+        if self._canonical_resource_settlement_binding_enabled and not self._run_termination_binding_enabled:
+            raise ValueError(
+                "canonical_resource_settlement_binding requires run_termination_binding_enabled=True"
+            )
         configured_worker_id = str(config.get("worker_id") or "").strip()
         if self._production and not configured_worker_id:
             raise ValueError(
@@ -367,6 +391,9 @@ class WorkerService:
         self._task_consumer: TaskConsumer | None = None
         self._run_termination_coordinator: RunTerminationCoordinator | None = None
         self._run_terminate_authority_binding: RunTerminateAuthorityBinding | None = None
+        self._resource_settlement_manager: (
+            AdmissionResourceReservationManager | None
+        ) = None
         self._task_terminal_authority_binding: (
             TaskTerminalAuthorityBinding | None
         ) = None
@@ -411,8 +438,15 @@ class WorkerService:
                 )
                 completion_manager = self._task_terminal_completion_gateway
                 if self._run_termination_binding_enabled:
+                    if self._canonical_resource_settlement_binding_enabled:
+                        self._resource_settlement_manager = (
+                            AdmissionResourceReservationManager(redis)
+                        )
                     self._run_terminate_authority_binding = (
-                        RunTerminateAuthorityBinding(redis)
+                        RunTerminateAuthorityBinding(
+                            redis,
+                            resource_manager=self._resource_settlement_manager,
+                        )
                     )
                     self._run_termination_coordinator = RunTerminationCoordinator(
                         redis,
@@ -567,6 +601,10 @@ class WorkerService:
     @property
     def canonical_task_terminal_binding_enabled(self) -> bool:
         return self._canonical_task_terminal_binding_enabled
+
+    @property
+    def canonical_resource_settlement_binding_enabled(self) -> bool:
+        return self._canonical_resource_settlement_binding_enabled
 
     @property
     def product_profile(self) -> WorkerProductProfile:

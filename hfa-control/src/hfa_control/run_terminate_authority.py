@@ -32,7 +32,18 @@ from hfa.authority import (
 )
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.schema import DagRedisKey
+from hfa.governance.admission_resource_reservation import (
+    AdmissionResourceReservationManager,
+    AdmissionResourceSettlementInput,
+    RESERVATION_STATE_SETTLED,
+    RESERVATION_STATUS_ALREADY_SETTLED,
+    RESERVATION_STATUS_SETTLED,
+)
 from hfa.lua.loader import LuaScriptLoader
+from hfa_control.run_create_authority import (
+    resource_reservation_from_run_create_record,
+    run_create_operation_id,
+)
 
 WRITER_ID = "hfa-control/run-terminate-writer:v1"
 PROOF_SCHEMA_VERSION = 1
@@ -45,6 +56,7 @@ ALREADY_PROJECTED_STATUS = "canonical_run_terminate_already_projected"
 PROJECTION_CONFLICT_STATUS = "canonical_run_terminate_projection_conflict"
 PROJECTION_PENDING_STATUS = "canonical_projection_pending"
 AUTHORITY_CONFLICT_STATUS = "canonical_run_terminate_authority_conflict"
+RESOURCE_SETTLEMENT_PENDING_STATUS = "canonical_resource_settlement_pending"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_INTEGER_MAX = 2**53 - 1
@@ -730,15 +742,19 @@ class RunTerminateAuthorityBinding:
         store: RedisCanonicalAuthorityStore | None = None,
         proof_manager: TerminalAggregateProofManager | None = None,
         projection_manager: RunTerminateProjectionManager | None = None,
+        resource_manager: AdmissionResourceReservationManager | None = None,
     ) -> None:
         self.redis = redis
         self.store = store or RedisCanonicalAuthorityStore(redis)
         self.proof_manager = proof_manager or TerminalAggregateProofManager(redis)
         self.projection_manager = projection_manager or RunTerminateProjectionManager(redis)
+        self.resource_manager = resource_manager
 
     async def initialise(self) -> None:
         await self.store.initialise()
         await self.proof_manager.initialise()
+        if self.resource_manager is not None:
+            await self.resource_manager.initialise()
         await self.projection_manager.initialise()
 
     async def _validate_exact_head(self, record: Any, receipt: Any) -> None:
@@ -779,6 +795,119 @@ class RunTerminateAuthorityBinding:
             )
         await self._validate_exact_head(record, probe.receipt)
         return record, probe.receipt
+
+    async def _resource_reservation_for_terminal_record(
+        self,
+        *,
+        terminal_record: Any,
+        proof: TerminalAggregateProof,
+    ):
+        operation_id = run_create_operation_id(proof.run_id)
+        identity = run_terminate_identity(proof.run_id)
+        try:
+            probe = await self.store.load_receipt_probe(identity, operation_id)
+        except (RedisAuthorityCorruptionError, RedisAuthorityPersistenceError) as exc:
+            raise RunTerminateAuthorityError(
+                RESOURCE_SETTLEMENT_PENDING_STATUS,
+                f"RUN_CREATE settlement evidence unavailable: {exc}",
+                canonical_commit_durable=True,
+            ) from exc
+        if probe is None or probe.canonical_store_record is None:
+            raise RunTerminateAuthorityError(
+                RESOURCE_SETTLEMENT_PENDING_STATUS,
+                "canonical RUN_CREATE record/receipt required for settlement",
+                canonical_commit_durable=True,
+            )
+        record = probe.canonical_store_record
+        receipt = probe.receipt
+        checks = (
+            record.aggregate_identity.sha256 == identity.sha256,
+            record.aggregate_identity_sha256 == identity.sha256,
+            record.operation_type == OperationType.RUN_CREATE.value,
+            record.operation_id == operation_id,
+            record.from_revision == 0,
+            record.to_revision == 1,
+            receipt.operation_id == record.operation_id,
+            receipt.transition_id == record.transition_id,
+            receipt.canonical_command_hash == record.canonical_command_hash,
+            receipt.canonical_record_hash == record.canonical_record_hash,
+            receipt.aggregate_revision == record.to_revision,
+            receipt.operation_type == record.operation_type,
+            bool(record.verify_hash()),
+            terminal_record.from_revision == record.to_revision,
+        )
+        if not all(checks):
+            raise RunTerminateAuthorityError(
+                RESOURCE_SETTLEMENT_PENDING_STATUS,
+                "canonical RUN_CREATE settlement proof continuity mismatch",
+                canonical_commit_durable=True,
+            )
+        try:
+            reservation = resource_reservation_from_run_create_record(record)
+        except (TypeError, ValueError) as exc:
+            raise RunTerminateAuthorityError(
+                RESOURCE_SETTLEMENT_PENDING_STATUS,
+                f"canonical RUN_CREATE reservation reconstruction failed: {exc}",
+                canonical_commit_durable=True,
+            ) from exc
+        if reservation.run_id != proof.run_id or reservation.tenant_id != proof.tenant_id:
+            raise RunTerminateAuthorityError(
+                RESOURCE_SETTLEMENT_PENDING_STATUS,
+                "RUN_CREATE settlement identity does not match terminal proof",
+                canonical_commit_durable=True,
+            )
+        return reservation
+
+    async def _settle_resources(
+        self,
+        *,
+        terminal_record: Any,
+        proof: TerminalAggregateProof,
+    ) -> None:
+        manager = self.resource_manager
+        if manager is None:
+            return
+        reservation = await self._resource_reservation_for_terminal_record(
+            terminal_record=terminal_record,
+            proof=proof,
+        )
+        settlement = AdmissionResourceSettlementInput(
+            run_create_operation_id=reservation.operation_id,
+            run_id=reservation.run_id,
+            tenant_id=reservation.tenant_id,
+            estimated_cost_cents=reservation.estimated_cost_cents,
+            run_create_reservation_proof_sha256=reservation.proof_sha256,
+            run_terminate_operation_id=terminal_record.operation_id,
+            terminal_proof_sha256=proof.proof_sha256,
+            canonical_transition_id=terminal_record.transition_id,
+            canonical_record_hash=terminal_record.canonical_record_hash,
+            canonical_command_hash=terminal_record.canonical_command_hash,
+            canonical_revision=terminal_record.to_revision,
+            final_state=proof.final_state,
+        )
+        try:
+            settled = await manager.settle_once(
+                settlement,
+                now_ms=proof.finalized_at_ms,
+            )
+        except Exception as exc:
+            raise RunTerminateAuthorityError(
+                RESOURCE_SETTLEMENT_PENDING_STATUS,
+                f"resource settlement failed after durable RUN_TERMINATE: {exc}",
+                canonical_commit_durable=True,
+            ) from exc
+        if (
+            settled.status not in {
+                RESERVATION_STATUS_SETTLED,
+                RESERVATION_STATUS_ALREADY_SETTLED,
+            }
+            or settled.state != RESERVATION_STATE_SETTLED
+        ):
+            raise RunTerminateAuthorityError(
+                RESOURCE_SETTLEMENT_PENDING_STATUS,
+                f"resource settlement blocked: {settled.status}",
+                canonical_commit_durable=True,
+            )
 
     async def terminate(
         self,
@@ -955,6 +1084,11 @@ class RunTerminateAuthorityBinding:
         if record.canonical_command_hash != command.canonical_command_hash:
             raise RunTerminateProjectionPendingError("canonical RUN_TERMINATE command hash mismatch")
 
+        await self._settle_resources(
+            terminal_record=record,
+            proof=proof,
+        )
+
         try:
             projected = await self.projection_manager.project(
                 RunTerminateProjectionInput(
@@ -1002,6 +1136,7 @@ __all__ = [
     "PROJECTED_STATUS",
     "PROJECTION_CONFLICT_STATUS",
     "PROJECTION_PENDING_STATUS",
+    "RESOURCE_SETTLEMENT_PENDING_STATUS",
     "PROOF_SCHEMA_VERSION",
     "RunTerminateAuthorityBinding",
     "RunTerminateAuthorityError",
