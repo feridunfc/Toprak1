@@ -176,7 +176,8 @@ jobs:
           assert "resource_manager: AdmissionResourceReservationManager | None = None" in terminate
           assert "await self._settle_resources(" in terminate
           assert terminate.index("await self._validate_exact_head(record, canonical_receipt)") < terminate.index("await self._settle_resources(") < terminate.index("projected = await self.projection_manager.project")
-          assert 'config.get("canonical_resource_settlement_binding"' in main
+          assert 'canonical_resource_settlement_binding = config.get(' in main
+          assert '"canonical_resource_settlement_binding",' in main
           assert "resource_manager=self._resource_settlement_manager" in main
           assert "HFA_CANONICAL_RESOURCE_SETTLEMENT_BINDING" in root
           product="\n".join((resource,lua,create,terminate,main,root))

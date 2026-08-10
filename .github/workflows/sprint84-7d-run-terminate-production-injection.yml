@@ -151,7 +151,8 @@ jobs:
           assert "class RunTerminateAuthorityBinding" not in main
           assert "canonical_task_terminal_binding cannot be combined" not in main
           assert "RunTerminateAuthorityBinding(" in main
-          assert 'config.get("canonical_resource_settlement_binding",' in main
+          assert 'canonical_resource_settlement_binding = config.get(' in main
+          assert '"canonical_resource_settlement_binding",' in main
           assert "resource_manager=self._resource_settlement_manager" in main
           assert "authority_binding=self._run_terminate_authority_binding" in main
           assert "self._task_terminal_completion_gateway" in main
