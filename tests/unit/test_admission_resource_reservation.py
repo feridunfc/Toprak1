@@ -8,15 +8,18 @@ from hfa.governance import admission_resource_reservation as reservation_module
 from hfa.governance.admission_resource_reservation import (
     AdmissionResourceReservationInput,
     AdmissionResourceReservationManager,
+    AdmissionResourceSettlementInput,
     RELEASED_RECEIPT_TTL_SECONDS,
     RESERVATION_STATUS_ALREADY_FINALIZED,
     RESERVATION_STATUS_ALREADY_RELEASED,
     RESERVATION_STATUS_ALREADY_RESERVED,
+    RESERVATION_STATUS_ALREADY_SETTLED,
     RESERVATION_STATUS_CONFLICT,
     RESERVATION_STATUS_FINALIZED,
     RESERVATION_STATUS_RELEASED,
     RESERVATION_STATUS_RESERVED,
     RESERVATION_STATUS_RESOURCE_STATE_CONFLICT,
+    RESERVATION_STATUS_SETTLED,
     RESERVATION_STATUS_STATE_CONFLICT,
 )
 
@@ -121,9 +124,55 @@ class ModelLoader:
                 return [RESERVATION_STATUS_CONFLICT, receipt["state"], "0"]
 
             state = receipt["state"]
+            if action == "settle":
+                terminal = args[12:20]
+                if state == "SETTLED":
+                    stored_terminal = [
+                        receipt["run_terminate_operation_id"],
+                        receipt["terminal_proof_sha256"],
+                        receipt["canonical_transition_id"],
+                        receipt["canonical_record_hash"],
+                        receipt["canonical_command_hash"],
+                        receipt["canonical_revision"],
+                        receipt["final_state"],
+                        receipt["settlement_proof_sha256"],
+                    ]
+                    if stored_terminal != terminal:
+                        return [RESERVATION_STATUS_CONFLICT, state, "0"]
+                    return [RESERVATION_STATUS_ALREADY_SETTLED, state, "0"]
+                if state != "FINALIZED":
+                    return [RESERVATION_STATUS_STATE_CONFLICT, state, "0"]
+                if self.ttls.get(receipt_key) != -1:
+                    return [RESERVATION_STATUS_RESOURCE_STATE_CONFLICT, state, "0"]
+                active = self._active(resource_keys, cost)
+                if active is None:
+                    return [RESERVATION_STATUS_RESOURCE_STATE_CONFLICT, state, "0"]
+                for key, value in zip(
+                    resource_keys,
+                    [active[0] - 1, active[1] - cost, active[2] - 1],
+                ):
+                    self.set_counter(key, value)
+                receipt.update({
+                    "state": "SETTLED",
+                    "settled_at_ms": now_ms,
+                    "run_terminate_operation_id": terminal[0],
+                    "terminal_proof_sha256": terminal[1],
+                    "canonical_transition_id": terminal[2],
+                    "canonical_record_hash": terminal[3],
+                    "canonical_command_hash": terminal[4],
+                    "canonical_revision": terminal[5],
+                    "final_state": terminal[6],
+                    "settlement_proof_sha256": terminal[7],
+                })
+                self.ttls[receipt_key] = -1
+                self.mutation_count += 4
+                return [RESERVATION_STATUS_SETTLED, "SETTLED", "1"]
+
             if action == "reserve":
                 if state == "RELEASED":
                     return [RESERVATION_STATUS_ALREADY_RELEASED, state, "0"]
+                if state == "SETTLED":
+                    return [RESERVATION_STATUS_STATE_CONFLICT, state, "0"]
                 if self.ttls.get(receipt_key) != -1 or self._active(resource_keys, cost) is None:
                     return [RESERVATION_STATUS_RESOURCE_STATE_CONFLICT, state, "0"]
                 return [
@@ -137,6 +186,8 @@ class ModelLoader:
             if action == "finalize":
                 if state == "RELEASED":
                     return [RESERVATION_STATUS_STATE_CONFLICT, state, "0"]
+                if state == "SETTLED":
+                    return [RESERVATION_STATUS_STATE_CONFLICT, state, "0"]
                 if self.ttls.get(receipt_key) != -1 or self._active(resource_keys, cost) is None:
                     return [RESERVATION_STATUS_RESOURCE_STATE_CONFLICT, state, "0"]
                 if state == "FINALIZED":
@@ -148,6 +199,8 @@ class ModelLoader:
 
             if state == "RELEASED":
                 return [RESERVATION_STATUS_ALREADY_RELEASED, state, "0"]
+            if state == "SETTLED":
+                return [RESERVATION_STATUS_STATE_CONFLICT, state, "0"]
             if state == "FINALIZED":
                 return [RESERVATION_STATUS_STATE_CONFLICT, state, "0"]
             if self.ttls.get(receipt_key) != -1:
@@ -236,6 +289,25 @@ def unbounded_limits():
         "budget_limit_cents": None,
         "tenant_inflight_limit": None,
     }
+
+
+def settlement_input(
+    reservation: AdmissionResourceReservationInput,
+) -> AdmissionResourceSettlementInput:
+    return AdmissionResourceSettlementInput(
+        run_create_operation_id=reservation.operation_id,
+        run_id=reservation.run_id,
+        tenant_id=reservation.tenant_id,
+        estimated_cost_cents=reservation.estimated_cost_cents,
+        run_create_reservation_proof_sha256=reservation.proof_sha256,
+        run_terminate_operation_id=f"run-terminate:v1:{HEX_B}",
+        terminal_proof_sha256=HEX_A,
+        canonical_transition_id="transition-84-8",
+        canonical_record_hash=HEX_A,
+        canonical_command_hash=HEX_B,
+        canonical_revision=2,
+        final_state="done",
+    )
 
 
 def test_exact_operation_id_is_accepted():
@@ -480,6 +552,95 @@ async def test_safe_integer_exact_boundaries_remain_valid():
     )
     assert result.status == RESERVATION_STATUS_RESERVED
     assert [int(model.strings[key]) for key in keys] == [MAX_SAFE_INTEGER] * 3
+
+
+@pytest.mark.asyncio
+async def test_settle_finalized_is_exact_once_and_keeps_receipt_persistent():
+    manager, model = manager_and_model()
+    reservation = make_input()
+    await manager.reserve_once(reservation, now_ms=1000, **limits())
+    await manager.finalize_once(reservation, now_ms=2000)
+    settlement = settlement_input(reservation)
+    first = await manager.settle_once(settlement, now_ms=3000)
+    second = await manager.settle_once(settlement, now_ms=4000)
+    receipt_key = manager.reservation_receipt_key(reservation.operation_id)
+    assert first.status == RESERVATION_STATUS_SETTLED
+    assert first.resource_mutated is True
+    assert second.status == RESERVATION_STATUS_ALREADY_SETTLED
+    assert second.resource_mutated is False
+    assert model.receipts[receipt_key]["state"] == "SETTLED"
+    assert model.ttls[receipt_key] == -1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("counter_index", [0, 1, 2])
+async def test_settle_resource_drift_fails_closed_before_any_mutation(counter_index):
+    manager, model = manager_and_model()
+    reservation = make_input()
+    await manager.reserve_once(reservation, now_ms=1000, **limits())
+    await manager.finalize_once(reservation, now_ms=2000)
+    keys = model.calls[-1]["keys"]
+    target = keys[counter_index + 1]
+    model.strings.pop(target, None)
+    model.types.pop(target, None)
+    model.ttls.pop(target, None)
+    before = model.mutation_count
+    result = await manager.settle_once(settlement_input(reservation), now_ms=3000)
+    assert result.status == RESERVATION_STATUS_RESOURCE_STATE_CONFLICT
+    assert result.resource_mutated is False
+    assert model.mutation_count == before
+    assert model.receipts[keys[0]]["state"] == "FINALIZED"
+
+
+@pytest.mark.asyncio
+async def test_settled_receipt_rejects_changed_terminal_proof_without_mutation():
+    manager, model = manager_and_model()
+    reservation = make_input()
+    await manager.reserve_once(reservation, now_ms=1000, **limits())
+    await manager.finalize_once(reservation, now_ms=2000)
+    exact = settlement_input(reservation)
+    await manager.settle_once(exact, now_ms=3000)
+    before = model.mutation_count
+    changed = AdmissionResourceSettlementInput(
+        **{**exact.__dict__, "canonical_record_hash": HEX_B}
+    )
+    result = await manager.settle_once(changed, now_ms=4000)
+    assert result.status == RESERVATION_STATUS_CONFLICT
+    assert result.resource_mutated is False
+    assert model.mutation_count == before
+
+
+@pytest.mark.asyncio
+async def test_released_receipt_can_never_be_terminally_settled():
+    manager, model = manager_and_model()
+    reservation = make_input()
+    await manager.reserve_once(reservation, now_ms=1000, **limits())
+    await manager.release_once(reservation, now_ms=2000)
+    result = await manager.settle_once(settlement_input(reservation), now_ms=3000)
+    assert result.status == RESERVATION_STATUS_STATE_CONFLICT
+    assert model.receipts[manager.reservation_receipt_key(reservation.operation_id)]["state"] == "RELEASED"
+
+
+@pytest.mark.asyncio
+async def test_settled_receipt_cannot_return_to_finalize_or_release():
+    manager, _model = manager_and_model()
+    reservation = make_input()
+    await manager.reserve_once(reservation, now_ms=1000, **limits())
+    await manager.finalize_once(reservation, now_ms=2000)
+    await manager.settle_once(settlement_input(reservation), now_ms=3000)
+    assert (await manager.finalize_once(reservation, now_ms=4000)).status == RESERVATION_STATUS_STATE_CONFLICT
+    assert (await manager.release_once(reservation, now_ms=4000)).status == RESERVATION_STATUS_STATE_CONFLICT
+
+
+def test_lua_contract_contains_terminal_settlement_without_clamp_or_repair():
+    lua_path = Path(reservation_module.__file__).resolve().parent.parent / "lua" / "admission_resource_reservation.lua"
+    source = lua_path.read_text(encoding="utf-8")
+    assert "action == 'settle'" in source
+    assert "'state', 'SETTLED'" in source
+    assert "'settlement_proof_sha256'" in source
+    assert "return {'already_settled', state, '0'}" in source
+    assert "redis.call('PERSIST', receipt_key)" in source
+    assert "math.max" not in source
 
 
 def test_lua_contract_closes_ttl_type_and_safe_integer_gaps():

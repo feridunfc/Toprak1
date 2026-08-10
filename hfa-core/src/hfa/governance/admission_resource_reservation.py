@@ -24,13 +24,17 @@ __all__ = [
     "AdmissionResourceReservationManager",
     "AdmissionResourceReservationReceipt",
     "AdmissionResourceReservationResult",
+    "AdmissionResourceSettlementInput",
+    "AdmissionResourceSettlementResult",
     "RELEASED_RECEIPT_TTL_SECONDS",
     "RESERVATION_STATE_FINALIZED",
     "RESERVATION_STATE_RELEASED",
     "RESERVATION_STATE_RESERVED",
+    "RESERVATION_STATE_SETTLED",
     "RESERVATION_STATUS_ALREADY_FINALIZED",
     "RESERVATION_STATUS_ALREADY_RELEASED",
     "RESERVATION_STATUS_ALREADY_RESERVED",
+    "RESERVATION_STATUS_ALREADY_SETTLED",
     "RESERVATION_STATUS_BUDGET_EXCEEDED",
     "RESERVATION_STATUS_CONFLICT",
     "RESERVATION_STATUS_FINALIZED",
@@ -41,12 +45,15 @@ __all__ = [
     "RESERVATION_STATUS_RELEASED",
     "RESERVATION_STATUS_RESERVED",
     "RESERVATION_STATUS_RESOURCE_STATE_CONFLICT",
+    "RESERVATION_STATUS_SETTLED",
     "RESERVATION_STATUS_STATE_CONFLICT",
 ]
 
 _MAX_SAFE_INTEGER = 2**53 - 1
 _RESERVATION_VERSION = 1
 _OPERATION_ID_PATTERN = re.compile(r"^run-create:v1:[0-9a-f]{64}$")
+_RUN_TERMINATE_OPERATION_ID_PATTERN = re.compile(r"^run-terminate:v1:[0-9a-f]{64}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RELEASED_RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60
 
 RESERVATION_STATUS_RESERVED = "reserved"
@@ -55,6 +62,8 @@ RESERVATION_STATUS_FINALIZED = "finalized"
 RESERVATION_STATUS_ALREADY_FINALIZED = "already_finalized"
 RESERVATION_STATUS_RELEASED = "released"
 RESERVATION_STATUS_ALREADY_RELEASED = "already_released"
+RESERVATION_STATUS_SETTLED = "settled"
+RESERVATION_STATUS_ALREADY_SETTLED = "already_settled"
 RESERVATION_STATUS_CONFLICT = "reservation_conflict"
 RESERVATION_STATUS_STATE_CONFLICT = "reservation_state_conflict"
 RESERVATION_STATUS_RESOURCE_STATE_CONFLICT = "resource_state_conflict"
@@ -67,6 +76,7 @@ RESERVATION_STATUS_INVALID_INPUT = "invalid_input"
 RESERVATION_STATE_RESERVED = "RESERVED"
 RESERVATION_STATE_FINALIZED = "FINALIZED"
 RESERVATION_STATE_RELEASED = "RELEASED"
+RESERVATION_STATE_SETTLED = "SETTLED"
 
 
 def _required_exact_text(value: Any, field_name: str) -> str:
@@ -79,6 +89,13 @@ def _required_exact_text(value: Any, field_name: str) -> str:
     if unicodedata.normalize("NFC", value) != value:
         raise ValueError(f"{field_name} must already be NFC-normalized")
     return value
+
+
+def _required_sha256_text(value: Any, field_name: str) -> str:
+    normalized = _required_exact_text(value, field_name)
+    if _SHA256_PATTERN.fullmatch(normalized) is None:
+        raise ValueError(f"{field_name} must be lowercase SHA-256")
+    return normalized
 
 
 def _safe_integer(value: Any, field_name: str, *, minimum: int = 0) -> int:
@@ -193,6 +210,92 @@ class AdmissionResourceReservationInput:
 
 
 @dataclass(frozen=True)
+class AdmissionResourceSettlementInput:
+    run_create_operation_id: str
+    run_id: str
+    tenant_id: str
+    estimated_cost_cents: int
+    run_create_reservation_proof_sha256: str
+    run_terminate_operation_id: str
+    terminal_proof_sha256: str
+    canonical_transition_id: str
+    canonical_record_hash: str
+    canonical_command_hash: str
+    canonical_revision: int
+    final_state: str
+
+    def __post_init__(self) -> None:
+        run_create_operation_id = _required_exact_text(
+            self.run_create_operation_id, "run_create_operation_id"
+        )
+        if _OPERATION_ID_PATTERN.fullmatch(run_create_operation_id) is None:
+            raise ValueError("run_create_operation_id is invalid")
+        run_terminate_operation_id = _required_exact_text(
+            self.run_terminate_operation_id, "run_terminate_operation_id"
+        )
+        if _RUN_TERMINATE_OPERATION_ID_PATTERN.fullmatch(run_terminate_operation_id) is None:
+            raise ValueError("run_terminate_operation_id is invalid")
+        run_id = _required_exact_text(self.run_id, "run_id")
+        tenant_id = _required_exact_text(self.tenant_id, "tenant_id")
+        estimated_cost_cents = _safe_integer(
+            self.estimated_cost_cents, "estimated_cost_cents"
+        )
+        reservation_proof = _required_sha256_text(
+            self.run_create_reservation_proof_sha256,
+            "run_create_reservation_proof_sha256",
+        )
+        expected_reservation = AdmissionResourceReservationInput(
+            operation_id=run_create_operation_id,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            estimated_cost_cents=estimated_cost_cents,
+        )
+        if reservation_proof != expected_reservation.proof_sha256:
+            raise ValueError("run_create reservation proof does not match immutable input")
+        terminal_proof = _required_sha256_text(
+            self.terminal_proof_sha256, "terminal_proof_sha256"
+        )
+        canonical_record_hash = _required_sha256_text(
+            self.canonical_record_hash, "canonical_record_hash"
+        )
+        canonical_command_hash = _required_sha256_text(
+            self.canonical_command_hash, "canonical_command_hash"
+        )
+        canonical_transition_id = _required_exact_text(
+            self.canonical_transition_id, "canonical_transition_id"
+        )
+        canonical_revision = _safe_integer(
+            self.canonical_revision, "canonical_revision", minimum=1
+        )
+        final_state = _required_exact_text(self.final_state, "final_state")
+        if final_state not in {"done", "failed"}:
+            raise ValueError("final_state must be done or failed")
+        object.__setattr__(self, "run_create_operation_id", run_create_operation_id)
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "tenant_id", tenant_id)
+        object.__setattr__(self, "estimated_cost_cents", estimated_cost_cents)
+        object.__setattr__(self, "run_create_reservation_proof_sha256", reservation_proof)
+        object.__setattr__(self, "run_terminate_operation_id", run_terminate_operation_id)
+        object.__setattr__(self, "terminal_proof_sha256", terminal_proof)
+        object.__setattr__(self, "canonical_transition_id", canonical_transition_id)
+        object.__setattr__(self, "canonical_record_hash", canonical_record_hash)
+        object.__setattr__(self, "canonical_command_hash", canonical_command_hash)
+        object.__setattr__(self, "canonical_revision", canonical_revision)
+        object.__setattr__(self, "final_state", final_state)
+
+    @property
+    def proof_sha256(self) -> str:
+        return _component_sha256(
+            "admission-resource-settlement", self.run_create_operation_id,
+            self.run_id, self.tenant_id, str(self.estimated_cost_cents),
+            self.run_create_reservation_proof_sha256,
+            self.run_terminate_operation_id, self.terminal_proof_sha256,
+            self.canonical_transition_id, self.canonical_record_hash,
+            self.canonical_command_hash, str(self.canonical_revision), self.final_state,
+        )
+
+
+@dataclass(frozen=True)
 class AdmissionResourceReservationResult:
     status: str
     operation_id: str
@@ -209,6 +312,24 @@ class AdmissionResourceReservationResult:
             RESERVATION_STATUS_ALREADY_FINALIZED,
             RESERVATION_STATUS_RELEASED,
             RESERVATION_STATUS_ALREADY_RELEASED,
+            RESERVATION_STATUS_SETTLED,
+            RESERVATION_STATUS_ALREADY_SETTLED,
+        }
+
+
+@dataclass(frozen=True)
+class AdmissionResourceSettlementResult:
+    status: str
+    run_create_operation_id: str
+    settlement_proof_sha256: str
+    resource_mutated: bool
+    state: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {
+            RESERVATION_STATUS_SETTLED,
+            RESERVATION_STATUS_ALREADY_SETTLED,
         }
 
 
@@ -224,6 +345,15 @@ class AdmissionResourceReservationReceipt:
     created_at_ms: int
     finalized_at_ms: int | None
     released_at_ms: int | None
+    settled_at_ms: int | None = None
+    settlement_proof_sha256: str = ""
+    run_terminate_operation_id: str = ""
+    terminal_proof_sha256: str = ""
+    canonical_transition_id: str = ""
+    canonical_record_hash: str = ""
+    canonical_command_hash: str = ""
+    canonical_revision: int | None = None
+    final_state: str = ""
 
 
 class AdmissionResourceReservationError(RuntimeError):
@@ -343,6 +473,58 @@ class AdmissionResourceReservationManager:
             tenant_inflight_limit=None,
         )
 
+    async def settle_once(
+        self,
+        settlement: AdmissionResourceSettlementInput,
+        *,
+        now_ms: int | None = None,
+    ) -> AdmissionResourceSettlementResult:
+        if not isinstance(settlement, AdmissionResourceSettlementInput):
+            raise TypeError("settlement must be AdmissionResourceSettlementInput")
+        await self.initialise()
+        assert self._loader is not None
+        actual_now_ms = self._now_ms(now_ms)
+        raw = await self._loader.run(
+            num_keys=4,
+            keys=[
+                self.reservation_receipt_key(settlement.run_create_operation_id),
+                self.concurrent_run_key(settlement.tenant_id),
+                self.budget_reserved_key(settlement.tenant_id),
+                RedisKey.tenant_inflight(settlement.tenant_id),
+            ],
+            args=[
+                "settle",
+                settlement.run_create_operation_id,
+                settlement.run_id,
+                settlement.tenant_id,
+                str(settlement.estimated_cost_cents),
+                str(_RESERVATION_VERSION),
+                settlement.run_create_reservation_proof_sha256,
+                str(actual_now_ms),
+                "-1", "-1", "-1",
+                str(self._released_receipt_ttl_seconds),
+                settlement.run_terminate_operation_id,
+                settlement.terminal_proof_sha256,
+                settlement.canonical_transition_id,
+                settlement.canonical_record_hash,
+                settlement.canonical_command_hash,
+                str(settlement.canonical_revision),
+                settlement.final_state,
+                settlement.proof_sha256,
+            ],
+        )
+        if not isinstance(raw, (list, tuple)) or len(raw) < 3:
+            raise AdmissionResourceReservationError(
+                f"invalid Lua settlement result: {raw!r}"
+            )
+        return AdmissionResourceSettlementResult(
+            status=_decode(raw[0]),
+            run_create_operation_id=settlement.run_create_operation_id,
+            settlement_proof_sha256=settlement.proof_sha256,
+            resource_mutated=_decode(raw[2]) == "1",
+            state=_decode(raw[1]),
+        )
+
     async def _execute(
         self,
         action: str,
@@ -434,6 +616,16 @@ class AdmissionResourceReservationManager:
                     int(values["released_at_ms"]), "released_at_ms"
                 )
             )
+            settled_at_ms = (
+                None
+                if not values.get("settled_at_ms")
+                else _safe_integer(int(values["settled_at_ms"]), "settled_at_ms")
+            )
+            canonical_revision = (
+                None
+                if not values.get("canonical_revision")
+                else _safe_integer(int(values["canonical_revision"]), "canonical_revision", minimum=1)
+            )
         except (KeyError, ValueError) as exc:
             raise AdmissionResourceReservationConflictError(
                 "stored reservation lifecycle metadata is invalid"
@@ -443,10 +635,34 @@ class AdmissionResourceReservationManager:
             RESERVATION_STATE_RESERVED,
             RESERVATION_STATE_FINALIZED,
             RESERVATION_STATE_RELEASED,
+            RESERVATION_STATE_SETTLED,
         }:
             raise AdmissionResourceReservationConflictError(
                 "stored reservation state is invalid"
             )
+        if state == RESERVATION_STATE_SETTLED:
+            try:
+                run_terminate_operation_id = _required_exact_text(
+                    values.get("run_terminate_operation_id", ""),
+                    "run_terminate_operation_id",
+                )
+                if _RUN_TERMINATE_OPERATION_ID_PATTERN.fullmatch(run_terminate_operation_id) is None:
+                    raise ValueError("run_terminate_operation_id is invalid")
+                _required_sha256_text(values.get("terminal_proof_sha256", ""), "terminal_proof_sha256")
+                _required_exact_text(values.get("canonical_transition_id", ""), "canonical_transition_id")
+                _required_sha256_text(values.get("canonical_record_hash", ""), "canonical_record_hash")
+                _required_sha256_text(values.get("canonical_command_hash", ""), "canonical_command_hash")
+                _required_sha256_text(values.get("settlement_proof_sha256", ""), "settlement_proof_sha256")
+                if canonical_revision is None:
+                    raise ValueError("canonical_revision is required for SETTLED")
+                if values.get("final_state") not in {"done", "failed"}:
+                    raise ValueError("final_state is invalid")
+                if settled_at_ms is None:
+                    raise ValueError("settled_at_ms is required")
+            except ValueError as exc:
+                raise AdmissionResourceReservationConflictError(
+                    "stored settlement evidence is invalid"
+                ) from exc
         return AdmissionResourceReservationReceipt(
             operation_id=reservation.operation_id,
             run_id=reservation.run_id,
@@ -458,6 +674,15 @@ class AdmissionResourceReservationManager:
             created_at_ms=created_at_ms,
             finalized_at_ms=finalized_at_ms,
             released_at_ms=released_at_ms,
+            settled_at_ms=settled_at_ms,
+            settlement_proof_sha256=values.get("settlement_proof_sha256", ""),
+            run_terminate_operation_id=values.get("run_terminate_operation_id", ""),
+            terminal_proof_sha256=values.get("terminal_proof_sha256", ""),
+            canonical_transition_id=values.get("canonical_transition_id", ""),
+            canonical_record_hash=values.get("canonical_record_hash", ""),
+            canonical_command_hash=values.get("canonical_command_hash", ""),
+            canonical_revision=canonical_revision,
+            final_state=values.get("final_state", ""),
         )
 
     async def get_resource_snapshot(self, tenant_id: str) -> dict[str, int]:

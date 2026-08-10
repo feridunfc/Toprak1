@@ -5,6 +5,7 @@ on:
     branches: [baseline/local-import]
     paths:
       - 'hfa-worker/src/hfa_worker/main.py'
+      - 'hfa-control/src/hfa_control/run_terminate_authority.py'
       - 'tests/core/test_production_worker_terminal_composition_contract.py'
       - '.github/workflows/sprint84-7c2-task-terminal-production-composition.yml'
       - 'tests/core/test_production_worker_run_terminate_canonical_composition_contract.py'
@@ -86,12 +87,20 @@ jobs:
           from pathlib import Path
           import os, subprocess
           blobs={
-            "hfa-control/src/hfa_control/run_terminate_authority.py":"44771d524ecefa7c7a22ba6c79fcd86b5be4ec4d",
             "hfa-control/src/hfa_control/run_termination.py":"53df1fd3eae3cfbe9b6e8110d0355968f08f3364",
           }
           for path,wanted in blobs.items():
               observed=subprocess.check_output(["git","hash-object",path],text=True).strip()
               assert observed == wanted, (path,observed,wanted)
+          # Sprint 84.8 intentionally evolves RUN_TERMINATE only by adding an
+          # optional post-authority resource-settlement effect. Preserve the
+          # original D byte lock only on the original D feature branch.
+          d_feature_branch = "sprint/84-7d-run-terminate-production-injection"
+          run_authority_path = "hfa-control/src/hfa_control/run_terminate_authority.py"
+          if os.environ["PR_HEAD_BRANCH"] == d_feature_branch:
+              wanted = "44771d524ecefa7c7a22ba6c79fcd86b5be4ec4d"
+              observed = subprocess.check_output(["git","hash-object",run_authority_path], text=True).strip()
+              assert observed == wanted, (run_authority_path, observed, wanted)
           # Sprint 84.7E intentionally evolves the worker redelivery adapter.
           # Keep the old byte lock only for the original 84.7D feature branch.
           d_feature_branch = "sprint/84-7d-run-terminate-production-injection"
@@ -113,6 +122,7 @@ jobs:
           ]
           if os.environ["PR_HEAD_BRANCH"] == d_feature_branch:
               frozen.append(runtime_path)
+              frozen.append(run_authority_path)
           for path in frozen:
               assert subprocess.run(["git","diff","--quiet",f"{os.environ['PR_BASE_SHA']}...HEAD","--",path]).returncode==0,path
           print("SPRINT84_7D_FROZEN_PARITY_OK")
@@ -140,7 +150,10 @@ jobs:
           assert "from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding" in main
           assert "class RunTerminateAuthorityBinding" not in main
           assert "canonical_task_terminal_binding cannot be combined" not in main
-          assert "RunTerminateAuthorityBinding(redis)" in main
+          assert "RunTerminateAuthorityBinding(" in main
+          assert 'canonical_resource_settlement_binding = config.get(' in main
+          assert '"canonical_resource_settlement_binding",' in main
+          assert "resource_manager=self._resource_settlement_manager" in main
           assert "authority_binding=self._run_terminate_authority_binding" in main
           assert "self._task_terminal_completion_gateway" in main
           assert "RunFinalizingTaskConsumer" in main and "RunFinalizingWorkerConsumer" in main

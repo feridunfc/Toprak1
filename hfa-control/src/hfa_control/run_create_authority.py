@@ -316,6 +316,19 @@ def _input_from_record(record: Any) -> RunCreateAuthorityInput:
     return normalized
 
 
+def resource_reservation_from_run_create_record(
+    record: Any,
+) -> AdmissionResourceReservationInput:
+    """Reconstruct the exact admission reservation from durable RUN_CREATE."""
+    value = _input_from_record(record)
+    return AdmissionResourceReservationInput(
+        operation_id=record.operation_id,
+        run_id=value.run_id,
+        tenant_id=value.tenant_id,
+        estimated_cost_cents=value.estimated_cost_cents,
+    )
+
+
 def _stable_event_fields(value: RunCreateAuthorityInput, operation_id: str) -> dict[str, str]:
     normalized = normalize_run_create_input(value)
     event_digest = hashlib.sha256(
@@ -1218,6 +1231,7 @@ __all__ = [
     "build_run_create_context",
     "normalize_run_create_input",
     "parse_run_create_binding_flag",
+    "resource_reservation_from_run_create_record",
     "run_create_identity",
     "run_create_operation_id",
 ]

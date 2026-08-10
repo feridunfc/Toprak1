@@ -1,0 +1,339 @@
+name: Sprint 84.8 Canonical Resource Settlement
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-core/src/hfa/governance/admission_resource_reservation.py'
+      - 'hfa-core/src/hfa/lua/admission_resource_reservation.lua'
+      - 'hfa-control/src/hfa_control/run_create_authority.py'
+      - 'hfa-control/src/hfa_control/run_terminate_authority.py'
+      - 'hfa-worker/src/hfa_worker/main.py'
+      - 'hfa-worker/src/hfa_worker/process_root.py'
+      - 'tests/unit/test_admission_resource_reservation.py'
+      - 'tests/unit/test_run_terminate_resource_settlement_contract.py'
+      - 'tests/integration/test_run_terminate_resource_settlement_integration.py'
+      - 'tests/core/test_production_worker_resource_settlement_composition_contract.py'
+      - 'tests/integration/test_worker_resource_settlement_canonical_composition_integration.py'
+      - '.github/workflows/sprint84-7d-run-terminate-production-injection.yml'
+      - '.github/workflows/sprint84-7e-worker-crash-retry-acceptance.yml'
+      - '.github/workflows/sprint84-8-canonical-resource-settlement.yml'
+      - 'docs/implementation/sprint84/SPRINT84.8-canonical-resource-settlement.md'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_BRANCH: ${{ github.head_ref }}
+  ACCEPTED_PARENT: 66caff6349fb88c662bc5a3ea87b480bfe110ece
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6389:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify accepted parent and exact 84.8 scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          test "$PR_BASE_SHA" = "$ACCEPTED_PARENT"
+          git merge-base --is-ancestor "$ACCEPTED_PARENT" HEAD
+          python - <<'PY'
+          import os, subprocess
+          allowlist = {
+              "hfa-core/src/hfa/governance/admission_resource_reservation.py",
+              "hfa-core/src/hfa/lua/admission_resource_reservation.lua",
+              "hfa-control/src/hfa_control/run_create_authority.py",
+              "hfa-control/src/hfa_control/run_terminate_authority.py",
+              "hfa-worker/src/hfa_worker/main.py",
+              "hfa-worker/src/hfa_worker/process_root.py",
+              "tests/unit/test_admission_resource_reservation.py",
+              "tests/unit/test_run_terminate_resource_settlement_contract.py",
+              "tests/integration/test_run_terminate_resource_settlement_integration.py",
+              "tests/core/test_production_worker_resource_settlement_composition_contract.py",
+              "tests/integration/test_worker_resource_settlement_canonical_composition_integration.py",
+              ".github/workflows/sprint84-7d-run-terminate-production-injection.yml",
+              ".github/workflows/sprint84-7e-worker-crash-retry-acceptance.yml",
+              ".github/workflows/sprint84-8-canonical-resource-settlement.yml",
+              "docs/implementation/sprint84/SPRINT84.8-canonical-resource-settlement.md",
+          }
+          changed=set(subprocess.check_output(["git","diff","--name-only",f"{os.environ['PR_BASE_SHA']}...HEAD"], text=True).splitlines())
+          assert changed == allowlist, {"missing": sorted(allowlist-changed), "unexpected": sorted(changed-allowlist)}
+          forbidden=[p for p in changed if p.startswith("local_out/") or "__pycache__" in p or ".pytest_cache" in p or p.endswith(".pyc")]
+          assert not forbidden, forbidden
+          print("SPRINT84_8_SCOPE_OK", len(changed))
+          PY
+
+      - name: Verify frozen product parity and no new OperationType
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, subprocess
+          frozen = [
+              "hfa-core/src/hfa/authority/canonical_transition.py",
+              "hfa-control/src/hfa_control/worker_reservation.py",
+              "hfa-control/src/hfa_control/scheduler_reservation_dispatch.py",
+              "hfa-core/src/hfa/lua/task_claim_start.lua",
+              "hfa-core/src/hfa/lua/task_complete.lua",
+              "hfa-core/src/hfa/lua/task_requeue.lua",
+              "hfa-control/src/hfa_control/task_terminal_authority.py",
+              "hfa-control/src/hfa_control/task_claim_authority.py",
+              "hfa-control/src/hfa_control/task_claim.py",
+              "hfa-control/src/hfa_control/run_termination.py",
+              "hfa-control/src/hfa_control/task_recovery.py",
+              "hfa-control/src/hfa_control/recovery.py",
+              "hfa-worker/src/hfa_worker/run_finalizing_runtime.py",
+              "hfa-worker/src/hfa_worker/consumer.py",
+              "hfa-worker/src/hfa_worker/task_consumer.py",
+          ]
+          for path in frozen:
+              expected=subprocess.check_output(["git","rev-parse",f"{os.environ['ACCEPTED_PARENT']}:{path}"], text=True).strip()
+              observed=subprocess.check_output(["git","hash-object",path], text=True).strip()
+              assert observed == expected, (path, observed, expected)
+          transition=subprocess.check_output(["git","show",f"{os.environ['ACCEPTED_PARENT']}:hfa-core/src/hfa/authority/canonical_transition.py"], text=True)
+          current=open("hfa-core/src/hfa/authority/canonical_transition.py", encoding="utf-8").read()
+          assert current == transition
+          for token in ("RESOURCE_SETTLE", "RUN_RESOURCE_SETTLE", "RUN_RELEASE", "RUN_CLEANUP", "RESOURCE_RELEASE"):
+              assert token not in current, token
+          print("SPRINT84_8_FROZEN_PARITY_OK", len(frozen))
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
+
+      - name: Freeze baseline RUN_CREATE and reservation source counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast, os, subprocess
+          def cases(source):
+              total=0
+              for n in ast.parse(source).body:
+                  if not isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) or not n.name.startswith("test_"):
+                      continue
+                  multiple=1
+                  for d in n.decorator_list:
+                      if isinstance(d,ast.Call) and isinstance(d.func,ast.Attribute) and d.func.attr=="parametrize" and len(d.args)>=2 and isinstance(d.args[1],(ast.List,ast.Tuple)):
+                          multiple*=len(d.args[1].elts)
+                  total+=multiple
+              return total
+          parent=os.environ["ACCEPTED_PARENT"]
+          resource=subprocess.check_output(["git","show",f"{parent}:tests/unit/test_admission_resource_reservation.py"],text=True)
+          run_create=subprocess.check_output(["git","show",f"{parent}:tests/unit/test_run_create_authority_binding.py"],text=True)
+          assert cases(resource)==41, cases(resource)
+          assert cases(run_create)==18, cases(run_create)
+          print("SPRINT84_8_BASELINE_SOURCE_COUNTS", {"resource_unit":41,"run_create_unit":18})
+          PY
+
+      - name: Static 84.8 architecture guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          resource=Path("hfa-core/src/hfa/governance/admission_resource_reservation.py").read_text()
+          lua=Path("hfa-core/src/hfa/lua/admission_resource_reservation.lua").read_text()
+          create=Path("hfa-control/src/hfa_control/run_create_authority.py").read_text()
+          terminate=Path("hfa-control/src/hfa_control/run_terminate_authority.py").read_text()
+          main=Path("hfa-worker/src/hfa_worker/main.py").read_text()
+          root=Path("hfa-worker/src/hfa_worker/process_root.py").read_text()
+          assert 'RESERVATION_STATE_SETTLED = "SETTLED"' in resource
+          assert 'async def settle_once(' in resource
+          assert "action == 'settle'" in lua and "'state', 'SETTLED'" in lua
+          assert "resource_reservation_from_run_create_record" in create
+          assert "resource_manager: AdmissionResourceReservationManager | None = None" in terminate
+          assert "await self._settle_resources(" in terminate
+          assert terminate.index("await self._validate_exact_head(record, canonical_receipt)") < terminate.index("await self._settle_resources(") < terminate.index("projected = await self.projection_manager.project")
+          assert 'canonical_resource_settlement_binding = config.get(' in main
+          assert '"canonical_resource_settlement_binding",' in main
+          assert "resource_manager=self._resource_settlement_manager" in main
+          assert "HFA_CANONICAL_RESOURCE_SETTLEMENT_BINDING" in root
+          product="\n".join((resource,lua,create,terminate,main,root))
+          for token in ("decrement_tenant_inflight_if_needed", "requeue_stale_task", "task_requeue.lua"):
+              assert token not in product, token
+          print("SPRINT84_8_STATIC_GUARDS_OK")
+          PY
+
+      - name: 84.8 focused contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_admission_resource_reservation.py \
+            tests/unit/test_run_terminate_resource_settlement_contract.py \
+            tests/core/test_production_worker_resource_settlement_composition_contract.py \
+            -q --tb=short | tee sprint84_8_focused.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_8_focused.txt
+          grep -Eq '(^|[^0-9])66 passed' sprint84_8_focused.txt
+
+      - name: 84.8 real Redis settlement acceptance
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/integration/test_run_terminate_resource_settlement_integration.py \
+            tests/integration/test_worker_resource_settlement_canonical_composition_integration.py \
+            -q --tb=short | tee sprint84_8_redis.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_8_redis.txt
+          grep -Eq '(^|[^0-9])20 passed' sprint84_8_redis.txt
+
+      - name: Baseline admission resource reservation real Redis regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_admission_resource_reservation_integration.py -q --tb=short | tee sprint84_8_resource_baseline_redis.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_8_resource_baseline_redis.txt
+          grep -Eq '(^|[^0-9])20 passed' sprint84_8_resource_baseline_redis.txt
+
+      - name: Baseline RUN_CREATE authority regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_run_create_authority_binding.py -q --tb=short | tee sprint84_8_run_create_unit.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_8_run_create_unit.txt
+          grep -Eq '(^|[^0-9])18 passed' sprint84_8_run_create_unit.txt
+          python -m pytest tests/integration/test_run_create_authority_binding_integration.py -q --tb=short | tee sprint84_8_run_create_redis.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_8_run_create_redis.txt
+          grep -Eq '(^|[^0-9])18 passed' sprint84_8_run_create_redis.txt
+
+      - name: 84.7E regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_production_worker_crash_retry_contract.py -q --tb=short | tee e_focus.txt
+          grep -Eq '(^|[^0-9])8 passed' e_focus.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' e_focus.txt
+          python -m pytest tests/integration/test_worker_crash_retry_canonical_composition_integration.py -q --tb=short | tee e_redis.txt
+          grep -Eq '(^|[^0-9])7 passed' e_redis.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' e_redis.txt
+
+      - name: 84.7D and canonical RUN authority regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_production_worker_run_terminate_canonical_composition_contract.py -q --tb=short | tee d_focus.txt
+          grep -Eq '(^|[^0-9])7 passed' d_focus.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' d_focus.txt
+          python -m pytest tests/integration/test_worker_run_terminate_canonical_composition_integration.py -q --tb=short | tee d_redis.txt
+          grep -Eq '(^|[^0-9])6 passed' d_redis.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' d_redis.txt
+          python -m pytest tests/unit/test_run_terminate_authority_binding.py tests/integration/test_run_terminate_authority_binding_integration.py -q --tb=short | tee run_auth.txt
+          grep -Eq '(^|[^0-9])23 passed' run_auth.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' run_auth.txt
+
+      - name: C2 and C1 regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_production_worker_terminal_composition_contract.py tests/core/test_production_worker_process_root_terminal_contract.py -q --tb=short | tee c2f.txt
+          grep -Eq '(^|[^0-9])22 passed' c2f.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' c2f.txt
+          python -m pytest tests/integration/test_worker_task_terminal_canonical_composition_integration.py -q --tb=short | tee c2r.txt
+          grep -Eq '(^|[^0-9])3 passed' c2r.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' c2r.txt
+          python -m pytest tests/unit/test_task_terminal_authority_contract.py -q --tb=short | tee c1u.txt
+          grep -Eq '(^|[^0-9])7 passed' c1u.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' c1u.txt
+          python -m pytest tests/integration/test_task_terminal_authority_integration.py -q --tb=short | tee c1r.txt
+          grep -Eq '(^|[^0-9])23 passed' c1r.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' c1r.txt
+          python -m pytest tests/core/test_task_complete_lua_contract.py tests/core/test_task_consumer_fenced_completion_contract.py tests/integration/test_task_complete_owner_integration.py tests/integration/test_task_complete_unlock_integration.py tests/integration/test_task_output_persistence_integration.py tests/integration/test_failure_sweeper_integration.py -q --tb=short | tee legacy_terminal.txt
+          grep -Eq '(^|[^0-9])18 passed' legacy_terminal.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' legacy_terminal.txt
+
+      - name: 84.7B and TASK_CLAIM regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_production_worker_composition_contract.py tests/core/test_production_worker_process_root_contract.py tests/core/test_task_claim_service_legacy_quarantine_contract.py tests/core/test_task_requested_routing_contract.py tests/unit/test_task_claim_authority_binding.py tests/unit/test_task_claim_authority_contract.py -q --tb=short | tee b.txt
+          grep -Eq '(^|[^0-9])76 passed' b.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' b.txt
+          python -m pytest tests/unit/test_task_claim_authority_binding.py tests/unit/test_task_claim_authority_contract.py tests/core/test_task_claim_legacy_direct_gate_contract.py tests/core/test_task_claim_reservation_owner_lookup_contract.py tests/core/test_task_claim_service_legacy_quarantine_contract.py tests/core/test_task_claim_start_contract.py tests/core/test_task_claim_status_taxonomy_contract.py tests/integration/test_task_claim_authority_binding_integration.py tests/integration/test_task_claim_authority_projection_integration.py tests/integration/test_task_claim_legacy_direct_gate_integration.py tests/integration/test_task_claim_reservation_integration.py tests/integration/test_task_claim_start_integration.py tests/integration/test_worker_task_claim_canonical_composition_integration.py -q --tb=short | tee claim.txt
+          grep -Eq '(^|[^0-9])83 passed' claim.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' claim.txt
+
+      - name: RUN finalization and production worker regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_production_run_finalization_binding.py tests/integration/test_production_run_finalization_binding_integration.py tests/integration/test_terminal_task_run_finalization.py tests/integration/test_runtime_alpha_product_acceptance_83_2.py -q --tb=short | tee run_final.txt
+          grep -Eq '(^|[^0-9])41 passed' run_final.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' run_final.txt
+          python -m pytest tests/core/test_production_worker_composition_contract.py tests/core/test_production_worker_process_root_contract.py tests/core/test_worker_service_lifecycle_contract.py tests/core/test_worker_startup_failure_projection_red.py tests/core/test_worker_ack_authority_contract.py -q --tb=short | tee worker.txt
+          grep -Eq '(^|[^0-9])43 passed' worker.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' worker.txt
+
+      - name: Sprint 83.7 regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_product_alpha_profile.py tests/unit/test_product_alpha_worker_capabilities.py tests/unit/test_product_alpha_readiness.py tests/unit/test_product_alpha_run_shape.py tests/unit/test_product_alpha_failure_contract.py tests/core/test_production_run_finalization_binding.py tests/core/test_production_scheduler_composition_contract.py tests/unit/test_run_submission_coordinator.py tests/unit/test_run_status_result_read_model.py tests/unit/test_user_facing_run_result.py tests/integration/test_run_status_result_read_model_integration.py tests/integration/test_product_alpha_closure_e2e_83_7.py -q --tb=short | tee s837.txt
+          grep -Eq '(^|[^0-9])174 passed' s837.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' s837.txt
+
+      - name: Sprint 83.8 regression
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_product_alpha_profile.py tests/unit/test_product_alpha_worker_capabilities.py tests/unit/test_product_alpha_readiness.py tests/unit/test_product_alpha_run_shape.py tests/unit/test_product_alpha_failure_contract.py tests/unit/test_submission_idempotency.py tests/core/test_production_run_finalization_binding.py tests/core/test_production_scheduler_composition_contract.py tests/unit/test_run_submission_coordinator.py tests/unit/test_run_status_result_read_model.py tests/unit/test_user_facing_run_result.py tests/integration/test_run_status_result_read_model_integration.py tests/integration/test_product_alpha_closure_e2e_83_7.py tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py -q --tb=short | tee s838.txt
+          grep -Eq '(^|[^0-9])199 passed' s838.txt; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' s838.txt
+
+      - name: Authority audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/authority_audit.py --repo-root . --format dashboard --output sprint84_8_authority.json --fail-on banned
+          python - <<'PY'
+          import json
+          data=json.load(open("sprint84_8_authority.json", encoding="utf-8"))
+          counts=data.get("counts") or data.get("summary") or {}
+          banned=int(counts.get("banned", data.get("banned",0)) or 0)
+          assert banned==0, data
+          print("SPRINT84_8_AUTHORITY", data.get("authority_status") or data.get("status"), "banned", banned)
+          PY
+
+      - name: Workflow YAML, compile, and diff hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in (
+              ".github/workflows/sprint84-7d-run-terminate-production-injection.yml",
+              ".github/workflows/sprint84-7e-worker-crash-retry-acceptance.yml",
+              ".github/workflows/sprint84-8-canonical-resource-settlement.yml",
+          ):
+              loaded=yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+              assert isinstance(loaded,dict) and "jobs" in loaded, path
+          print("SPRINT84_8_WORKFLOW_YAML_OK")
+          PY
+          python -m compileall -q \
+            hfa-core/src/hfa/governance/admission_resource_reservation.py \
+            hfa-control/src/hfa_control/run_create_authority.py \
+            hfa-control/src/hfa_control/run_terminate_authority.py \
+            hfa-worker/src/hfa_worker/main.py \
+            hfa-worker/src/hfa_worker/process_root.py \
+            tests/unit/test_admission_resource_reservation.py \
+            tests/unit/test_run_terminate_resource_settlement_contract.py \
+            tests/integration/test_run_terminate_resource_settlement_integration.py \
+            tests/core/test_production_worker_resource_settlement_composition_contract.py \
+            tests/integration/test_worker_resource_settlement_canonical_composition_integration.py
+          git diff --check "$PR_BASE_SHA...HEAD"

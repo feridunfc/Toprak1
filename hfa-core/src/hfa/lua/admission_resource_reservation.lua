@@ -5,7 +5,7 @@
 -- KEYS[3] budget-reserved-cents counter STRING
 -- KEYS[4] tenant inflight counter STRING
 --
--- ARGV[1]  action: reserve | finalize | release
+-- ARGV[1]  action: reserve | finalize | release | settle
 -- ARGV[2]  operation_id
 -- ARGV[3]  run_id
 -- ARGV[4]  tenant_id
@@ -17,6 +17,14 @@
 -- ARGV[10] budget_limit_cents (-1 = unbounded)
 -- ARGV[11] tenant_inflight_limit (-1 = unbounded)
 -- ARGV[12] released_receipt_ttl_seconds
+-- ARGV[13] run_terminate_operation_id (settle only)
+-- ARGV[14] terminal_proof_sha256 (settle only)
+-- ARGV[15] canonical_transition_id (settle only)
+-- ARGV[16] canonical_record_hash (settle only)
+-- ARGV[17] canonical_command_hash (settle only)
+-- ARGV[18] canonical_revision (settle only)
+-- ARGV[19] final_state (settle only)
+-- ARGV[20] settlement_proof_sha256 (settle only)
 
 local receipt_key = KEYS[1]
 local concurrent_key = KEYS[2]
@@ -35,9 +43,18 @@ local concurrent_limit_raw = ARGV[9]
 local budget_limit_raw = ARGV[10]
 local inflight_limit_raw = ARGV[11]
 local released_receipt_ttl_raw = ARGV[12]
+local run_terminate_operation_id = ARGV[13]
+local terminal_proof_sha256 = ARGV[14]
+local canonical_transition_id = ARGV[15]
+local canonical_record_hash = ARGV[16]
+local canonical_command_hash = ARGV[17]
+local canonical_revision_raw = ARGV[18]
+local final_state = ARGV[19]
+local settlement_proof_sha256 = ARGV[20]
 
 local MAX_SAFE_INTEGER = 9007199254740991
 local OPERATION_PREFIX = 'run-create:v1:'
+local TERMINATE_OPERATION_PREFIX = 'run-terminate:v1:'
 
 local function redis_type_name(key)
     local reply = redis.call('TYPE', key)
@@ -79,6 +96,18 @@ local function valid_operation_id(value)
         return false
     end
     local suffix = string.sub(value, 15)
+    return string.len(suffix) == 64
+        and string.match(suffix, '^[0-9a-f]+$') ~= nil
+end
+
+local function valid_run_terminate_operation_id(value)
+    if type(value) ~= 'string' or string.len(value) ~= 81 then
+        return false
+    end
+    if string.sub(value, 1, 17) ~= TERMINATE_OPERATION_PREFIX then
+        return false
+    end
+    local suffix = string.sub(value, 18)
     return string.len(suffix) == 64
         and string.match(suffix, '^[0-9a-f]+$') ~= nil
 end
@@ -131,7 +160,10 @@ local budget_limit = optional_limit(budget_limit_raw)
 local inflight_limit = optional_limit(inflight_limit_raw)
 local released_receipt_ttl = decimal_integer(released_receipt_ttl_raw, 1)
 
-if action ~= 'reserve' and action ~= 'finalize' and action ~= 'release' then
+if action ~= 'reserve'
+    and action ~= 'finalize'
+    and action ~= 'release'
+    and action ~= 'settle' then
     return {'invalid_input', '', '0'}
 end
 if not valid_operation_id(operation_id) or run_id == '' or tenant_id == '' then
@@ -145,6 +177,23 @@ if concurrent_limit == nil or budget_limit == nil or inflight_limit == nil then
 end
 if released_receipt_ttl == nil or not valid_sha256(proof_sha256) then
     return {'invalid_input', '', '0'}
+end
+
+local canonical_revision = nil
+if action == 'settle' then
+    canonical_revision = decimal_integer(canonical_revision_raw, 1)
+    if not valid_run_terminate_operation_id(run_terminate_operation_id)
+        or not valid_sha256(terminal_proof_sha256)
+        or type(canonical_transition_id) ~= 'string'
+        or canonical_transition_id == ''
+        or not valid_sha256(canonical_record_hash)
+        or not valid_sha256(canonical_command_hash)
+        or canonical_revision == nil
+        or (final_state ~= 'done' and final_state ~= 'failed')
+        or not valid_sha256(settlement_proof_sha256)
+    then
+        return {'invalid_input', '', '0'}
+    end
 end
 
 local receipt_type = redis_type_name(receipt_key)
@@ -178,8 +227,63 @@ if receipt_exists then
     end
 
     local state = stored[7]
-    if state ~= 'RESERVED' and state ~= 'FINALIZED' and state ~= 'RELEASED' then
+    if state ~= 'RESERVED'
+        and state ~= 'FINALIZED'
+        and state ~= 'RELEASED'
+        and state ~= 'SETTLED' then
         return {'reservation_conflict', state or '', '0'}
+    end
+
+    if action == 'settle' then
+        if state == 'SETTLED' then
+            local terminal = redis.call(
+                'HMGET', receipt_key,
+                'run_terminate_operation_id', 'terminal_proof_sha256',
+                'canonical_transition_id', 'canonical_record_hash',
+                'canonical_command_hash', 'canonical_revision',
+                'final_state', 'settlement_proof_sha256'
+            )
+            if terminal[1] ~= run_terminate_operation_id
+                or terminal[2] ~= terminal_proof_sha256
+                or terminal[3] ~= canonical_transition_id
+                or terminal[4] ~= canonical_record_hash
+                or terminal[5] ~= canonical_command_hash
+                or terminal[6] ~= canonical_revision_raw
+                or terminal[7] ~= final_state
+                or terminal[8] ~= settlement_proof_sha256
+            then
+                return {'reservation_conflict', state, '0'}
+            end
+            return {'already_settled', state, '0'}
+        end
+        if state ~= 'FINALIZED' then
+            return {'reservation_state_conflict', state, '0'}
+        end
+        if redis.call('TTL', receipt_key) ~= -1 then
+            return {'resource_state_conflict', state, '0'}
+        end
+        local owned = active_resource_ownership(cost)
+        if owned == nil then
+            return {'resource_state_conflict', state, '0'}
+        end
+        redis.call('DECRBY', concurrent_key, '1')
+        redis.call('DECRBY', budget_key, cost_raw)
+        redis.call('DECRBY', inflight_key, '1')
+        redis.call(
+            'HSET', receipt_key,
+            'state', 'SETTLED',
+            'settled_at_ms', now_raw,
+            'run_terminate_operation_id', run_terminate_operation_id,
+            'terminal_proof_sha256', terminal_proof_sha256,
+            'canonical_transition_id', canonical_transition_id,
+            'canonical_record_hash', canonical_record_hash,
+            'canonical_command_hash', canonical_command_hash,
+            'canonical_revision', canonical_revision_raw,
+            'final_state', final_state,
+            'settlement_proof_sha256', settlement_proof_sha256
+        )
+        redis.call('PERSIST', receipt_key)
+        return {'settled', 'SETTLED', '1'}
     end
 
     if action == 'reserve' then
@@ -189,6 +293,9 @@ if receipt_exists then
                 return {'reservation_conflict', state, '0'}
             end
             return {'already_released', state, '0'}
+        end
+        if state == 'SETTLED' then
+            return {'reservation_state_conflict', state, '0'}
         end
         if redis.call('TTL', receipt_key) ~= -1 then
             return {'resource_state_conflict', state, '0'}
@@ -204,6 +311,9 @@ if receipt_exists then
 
     if action == 'finalize' then
         if state == 'RELEASED' then
+            return {'reservation_state_conflict', state, '0'}
+        end
+        if state == 'SETTLED' then
             return {'reservation_state_conflict', state, '0'}
         end
         if redis.call('TTL', receipt_key) ~= -1 then
@@ -230,6 +340,9 @@ if receipt_exists then
             return {'reservation_conflict', state, '0'}
         end
         return {'already_released', state, '0'}
+    end
+    if state == 'SETTLED' then
+        return {'reservation_state_conflict', state, '0'}
     end
     if state == 'FINALIZED' then
         return {'reservation_state_conflict', state, '0'}
