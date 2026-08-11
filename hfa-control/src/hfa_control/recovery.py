@@ -15,21 +15,45 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from unittest.mock import Mock
 
+from hfa.authority import AggregateType, CanonicalAggregateIdentity, OperationType
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.schema import DagRedisKey
 from hfa.events.codec import serialize_event
 from hfa.events.schema import RunAdmittedEvent, RunDeadLetteredEvent
+from hfa.governance.admission_resource_reservation import (
+    AdmissionResourceReservationManager,
+    RESERVATION_STATE_FINALIZED,
+    RESERVATION_STATE_SETTLED,
+)
 from hfa.lua.loader import LuaScriptLoader
 from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
 from hfa_control.models import ControlPlaneConfig
+from hfa_control.product_profile import parse_strict_bool
+from hfa_control.run_create_authority import (
+    FEATURE_FLAG as RUN_CREATE_FEATURE_FLAG,
+    resource_reservation_from_run_create_record,
+    run_create_identity,
+    run_create_operation_id,
+)
+from hfa_control.run_terminate_authority import (
+    NOT_READY_STATUS as RUN_TERMINATE_NOT_READY_STATUS,
+    RunTerminateAuthorityBinding,
+)
 from hfa_control.state_machine import transition_state
+from hfa_control.task_recovery import TaskRecoveryManager
+from hfa_control.task_requeue_authority import (
+    FEATURE_FLAG as TASK_REQUEUE_FEATURE_FLAG,
+    parse_task_requeue_binding_flag,
+)
 
 try:
     from hfa.obs.runtime_metrics import IRONCLADMetrics as _M
@@ -57,6 +81,14 @@ _RUN_RECOVERY_CONFLICT_STATUSES = {
     "task_truth_corruption_conflict",
     "truth_conflict_evidence_store_unavailable",
 }
+
+_CANONICAL_TASK_REQUEUE_DEPENDENCY_FLAGS = (
+    "HFA_CANONICAL_TASK_ADMIT_BINDING",
+    "HFA_CANONICAL_TASK_DISPATCH_BINDING",
+    "HFA_CANONICAL_TASK_CLAIM_BINDING",
+    "HFA_CANONICAL_TASK_TERMINAL_BINDING",
+    RUN_CREATE_FEATURE_FLAG,
+)
 
 
 def _decode(value) -> str:
@@ -118,18 +150,67 @@ class RecoveryService:
         self._config = config
         self._task: Optional[asyncio.Task] = None
         self._recovery_loader: Optional[LuaScriptLoader] = None
+        self._canonical_task_requeue_binding = (
+            parse_task_requeue_binding_flag(
+                os.getenv(TASK_REQUEUE_FEATURE_FLAG)
+            )
+        )
+        self._task_recovery: TaskRecoveryManager | None = None
+        self._resource_manager: AdmissionResourceReservationManager | None = None
+        self._run_terminate_authority: RunTerminateAuthorityBinding | None = None
+        self._canonical_recovery_initialised = False
+        if self._canonical_task_requeue_binding:
+            missing = [
+                name
+                for name in _CANONICAL_TASK_REQUEUE_DEPENDENCY_FLAGS
+                if not parse_strict_bool(
+                    os.getenv(name),
+                    name=name,
+                    default=False,
+                )
+            ]
+            if missing:
+                raise ValueError(
+                    "canonical TASK_REQUEUE production recovery requires "
+                    "the canonical TASK_ADMIT/TASK_DISPATCH/TASK_CLAIM/"
+                    "TASK_TERMINAL dependency chain; disabled: "
+                    + ", ".join(missing)
+                )
+            self._task_recovery = TaskRecoveryManager(
+                redis,
+                canonical_task_requeue_binding=True,
+            )
+            self._resource_manager = AdmissionResourceReservationManager(redis)
+            self._run_terminate_authority = RunTerminateAuthorityBinding(
+                redis,
+                resource_manager=self._resource_manager,
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        if self._task_recovery is not None:
+            # Fail closed before the leader-owned background task is started.
+            await self._ensure_canonical_recovery_initialised()
         loop = asyncio.get_running_loop()
         self._task = loop.create_task(self._loop(), name="recovery.sweep")
         logger.info(
             "RecoveryService started: sweep_interval=%gs",
             self._config.recovery_sweep_interval,
         )
+
+    async def _ensure_canonical_recovery_initialised(self) -> None:
+        if self._canonical_recovery_initialised:
+            return
+        if self._task_recovery is None:
+            return
+        assert self._resource_manager is not None
+        assert self._run_terminate_authority is not None
+        await self._task_recovery.initialise()
+        await self._run_terminate_authority.initialise()
+        self._canonical_recovery_initialised = True
 
     async def close(self) -> None:
         if self._task:
@@ -164,15 +245,44 @@ class RecoveryService:
                 logger.error("RecoveryService._loop error: %s", exc, exc_info=True)
 
     async def _sweep(self) -> None:
+        attempted_task_runs: set[str] = set()
+        if self._task_recovery is not None:
+            await self._ensure_canonical_recovery_initialised()
+            attempted_task_runs = await self._sweep_stale_tasks()
+
         stale_runs = await self._find_stale_runs()
         rescheduled = 0
         dlq_count = 0
         conflict_count = 0
+        canonical_count = 0
 
         if stale_runs and _M:
             _M.recovery_stale_detected_total.inc(len(stale_runs))
 
         for run_id in stale_runs:
+            if self._task_recovery is not None:
+                # A stale TASK recovery attempt owns this RUN for the whole
+                # sweep, including failures. This prevents a second RUN
+                # terminal attempt or a legacy fallback in the same cycle.
+                if run_id in attempted_task_runs:
+                    continue
+                try:
+                    result = await self._handle_canonical_stale_run(run_id)
+                except Exception as exc:
+                    conflict_count += 1
+                    logger.error(
+                        "RecoveryService canonical stale RUN blocked: "
+                        "run=%s error=%s",
+                        run_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    continue
+                canonical_count += 1
+                if result == "conflict":
+                    conflict_count += 1
+                continue
+
             result = await self._handle_stale(run_id)
             if result == "rescheduled":
                 rescheduled += 1
@@ -187,12 +297,458 @@ class RecoveryService:
 
         if stale_runs:
             logger.info(
-                "Recovery sweep: stale=%d rescheduled=%d dlq=%d conflicts=%d",
+                "Recovery sweep: stale=%d rescheduled=%d dlq=%d "
+                "canonical=%d conflicts=%d",
                 len(stale_runs),
                 rescheduled,
                 dlq_count,
+                canonical_count,
                 conflict_count,
             )
+
+    async def _sweep_stale_tasks(self, *, now_ms: int | None = None) -> set[str]:
+        """Run canonical stale-TASK recovery from the production leader loop.
+
+        Discovery remains the existing DAG active-tenant/running projection.
+        The stale observation timestamp is the eligibility boundary for this
+        invocation: a heartbeat arriving after that observation cannot revoke
+        a canonical commit already in flight. If no commit becomes durable, a
+        later sweep re-evaluates liveness from current heartbeat truth.
+        """
+
+        if self._task_recovery is None:
+            return set()
+        await self._ensure_canonical_recovery_initialised()
+
+        observed_at_ms = int(
+            now_ms if now_ms is not None else time.time() * 1000
+        )
+        try:
+            raw_tenants = await self._redis.smembers(
+                DagRedisKey.tenant_active_set()
+            )
+        except Exception as exc:
+            logger.error(
+                "RecoveryService TASK tenant discovery failed: %s",
+                exc,
+            )
+            return set()
+
+        tenants = sorted(
+            {_decode(value) for value in raw_tenants if _decode(value)}
+        )
+        attempted_runs: set[str] = set()
+        for tenant_id in tenants:
+            stale_task_ids = await self._task_recovery.find_stale_tasks(
+                tenant_id=tenant_id,
+                now_ms=observed_at_ms,
+            )
+            for task_id in stale_task_ids:
+                try:
+                    run_id = _decode(
+                        await self._redis.hget(
+                            DagRedisKey.task_meta(task_id),
+                            "run_id",
+                        )
+                    ).strip()
+                except Exception as exc:
+                    logger.error(
+                        "RecoveryService TASK run identity read failed: "
+                        "task=%s tenant=%s error=%s",
+                        task_id,
+                        tenant_id,
+                        exc,
+                    )
+                    continue
+                if not run_id:
+                    logger.error(
+                        "RecoveryService TASK run identity missing: "
+                        "task=%s tenant=%s",
+                        task_id,
+                        tenant_id,
+                    )
+                    continue
+
+                # Ownership begins at the stale candidate boundary. Any proof,
+                # authority, projection, settlement, or RUN finalization error
+                # therefore fails closed for this sweep.
+                attempted_runs.add(run_id)
+                try:
+                    await self._validate_canonical_run_resources(
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        allow_settled=False,
+                    )
+                    result = await self._task_recovery.requeue_stale_task(
+                        task_id=task_id,
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        expected_state="running",
+                        now_ms=observed_at_ms,
+                        reason_code="TASK_STALE_DETECTED",
+                    )
+                    if result.status in {
+                        "TASK_RETRY_EXHAUSTED",
+                        "TASK_TERMINAL_RECOVERED",
+                    }:
+                        await self._finalize_canonical_run(
+                            run_id=run_id,
+                            tenant_id=tenant_id,
+                            preferred_trigger_task_id=task_id,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "RecoveryService canonical TASK recovery blocked: "
+                        "run=%s task=%s tenant=%s error=%s",
+                        run_id,
+                        task_id,
+                        tenant_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    continue
+                logger.warning(
+                    "RecoveryService canonical TASK recovery: "
+                    "run=%s task=%s tenant=%s status=%s requeue_count=%d",
+                    run_id,
+                    task_id,
+                    tenant_id,
+                    result.status,
+                    result.requeue_count,
+                )
+
+        return attempted_runs
+
+    async def _validate_canonical_run_resources(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        allow_settled: bool,
+    ):
+        """Prove canonical RUN_CREATE and its exact admission reservation."""
+
+        await self._ensure_canonical_recovery_initialised()
+        assert self._resource_manager is not None
+        assert self._run_terminate_authority is not None
+        store = self._run_terminate_authority.store
+        identity = run_create_identity(run_id)
+        operation_id = run_create_operation_id(run_id)
+        probe = await store.load_receipt_probe(identity, operation_id)
+        if probe is None or probe.canonical_store_record is None:
+            raise RuntimeError(
+                "canonical RUN_CREATE record/receipt required for TASK recovery"
+            )
+        record = probe.canonical_store_record
+        authority_receipt = probe.receipt
+        if (
+            record.operation_type != OperationType.RUN_CREATE.value
+            or record.operation_id != operation_id
+            or record.from_revision != 0
+            or record.to_revision != 1
+            or authority_receipt.operation_id != record.operation_id
+            or authority_receipt.transition_id != record.transition_id
+            or authority_receipt.canonical_command_hash
+            != record.canonical_command_hash
+            or authority_receipt.canonical_record_hash
+            != record.canonical_record_hash
+            or authority_receipt.aggregate_revision != record.to_revision
+            or authority_receipt.operation_type != record.operation_type
+            or not record.verify_hash()
+        ):
+            raise RuntimeError(
+                "canonical RUN_CREATE record/receipt continuity mismatch"
+            )
+        reservation = resource_reservation_from_run_create_record(record)
+        if reservation.run_id != run_id or reservation.tenant_id != tenant_id:
+            raise RuntimeError(
+                "canonical RUN_CREATE reservation identity mismatch"
+            )
+        resource_receipt = await self._resource_manager.get_receipt(
+            reservation
+        )
+        if resource_receipt is None:
+            raise RuntimeError(
+                "canonical RUN_CREATE resource reservation receipt is missing"
+            )
+        allowed_states = {RESERVATION_STATE_FINALIZED}
+        if allow_settled:
+            allowed_states.add(RESERVATION_STATE_SETTLED)
+        if resource_receipt.state not in allowed_states:
+            raise RuntimeError(
+                "canonical RUN_CREATE resource reservation is not in an "
+                f"allowed recovery state: {resource_receipt.state}"
+            )
+        snapshot = await store.get_aggregate_snapshot(identity)
+        if snapshot is None:
+            raise RuntimeError("canonical RUN aggregate is missing")
+        if not allow_settled and snapshot.state not in {"pending", "running"}:
+            raise RuntimeError(
+                "canonical RUN is not nonterminal for TASK recovery: "
+                f"{snapshot.state}"
+            )
+        return reservation, resource_receipt, snapshot
+
+    async def _canonical_task_evidence(
+        self, run_id: str, tenant_id: str
+    ) -> list[dict]:
+        """Load exact canonical TASK heads for one DAG-owned stale RUN."""
+
+        assert self._run_terminate_authority is not None
+        store = self._run_terminate_authority.store
+        index_key = DagRedisKey.run_tasks(run_id)
+        kind = _decode(await self._redis.type(index_key))
+        if kind != "set":
+            raise RuntimeError(
+                f"canonical DAG run->tasks index must be set, observed {kind}"
+            )
+        task_ids = sorted(
+            {_decode(value) for value in await self._redis.smembers(index_key) if _decode(value)}
+        )
+        if not task_ids:
+            raise RuntimeError("canonical DAG run->tasks index is empty")
+
+        evidence: list[dict] = []
+        for task_id in task_ids:
+            identity = CanonicalAggregateIdentity(
+                aggregate_type=AggregateType.TASK,
+                run_id=run_id,
+                task_id=task_id,
+            )
+            snapshot = await store.get_aggregate_snapshot(identity)
+            if snapshot is None:
+                raise RuntimeError(
+                    f"canonical TASK aggregate is missing: {task_id}"
+                )
+            if snapshot.state not in {
+                "pending",
+                "ready",
+                "scheduled",
+                "running",
+                "done",
+                "failed",
+            }:
+                raise RuntimeError(
+                    "canonical TASK head state is unsupported: "
+                    f"{task_id}={snapshot.state}"
+                )
+            probe = await store.load_receipt_probe(
+                identity,
+                snapshot.operation_id,
+            )
+            if probe is None or probe.canonical_store_record is None:
+                raise RuntimeError(
+                    f"canonical TASK head receipt is missing: {task_id}"
+                )
+            record = probe.canonical_store_record
+            receipt = probe.receipt
+            if (
+                record.aggregate_identity.sha256 != identity.sha256
+                or record.aggregate_identity_sha256 != identity.sha256
+                or record.operation_id != snapshot.operation_id
+                or record.transition_id != snapshot.transition_id
+                or record.to_revision != snapshot.revision
+                or record.next_state != snapshot.state
+                or receipt.operation_id != record.operation_id
+                or receipt.transition_id != record.transition_id
+                or receipt.canonical_command_hash
+                != record.canonical_command_hash
+                or receipt.canonical_record_hash
+                != record.canonical_record_hash
+                or receipt.aggregate_revision != record.to_revision
+                or receipt.operation_type != record.operation_type
+                or not record.verify_hash()
+            ):
+                raise RuntimeError(
+                    f"canonical TASK head continuity mismatch: {task_id}"
+                )
+            await store.validate_authority_head(
+                identity,
+                expected_operation_id=record.operation_id,
+                expected_operation_digest=store.keyspace(
+                    record.aggregate_identity_sha256
+                ).operation_field(record.operation_id),
+                expected_transition_id=record.transition_id,
+                expected_revision=record.to_revision,
+                expected_canonical_command_hash=record.canonical_command_hash,
+                expected_canonical_record_hash=record.canonical_record_hash,
+                expected_record=record,
+                expected_receipt=receipt,
+                expected_state=record.next_state,
+                expected_projection_intents_json=store.canonical_projection_intents_json(
+                    record.durable_projection_intents
+                ),
+                expected_updated_at_ms=record.committed_at_ms,
+            )
+            meta_kind = _decode(
+                await self._redis.type(DagRedisKey.task_meta(task_id))
+            )
+            if meta_kind != "hash":
+                raise RuntimeError(
+                    f"TASK metadata projection must be hash: {task_id}"
+                )
+            meta = _decode_mapping(
+                await self._redis.hgetall(DagRedisKey.task_meta(task_id))
+            )
+            if (
+                meta.get("task_id") != task_id
+                or meta.get("run_id") != run_id
+                or meta.get("tenant_id") != tenant_id
+            ):
+                raise RuntimeError(
+                    f"TASK metadata identity conflict: {task_id}"
+                )
+            mutable_state = _decode(
+                await self._redis.get(DagRedisKey.task_state(task_id))
+            )
+            if snapshot.state in {"done", "failed"}:
+                if mutable_state != snapshot.state:
+                    raise RuntimeError(
+                        "canonical terminal TASK projection is not proven: "
+                        f"{task_id} canonical={snapshot.state} "
+                        f"mutable={mutable_state or 'missing'}"
+                    )
+            elif mutable_state not in {
+                "pending",
+                "ready",
+                "scheduled",
+                "running",
+            }:
+                raise RuntimeError(
+                    "canonical nonterminal TASK has contradictory mutable "
+                    f"state: {task_id}={mutable_state or 'missing'}"
+                )
+            evidence.append(
+                {
+                    "task_id": task_id,
+                    "tenant_id": meta["tenant_id"],
+                    "snapshot": snapshot,
+                    "record": record,
+                    "mutable_state": mutable_state,
+                }
+            )
+        return evidence
+
+    async def _finalize_canonical_run(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        preferred_trigger_task_id: str = "",
+    ):
+        """Attempt/replay accepted RUN_TERMINATE after proven TASK terminality."""
+
+        await self._validate_canonical_run_resources(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            allow_settled=True,
+        )
+        evidence = await self._canonical_task_evidence(run_id, tenant_id)
+        nonterminal = [
+            row for row in evidence
+            if row["snapshot"].state not in {"done", "failed"}
+        ]
+        if nonterminal:
+            return None
+
+        trigger = None
+        if preferred_trigger_task_id:
+            trigger = next(
+                (
+                    row for row in evidence
+                    if row["task_id"] == preferred_trigger_task_id
+                ),
+                None,
+            )
+        if trigger is None:
+            trigger = max(
+                evidence,
+                key=lambda row: (
+                    int(row["record"].committed_at_ms),
+                    row["task_id"],
+                ),
+            )
+        finalized_at_ms = max(
+            int(row["record"].committed_at_ms) for row in evidence
+        )
+        data = trigger["record"].authoritative_metadata_changes
+        if not isinstance(data, Mapping):
+            raise RuntimeError("canonical terminal TASK metadata is invalid")
+        assert self._run_terminate_authority is not None
+        result = await self._run_terminate_authority.terminate(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            trigger_task_id=trigger["task_id"],
+            finalized_at_ms=finalized_at_ms,
+            worker_instance_id=str(data.get("worker_instance_id") or ""),
+            trigger_terminal_state=trigger["snapshot"].state,
+        )
+        if result.status == RUN_TERMINATE_NOT_READY_STATUS:
+            raise RuntimeError(
+                "RUN_TERMINATE returned not_ready after all TASK heads were "
+                "proven terminal"
+            )
+        return result
+
+    async def _handle_canonical_stale_run(self, run_id: str) -> str:
+        """Classify stale DAG-owned RUNs without legacy mutable retry."""
+
+        meta_kind = _decode(await self._redis.type(RedisKey.run_meta(run_id)))
+        if meta_kind != "hash":
+            raise RuntimeError(
+                f"RUN metadata projection must be hash, observed {meta_kind}"
+            )
+        meta = _decode_mapping(await self._redis.hgetall(RedisKey.run_meta(run_id)))
+        tenant_id = meta.get("tenant_id", "")
+        if not tenant_id or (meta.get("run_id") and meta.get("run_id") != run_id):
+            raise RuntimeError("stale RUN metadata identity is missing or corrupt")
+
+        await self._validate_canonical_run_resources(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            allow_settled=True,
+        )
+        evidence = await self._canonical_task_evidence(run_id, tenant_id)
+        if any(
+            row["snapshot"].state not in {"done", "failed"}
+            for row in evidence
+        ):
+            # A durable TASK_REQUEUE can have completed mutable projection and
+            # left the running TASK ZSET before canonical delivery succeeded.
+            # The stale RUN path is then the only existing discovery surface.
+            # Re-enter the receipt-first authority replay for ready requeue
+            # heads; project/deliver are idempotent and no new TASK revision is
+            # created. Other nonterminal heads remain suppression-only.
+            assert self._task_recovery is not None
+            for row in evidence:
+                if (
+                    row["snapshot"].state == "ready"
+                    and row["record"].operation_type
+                    == OperationType.TASK_REQUEUE.value
+                ):
+                    data = row["record"].authoritative_metadata_changes
+                    if not isinstance(data, Mapping):
+                        raise RuntimeError(
+                            "canonical TASK_REQUEUE metadata is invalid"
+                        )
+                    await self._task_recovery.requeue_stale_task(
+                        task_id=row["task_id"],
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        expected_state="running",
+                        now_ms=int(row["record"].committed_at_ms),
+                        reason_code=str(data.get("reason_code") or ""),
+                    )
+            # Case 1: TASK lifecycle remains authoritative. No RUN mutation.
+            return "canonical_task_nonterminal"
+
+        # Case 2: all TASK heads and mutable terminal projections agree. Reuse
+        # the existing RUN_TERMINATE -> settlement -> projection chain.
+        await self._finalize_canonical_run(
+            run_id=run_id,
+            tenant_id=tenant_id,
+        )
+        return "canonical_run_terminal"
 
     # ------------------------------------------------------------------
     # Stale run detection — read-only
