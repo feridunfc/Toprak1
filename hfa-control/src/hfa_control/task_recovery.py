@@ -9,10 +9,12 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional
 from unittest.mock import Mock
 
+from hfa.authority import AggregateType, CanonicalAggregateIdentity, OperationType
 from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.heartbeat import HeartbeatPolicy
 from hfa.dag.reasons import (
@@ -22,6 +24,16 @@ from hfa.dag.reasons import (
 )
 from hfa.dag.schema import DagRedisKey, TaskMetaField
 from hfa.lua.loader import LuaScriptLoader
+from hfa_control.task_requeue_authority import (
+    FEATURE_FLAG as TASK_REQUEUE_FEATURE_FLAG,
+    TASK_REQUEUE_DUPLICATE_STATUS as CANONICAL_TASK_REQUEUE_DUPLICATE_STATUS,
+    TASK_REQUEUE_PROJECTED_STATUS as CANONICAL_TASK_REQUEUE_PROJECTED_STATUS,
+    TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+    TaskRequeueAuthorityBinding,
+    TaskRequeueAuthorityError,
+    parse_task_requeue_binding_flag,
+)
+from hfa_control.task_terminal_authority import TaskTerminalAuthorityBinding
 
 logger = logging.getLogger(__name__)
 
@@ -290,15 +302,61 @@ class TaskHeartbeatManager:
 
 
 class TaskRecoveryManager:
-    def __init__(self, redis, policy: HeartbeatPolicy | None = None) -> None:
+    def __init__(
+        self,
+        redis,
+        policy: HeartbeatPolicy | None = None,
+        *,
+        canonical_task_requeue_binding: bool | None = None,
+        requeue_authority: TaskRequeueAuthorityBinding | None = None,
+        terminal_authority: TaskTerminalAuthorityBinding | None = None,
+    ) -> None:
         self._redis = redis
         self._policy = policy or HeartbeatPolicy()
         self._requeue_loader: Optional[LuaScriptLoader] = None
+        if canonical_task_requeue_binding is None:
+            canonical_task_requeue_binding = parse_task_requeue_binding_flag(
+                os.getenv(TASK_REQUEUE_FEATURE_FLAG)
+            )
+        elif type(canonical_task_requeue_binding) is not bool:
+            raise ValueError(
+                "canonical_task_requeue_binding must be an exact bool"
+            )
+        self._canonical_task_requeue_binding = canonical_task_requeue_binding
+        if not canonical_task_requeue_binding and (
+            requeue_authority is not None or terminal_authority is not None
+        ):
+            raise ValueError(
+                "canonical TASK_REQUEUE authorities require the canonical binding flag"
+            )
+        self._requeue_authority = (
+            requeue_authority
+            if requeue_authority is not None
+            else (
+                TaskRequeueAuthorityBinding(redis)
+                if canonical_task_requeue_binding
+                else None
+            )
+        )
+        self._terminal_authority = (
+            terminal_authority
+            if terminal_authority is not None
+            else (
+                TaskTerminalAuthorityBinding(redis)
+                if canonical_task_requeue_binding
+                else None
+            )
+        )
 
     async def initialise(self) -> None:
         path = _lua_path("task_requeue.lua")
         self._requeue_loader = LuaScriptLoader(self._redis, path)
         await self._requeue_loader.load()
+        if self._canonical_task_requeue_binding:
+            assert self._requeue_authority is not None
+            assert self._terminal_authority is not None
+            await self._requeue_authority.initialise()
+            await self._terminal_authority.initialise()
 
     async def find_stale_tasks(
         self, *, tenant_id: str, now_ms: int | None = None
@@ -323,6 +381,136 @@ class TaskRecoveryManager:
             if last_ms <= 0 or (now_ms - last_ms) > self._policy.stale_after_ms:
                 stale.append(task_id)
         return stale
+
+    async def _recover_existing_canonical_effects(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        tenant_id: str,
+        observed_at_ms: int,
+        reason_code: str,
+    ) -> TaskRequeueResult | None:
+        """Replay already-durable retry/terminal effects before a new decision.
+
+        A canonical commit may survive while its mutable projection/delivery did
+        not. In that crash window the TASK head is no longer ``running`` so a
+        fresh ``current_claim_context`` cannot be used. Recovery therefore
+        inspects the durable head first and delegates replay to the existing
+        authority bindings. No second TASK revision is created here.
+        """
+
+        assert self._requeue_authority is not None
+        assert self._terminal_authority is not None
+        store = self._requeue_authority.store
+        assert store is not None
+        identity = CanonicalAggregateIdentity(
+            aggregate_type=AggregateType.TASK,
+            run_id=run_id,
+            task_id=task_id,
+        )
+        try:
+            snapshot = await store.get_aggregate_snapshot(identity)
+        except Exception as exc:
+            raise TaskRequeueAuthorityError(
+                status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                detail=f"canonical TASK recovery head unavailable: {exc}",
+            ) from exc
+        if snapshot is None or snapshot.state == "running":
+            return None
+        try:
+            probe = await store.load_receipt_probe(identity, snapshot.operation_id)
+        except Exception as exc:
+            raise TaskRequeueAuthorityError(
+                status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                detail=f"canonical TASK recovery receipt unavailable: {exc}",
+            ) from exc
+        if probe is None or probe.canonical_store_record is None:
+            raise TaskRequeueAuthorityError(
+                status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                detail="canonical TASK recovery record/receipt is missing",
+            )
+        record = probe.canonical_store_record
+        data = record.authoritative_metadata_changes
+        if not isinstance(data, Mapping):
+            raise TaskRequeueAuthorityError(
+                status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                detail="canonical TASK recovery metadata is invalid",
+            )
+        expected_identity = {
+            "task_id": task_id,
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+        }
+        for field, wanted in expected_identity.items():
+            if data.get(field) != wanted:
+                raise TaskRequeueAuthorityError(
+                    status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                    detail=f"canonical TASK recovery {field} mismatch",
+                )
+
+        if snapshot.state == "ready":
+            if record.operation_type != OperationType.TASK_REQUEUE.value:
+                raise TaskRequeueAuthorityError(
+                    status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                    detail="canonical ready TASK head is not TASK_REQUEUE",
+                )
+            stored_reason = str(data.get("reason_code") or "")
+            if stored_reason != reason_code:
+                raise TaskRequeueAuthorityError(
+                    status="IDEMPOTENCY_CONFLICT",
+                    detail="durable TASK_REQUEUE reason_code differs from replay",
+                    canonical_commit_durable=True,
+                )
+            canonical = await self._requeue_authority.requeue(
+                task_id=task_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                observed_at_ms=observed_at_ms,
+                max_requeue_count=self._policy.max_requeue_count,
+                reason_code=stored_reason,
+                worker_instance_id=str(data.get("worker_instance_id") or ""),
+                scheduler_epoch=str(data.get("scheduler_epoch") or ""),
+                claim_epoch=data.get("claim_epoch"),
+            )
+            return TaskRequeueResult(
+                ok=False,
+                status="TASK_ALREADY_REQUEUED",
+                requeue_count=canonical.requeue_count,
+            )
+
+        if snapshot.state in {"done", "failed"}:
+            if record.operation_type not in {
+                OperationType.TASK_COMPLETE.value,
+                OperationType.TASK_FAIL.value,
+            }:
+                raise TaskRequeueAuthorityError(
+                    status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                    detail="canonical terminal TASK head has invalid operation",
+                )
+            await self._terminal_authority.replay_terminal_projection(
+                task_id=task_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                worker_instance_id=str(data.get("worker_instance_id") or ""),
+                scheduler_epoch=str(data.get("scheduler_epoch") or ""),
+                claim_epoch=data.get("claim_epoch"),
+            )
+            raw_count = await self._redis.hget(
+                DagRedisKey.task_meta(task_id),
+                TaskMetaField.REQUEUE_COUNT,
+            )
+            return TaskRequeueResult(
+                ok=False,
+                status="TASK_TERMINAL_RECOVERED",
+                requeue_count=max(0, _safe_int(raw_count, default=0)),
+            )
+
+        raise TaskRequeueAuthorityError(
+            status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+            detail=f"canonical TASK recovery head state is unsupported: {snapshot.state}",
+        )
+
 
     async def requeue_stale_task(
         self,
@@ -349,10 +537,80 @@ class TaskRecoveryManager:
         assert self._requeue_loader is not None
 
         now_ms = now_ms or int(time.time() * 1000)
-        ready_score = ready_score if ready_score is not None else now_ms
         resolved_run_id = await _resolve_run_id_compat(
             self._redis, task_id=task_id, run_id=run_id
         )
+
+        if self._canonical_task_requeue_binding:
+            if expected_state != "running":
+                raise ValueError(
+                    "canonical TASK_REQUEUE expected_state must be running"
+                )
+            assert self._requeue_authority is not None
+            assert self._terminal_authority is not None
+            recovered = await self._recover_existing_canonical_effects(
+                task_id=task_id,
+                run_id=resolved_run_id,
+                tenant_id=tenant_id,
+                observed_at_ms=now_ms,
+                reason_code=reason_code,
+            )
+            if recovered is not None:
+                return recovered
+            # Retry eligibility is derived from the exact durable TASK_CLAIM,
+            # never from a mutable retry counter or stale task projection.
+            claim = await self._requeue_authority.current_claim_context(
+                task_id=task_id,
+                run_id=resolved_run_id,
+                tenant_id=tenant_id,
+            )
+
+            if claim.dispatch_attempt > self._policy.max_requeue_count:
+                await self._terminal_authority.fail(
+                    task_id=task_id,
+                    run_id=resolved_run_id,
+                    tenant_id=tenant_id,
+                    finished_at_ms=now_ms,
+                    worker_instance_id=claim.worker_instance_id,
+                    scheduler_epoch=claim.scheduler_epoch,
+                    claim_epoch=claim.claim_epoch,
+                    reason_code="STALE_RETRY_EXHAUSTED",
+                )
+                return TaskRequeueResult(
+                    ok=False,
+                    status="TASK_RETRY_EXHAUSTED",
+                    requeue_count=max(0, claim.dispatch_attempt - 1),
+                )
+
+            canonical = await self._requeue_authority.requeue(
+                task_id=task_id,
+                run_id=resolved_run_id,
+                tenant_id=tenant_id,
+                observed_at_ms=now_ms,
+                max_requeue_count=self._policy.max_requeue_count,
+                reason_code=reason_code,
+                worker_instance_id=claim.worker_instance_id,
+                scheduler_epoch=claim.scheduler_epoch,
+                claim_epoch=claim.claim_epoch,
+            )
+            return TaskRequeueResult(
+                ok=(canonical.status == CANONICAL_TASK_REQUEUE_PROJECTED_STATUS),
+                status=(
+                    TASK_REQUEUED
+                    if canonical.status == CANONICAL_TASK_REQUEUE_PROJECTED_STATUS
+                    else (
+                        "TASK_ALREADY_REQUEUED"
+                        if canonical.status == CANONICAL_TASK_REQUEUE_DUPLICATE_STATUS
+                        else canonical.status
+                    )
+                ),
+                requeue_count=canonical.requeue_count,
+            )
+
+        # Legacy-only effect input. Canonical TASK_REQUEUE derives its stable
+        # ready score from the durable authority record committed_at_ms.
+        ready_score = ready_score if ready_score is not None else now_ms
+
         keys = [
             DagRedisKey.task_state(task_id),
             DagRedisKey.task_meta(task_id),

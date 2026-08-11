@@ -1,0 +1,285 @@
+name: Sprint 84.9 Canonical TASK_REQUEUE / Retry
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-control/src/hfa_control/task_requeue_authority.py'
+      - 'hfa-control/src/hfa_control/task_recovery.py'
+      - 'hfa-control/src/hfa_control/recovery.py'
+      - 'hfa-core/src/hfa/lua/task_requeue.lua'
+      - 'tests/unit/test_task_requeue_authority_contract.py'
+      - 'tests/integration/test_task_requeue_authority_integration.py'
+      - 'tests/integration/test_task_recovery_canonical_requeue_integration.py'
+      - 'tests/integration/test_task_recovery_production_composition_integration.py'
+      - '.github/workflows/sprint84-9-canonical-task-requeue-retry.yml'
+      - 'docs/implementation/sprint84/SPRINT84.9-canonical-task-requeue-retry.md'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  ACCEPTED_PARENT: 541c6a1f1d1753d917cfacce855d917faa64bc6a
+  FEATURE_BRANCH: sprint/84-9-canonical-task-requeue-retry
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      redis:
+        image: redis:7
+        ports: ['6389:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Exact parent and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ github.event.pull_request.base.sha }}" = "$ACCEPTED_PARENT"
+          test "${{ github.head_ref }}" = "$FEATURE_BRANCH"
+          python - <<'PY'
+          import os, subprocess
+          allowed={
+            'hfa-control/src/hfa_control/task_requeue_authority.py',
+            'hfa-control/src/hfa_control/task_recovery.py',
+            'hfa-control/src/hfa_control/recovery.py',
+            'hfa-core/src/hfa/lua/task_requeue.lua',
+            'tests/unit/test_task_requeue_authority_contract.py',
+            'tests/integration/test_task_requeue_authority_integration.py',
+            'tests/integration/test_task_recovery_canonical_requeue_integration.py',
+            'tests/integration/test_task_recovery_production_composition_integration.py',
+            '.github/workflows/sprint84-9-canonical-task-requeue-retry.yml',
+            'docs/implementation/sprint84/SPRINT84.9-canonical-task-requeue-retry.md',
+          }
+          changed=set(subprocess.check_output(['git','diff','--name-only',os.environ['ACCEPTED_PARENT']+'...HEAD'],text=True).splitlines())
+          assert changed == allowed, {'missing':sorted(allowed-changed),'unexpected':sorted(changed-allowed)}
+          print('SPRINT84_9_EXACT_SCOPE_OK',len(changed))
+          PY
+
+      - name: Frozen authority parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, subprocess
+          frozen=[
+            'hfa-core/src/hfa/authority/canonical_transition.py',
+            'hfa-control/src/hfa_control/task_claim_authority.py',
+            'hfa-control/src/hfa_control/task_terminal_authority.py',
+            'hfa-control/src/hfa_control/run_create_authority.py',
+            'hfa-control/src/hfa_control/run_terminate_authority.py',
+            'hfa-core/src/hfa/governance/admission_resource_reservation.py',
+            'hfa-core/src/hfa/lua/admission_resource_reservation.lua',
+            'hfa-worker/src/hfa_worker/run_finalizing_runtime.py',
+            'hfa-control/src/hfa_control/service.py',
+            'hfa-control/src/hfa_control/scheduler.py',
+            'hfa-control/src/hfa_control/scheduler_loop.py',
+            'hfa-worker/src/hfa_worker/main.py',
+            'hfa-worker/src/hfa_worker/process_root.py',
+          ]
+          for p in frozen:
+            expected=subprocess.check_output(['git','rev-parse',f"{os.environ['ACCEPTED_PARENT']}:{p}"],text=True).strip()
+            observed=subprocess.check_output(['git','hash-object',p],text=True).strip()
+            assert observed == expected,(p,observed,expected)
+          print('SPRINT84_9_FROZEN_PARITY_OK',len(frozen))
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
+
+      - name: Architecture and synchronization guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          a=Path('hfa-control/src/hfa_control/task_requeue_authority.py').read_text()
+          r=Path('hfa-control/src/hfa_control/task_recovery.py').read_text()
+          pr=Path('hfa-control/src/hfa_control/recovery.py').read_text()
+          l=Path('hfa-core/src/hfa/lua/task_requeue.lua').read_text()
+          t=Path('tests/integration/test_task_recovery_canonical_requeue_integration.py').read_text()
+          pt=Path('tests/integration/test_task_recovery_production_composition_integration.py').read_text()
+          root=Path('hfa-control/src/hfa_control/service.py').read_text()
+          assert 'HFA_CANONICAL_TASK_REQUEUE_BINDING' in a+r+pr
+          assert 'OperationType.TASK_REQUEUE' in a
+          assert 'class OperationType' not in a
+          assert 'return self.dispatch_attempt' in a
+          assert 'canonical_project' in l and 'canonical_deliver' in l
+          assert 'record.committed_at_ms' in a
+          assert 'requeued_at_ms' not in a[a.index('class TaskRequeueAuthorityInput'):a.index('def normalize_task_requeue_input')]
+          assert 'TaskRecoveryManager' in pr and '_sweep_stale_tasks' in pr
+          assert 'DagRedisKey.tenant_active_set()' in pr
+          assert '_handle_canonical_stale_run' in pr
+          assert '_validate_canonical_run_resources' in pr
+          assert 'RunTerminateAuthorityBinding' in pr
+          assert 'AdmissionResourceReservationManager' in pr
+          assert 'RUN_CREATE_FEATURE_FLAG' in pr
+          assert 'TASK_TERMINAL_RECOVERED' in r
+          assert 'ControlPlaneService' in pt
+          assert 'self._recovery = RecoveryService(redis, self._config)' in root
+          assert 'TaskTerminalAuthorityBinding' in r
+          assert 'asyncio.sleep' not in t
+          assert 'asyncio.sleep' not in pt
+          tests=[n.name for n in ast.parse(t).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith('test_')]
+          scenarios=[x for x in tests if len(x)>5 and x[5] in 'ABCDEFGHIJ' and x.startswith('test_')]
+          assert len(tests)==11,tests
+          prod=[n.name for n in ast.parse(pt).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith('test_')]
+          assert len(prod)==16,prod
+          k=[x for x in prod if x.startswith('test_K')]
+          assert len(k)==6,k
+          assert 'test_heartbeat_after_stale_observation_is_too_late_and_old_completion_is_fenced' in prod
+          assert len(scenarios)==10,scenarios
+          assert t.count('asyncio.Event') >= 10
+          forbidden=['xautoclaim(', 'TASK_REQUEUE =']
+          for token in forbidden: assert token not in a+r+pr,token
+          print('SPRINT84_9_ARCHITECTURE_GUARDS_OK')
+          PY
+
+      - name: Focused authority unit contracts
+        run: python -m pytest tests/unit/test_task_requeue_authority_contract.py -q --tb=short -p no:cacheprovider | tee sprint84_9_unit.txt
+      - name: Assert focused count
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_9_unit.txt
+          grep -Eq '(^|[^0-9])13 passed' sprint84_9_unit.txt
+
+      - name: Real Redis TASK_REQUEUE authority
+        run: python -m pytest tests/integration/test_task_requeue_authority_integration.py -q --tb=short -p no:cacheprovider | tee sprint84_9_redis.txt
+      - name: Assert authority Redis count
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_9_redis.txt
+          grep -Eq '(^|[^0-9])8 passed' sprint84_9_redis.txt
+
+      - name: Real Redis recovery composition A-J
+        run: python -m pytest tests/integration/test_task_recovery_canonical_requeue_integration.py -vv --tb=short -p no:cacheprovider | tee sprint84_9_recovery.txt
+      - name: Assert A-J and exhaustion
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_9_recovery.txt
+          grep -Eq '(^|[^0-9])11 passed' sprint84_9_recovery.txt
+          python - <<'PY'
+          from pathlib import Path
+          text=Path('sprint84_9_recovery.txt').read_text()
+          names=[
+            'test_A_before_canonical_commit_failure_changes_nothing',
+            'test_B_commit_succeeds_projection_fails_replay_keeps_one_revision',
+            'test_C_projection_succeeds_delivery_fails_then_retries_only_delivery',
+            'test_D_delivery_succeeds_ack_lost_replay_does_not_duplicate',
+            'test_E_two_recovery_scanners_race_exactly_one_revision',
+            'test_F_terminal_commit_wins_before_stale_requeue_commit',
+            'test_G_redelivery_after_commit_before_projection_recovers_same_operation',
+            'test_H_projection_complete_authority_redelivery_is_mutable_noop',
+            'test_I_divergent_duplicate_fails_without_projection_or_delivery',
+            'test_J_exact_duplicate_returns_same_durable_truth_zero_new_revision',
+          ]
+          for letter,name in zip('ABCDEFGHIJ',names):
+            assert name in text,name
+            print(f'SCENARIO_{letter}: PASS')
+          PY
+
+      - name: Real production ControlPlaneService recovery composition
+        run: python -m pytest tests/integration/test_task_recovery_production_composition_integration.py -vv --tb=short -p no:cacheprovider | tee sprint84_9_production.txt
+      - name: Assert production composition count
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_9_production.txt
+          grep -Eq '(^|[^0-9])16 passed' sprint84_9_production.txt
+          python - <<'PY'
+          from pathlib import Path
+          text=Path('sprint84_9_production.txt').read_text()
+          names=[
+            'test_K1_task_fail_commit_failure_leaves_task_run_and_resources_unchanged',
+            'test_K2_task_fail_durable_projection_failure_replays_without_second_revision',
+            'test_K3_task_terminal_complete_run_commit_failure_retries_from_stale_run',
+            'test_K4_run_terminate_durable_settlement_failure_reuses_operation_and_settles_once',
+            'test_K5_settlement_success_run_projection_failure_replays_without_second_settlement',
+            'test_K6_full_exhaustion_closes_task_run_resources_once_without_legacy_retry',
+            'test_heartbeat_after_stale_observation_is_too_late_and_old_completion_is_fenced',
+          ]
+          for name in names:
+            assert name in text,name
+          for label in ['K1','K2','K3','K4','K5','K6']:
+            print(f'SCENARIO_{label}: PASS')
+          print('HEARTBEAT_STALE_RACE: PASS')
+          PY
+
+      - name: Historical regression matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_count(){ name="$1"; expected="$2"; shift 2; out="local_out/${name// /_}.txt"; mkdir -p local_out; python -m pytest "$@" -q --tb=short -p no:cacheprovider | tee "$out"; ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' "$out"; grep -Eq "(^|[^0-9])${expected} passed" "$out"; }
+          run_count s84_8_focused 66 tests/unit/test_admission_resource_reservation.py tests/unit/test_run_terminate_resource_settlement_contract.py tests/core/test_production_worker_resource_settlement_composition_contract.py
+          run_count s84_8_redis 20 tests/integration/test_run_terminate_resource_settlement_integration.py tests/integration/test_worker_resource_settlement_canonical_composition_integration.py
+          run_count s84_7e_focused 8 tests/core/test_production_worker_crash_retry_contract.py
+          run_count s84_7e_redis 7 tests/integration/test_worker_crash_retry_canonical_composition_integration.py
+          run_count s84_7d_focused 7 tests/core/test_production_worker_run_terminate_canonical_composition_contract.py
+          run_count s84_7d_redis 6 tests/integration/test_worker_run_terminate_canonical_composition_integration.py
+          run_count run_authority 23 tests/unit/test_run_terminate_authority_binding.py tests/integration/test_run_terminate_authority_binding_integration.py
+          run_count c2_focused 22 tests/core/test_production_worker_terminal_composition_contract.py tests/core/test_production_worker_process_root_terminal_contract.py
+          run_count c2_redis 3 tests/integration/test_worker_task_terminal_canonical_composition_integration.py
+          run_count c1_unit 7 tests/unit/test_task_terminal_authority_contract.py
+          run_count c1_redis 23 tests/integration/test_task_terminal_authority_integration.py
+          run_count legacy_terminal 18 tests/core/test_task_complete_lua_contract.py tests/core/test_task_consumer_fenced_completion_contract.py tests/integration/test_task_complete_owner_integration.py tests/integration/test_task_complete_unlock_integration.py tests/integration/test_task_output_persistence_integration.py tests/integration/test_failure_sweeper_integration.py
+          run_count s84_7b 76 tests/core/test_production_worker_composition_contract.py tests/core/test_production_worker_process_root_contract.py tests/core/test_task_claim_service_legacy_quarantine_contract.py tests/core/test_task_requested_routing_contract.py tests/unit/test_task_claim_authority_binding.py tests/unit/test_task_claim_authority_contract.py
+          run_count task_claim 83 tests/unit/test_task_claim_authority_binding.py tests/unit/test_task_claim_authority_contract.py tests/core/test_task_claim_legacy_direct_gate_contract.py tests/core/test_task_claim_reservation_owner_lookup_contract.py tests/core/test_task_claim_service_legacy_quarantine_contract.py tests/core/test_task_claim_start_contract.py tests/core/test_task_claim_status_taxonomy_contract.py tests/integration/test_task_claim_authority_binding_integration.py tests/integration/test_task_claim_authority_projection_integration.py tests/integration/test_task_claim_legacy_direct_gate_integration.py tests/integration/test_task_claim_reservation_integration.py tests/integration/test_task_claim_start_integration.py tests/integration/test_worker_task_claim_canonical_composition_integration.py
+          run_count run_finalization 41 tests/core/test_production_run_finalization_binding.py tests/integration/test_production_run_finalization_binding_integration.py tests/integration/test_terminal_task_run_finalization.py tests/integration/test_runtime_alpha_product_acceptance_83_2.py
+          run_count production_worker 43 tests/core/test_production_worker_composition_contract.py tests/core/test_production_worker_process_root_contract.py tests/core/test_worker_service_lifecycle_contract.py tests/core/test_worker_startup_failure_projection_red.py tests/core/test_worker_ack_authority_contract.py
+          run_count sprint83_7 174 tests/unit/test_product_alpha_profile.py tests/unit/test_product_alpha_worker_capabilities.py tests/unit/test_product_alpha_readiness.py tests/unit/test_product_alpha_run_shape.py tests/unit/test_product_alpha_failure_contract.py tests/core/test_production_run_finalization_binding.py tests/core/test_production_scheduler_composition_contract.py tests/unit/test_run_submission_coordinator.py tests/unit/test_run_status_result_read_model.py tests/unit/test_user_facing_run_result.py tests/integration/test_run_status_result_read_model_integration.py tests/integration/test_product_alpha_closure_e2e_83_7.py
+          run_count sprint83_8 199 tests/unit/test_product_alpha_profile.py tests/unit/test_product_alpha_worker_capabilities.py tests/unit/test_product_alpha_readiness.py tests/unit/test_product_alpha_run_shape.py tests/unit/test_product_alpha_failure_contract.py tests/unit/test_submission_idempotency.py tests/core/test_production_run_finalization_binding.py tests/core/test_production_scheduler_composition_contract.py tests/unit/test_run_submission_coordinator.py tests/unit/test_run_status_result_read_model.py tests/unit/test_user_facing_run_result.py tests/integration/test_run_status_result_read_model_integration.py tests/integration/test_product_alpha_closure_e2e_83_7.py tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py
+
+      - name: Authority audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out
+          python scripts/authority_audit.py --repo-root . --format dashboard --output local_out/sprint84_9_authority.json --fail-on banned
+          python - <<'PY'
+          import json
+          d=json.load(open('local_out/sprint84_9_authority.json'))
+          c=d.get('counts') or d.get('summary') or {}
+          banned=int(c.get('banned',d.get('banned',0)) or 0)
+          assert banned == 0,d
+          print('AUTHORITY_BANNED',banned)
+          PY
+
+      - name: YAML compile and diff hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import compileall, yaml
+          from pathlib import Path
+          p=Path('.github/workflows/sprint84-9-canonical-task-requeue-retry.yml')
+          assert isinstance(yaml.safe_load(p.read_text()),dict)
+          assert compileall.compile_dir('hfa-control/src/hfa_control',quiet=1)
+          assert compileall.compile_dir('tests/unit',quiet=1)
+          assert compileall.compile_dir('tests/integration',quiet=1)
+          print('YAML_COMPILE_PASS')
+          PY
+          git diff --check "$ACCEPTED_PARENT"...HEAD
