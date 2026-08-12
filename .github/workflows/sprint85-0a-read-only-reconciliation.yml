@@ -111,6 +111,50 @@ jobs:
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
 
+      - name: Normalize editable-install generated metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+
+          dirty = subprocess.check_output(
+              ['git', 'diff', '--name-only'],
+              text=True,
+          ).splitlines()
+
+          unexpected = [
+              path for path in dirty
+              if '.egg-info/' not in path.replace('\\', '/')
+          ]
+
+          assert not unexpected, {
+              'unexpected_post_install_tracked_changes': unexpected,
+              'all_dirty': dirty,
+          }
+
+          if dirty:
+              print('EDITABLE_INSTALL_GENERATED_METADATA:')
+              for path in dirty:
+                  print(path)
+
+              subprocess.run(
+                  ['git', 'restore', '--worktree', '--', *dirty],
+                  check=True,
+              )
+
+          remaining = subprocess.check_output(
+              ['git', 'diff', '--name-only'],
+              text=True,
+          ).splitlines()
+
+          assert remaining == [], {
+              'tracked_changes_after_metadata_normalization': remaining,
+          }
+
+          print('EDITABLE_INSTALL_METADATA_NORMALIZED', len(dirty))
+          PY
+
       - name: Redis 7 preflight via Python client
         shell: bash
         run: |
