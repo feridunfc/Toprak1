@@ -73,6 +73,15 @@ class ReconciliationReason(str, Enum):
     READY_QUEUE_SCORE_MISMATCH = "READY_QUEUE_SCORE_MISMATCH"
     REQUEUE_DELIVERY_PROOF_MISSING = "REQUEUE_DELIVERY_PROOF_MISSING"
     REQUEUE_DELIVERY_PROOF_MISMATCH = "REQUEUE_DELIVERY_PROOF_MISMATCH"
+    RUN_STATE_MISMATCH = "RUN_STATE_MISMATCH"
+    PROJECTION_VALUE_MISMATCH = "PROJECTION_VALUE_MISMATCH"
+    PROJECTION_MEMBERSHIP_MISMATCH = "PROJECTION_MEMBERSHIP_MISMATCH"
+    PROJECTION_SCORE_MISMATCH = "PROJECTION_SCORE_MISMATCH"
+    TASK_OUTPUT_MISMATCH = "TASK_OUTPUT_MISMATCH"
+    RUN_META_MISMATCH = "RUN_META_MISMATCH"
+    RUN_RESULT_MISMATCH = "RUN_RESULT_MISMATCH"
+    OWNERSHIP_PROJECTION_MISMATCH = "OWNERSHIP_PROJECTION_MISMATCH"
+    DEPENDENCY_FANOUT_EVIDENCE_REQUIRED = "DEPENDENCY_FANOUT_EVIDENCE_REQUIRED"
 
 
 Scalar = str | int | float | bool | None
@@ -1181,3 +1190,1769 @@ class TaskRequeueReconciler:
                 observation=observation,
             )
         ]
+
+# Sprint 85.0B — explicit current-head reconciliation coverage.
+# This block extends the accepted 85.0A primitives above.  It owns no
+# authority, repair, replay, delivery or resource-settlement capability.
+
+import hashlib as _reconciliation_hashlib
+from dataclasses import dataclass as _reconciliation_dataclass
+
+from hfa.config.keys import RedisKey as _ReconciliationRedisKey
+from hfa.events.codec import serialize_event as _reconciliation_serialize_event
+from hfa.events.schema import RunAdmittedEvent as _ReconciliationRunAdmittedEvent
+
+
+CURRENT_HEAD_RECONCILIATION_CONTRACT_VERSION = 1
+_CURRENT_HEAD_OPERATIONS = frozenset(
+    {
+        OperationType.RUN_CREATE,
+        OperationType.TASK_ADMIT,
+        OperationType.TASK_DISPATCH,
+        OperationType.TASK_CLAIM,
+        OperationType.TASK_COMPLETE,
+        OperationType.TASK_FAIL,
+        OperationType.RUN_TERMINATE,
+    }
+)
+
+
+@_reconciliation_dataclass(frozen=True)
+class ProjectionRule:
+    field: str
+    expected: Scalar
+    reason: ReconciliationReason
+    severity: ReconciliationSeverity
+
+
+@_reconciliation_dataclass(frozen=True)
+class CurrentHeadCanonicalEvidence:
+    aggregate_type: str
+    operation_type: OperationType
+    run_id: str
+    task_id: str | None
+    tenant_id: str
+    previous_state: str | None
+    state: str
+    revision: int
+    transition_id: str
+    record_hash: str
+    command_hash: str
+    operation_id: str
+    committed_at_ms: int
+    rules: tuple[ProjectionRule, ...]
+    key_hints: FrozenFields = ()
+
+    @property
+    def canonical_reference(self) -> ReconciliationCanonicalReference:
+        return ReconciliationCanonicalReference(
+            revision=self.revision,
+            operation_type=self.operation_type.value,
+            state=self.state,
+            transition_id=self.transition_id,
+            record_hash=self.record_hash,
+            command_hash=self.command_hash,
+            operation_id=self.operation_id,
+            committed_at_ms=self.committed_at_ms,
+        )
+
+    @property
+    def fingerprint(self) -> tuple[Any, ...]:
+        return (
+            self.aggregate_type,
+            self.operation_type.value,
+            self.run_id,
+            self.task_id,
+            self.previous_state,
+            self.state,
+            self.revision,
+            self.transition_id,
+            self.record_hash,
+            self.command_hash,
+            self.operation_id,
+        )
+
+    def hint(self, name: str) -> str:
+        raw = dict(self.key_hints).get(name)
+        return "" if raw is None else str(raw)
+
+
+@_reconciliation_dataclass(frozen=True)
+class CurrentHeadRuntimeEvidence:
+    operation_type: OperationType
+    fields: FrozenFields
+
+    def value(self, field: str) -> Scalar:
+        return dict(self.fields).get(field)
+
+    @property
+    def fingerprint(self) -> tuple[Any, ...]:
+        # Operation-specific readers intentionally omit coordination-only values
+        # (notably TASK_CLAIM heartbeat timestamps and running ZSET score).
+        return (self.operation_type.value, self.fields)
+
+
+class CurrentHeadCanonicalReader(Protocol):
+    async def read_current_head(
+        self,
+        *,
+        operation_type: OperationType,
+        run_id: str,
+        task_id: str | None,
+    ) -> CurrentHeadCanonicalEvidence: ...
+
+
+class CurrentHeadRuntimeReader(Protocol):
+    async def read_current_projection(
+        self,
+        *,
+        canonical: CurrentHeadCanonicalEvidence,
+    ) -> CurrentHeadRuntimeEvidence: ...
+
+
+def _rule(
+    field: str,
+    expected: Scalar,
+    reason: ReconciliationReason,
+    severity: ReconciliationSeverity = ReconciliationSeverity.CRITICAL,
+) -> ProjectionRule:
+    return ProjectionRule(field=field, expected=expected, reason=reason, severity=severity)
+
+
+def _type_rule(surface: str, expected: str) -> ProjectionRule:
+    return _rule(
+        f"type.{surface}",
+        expected,
+        ReconciliationReason.PROJECTION_SCHEMA_MISMATCH,
+        ReconciliationSeverity.CRITICAL,
+    )
+
+
+def _proof_rules(
+    *,
+    transition_id: str,
+    record_hash: str,
+    command_hash: str,
+    revision: int,
+    operation_id: str,
+    prefix: str = "meta.",
+) -> tuple[ProjectionRule, ...]:
+    return (
+        _rule(f"{prefix}canonical_transition_id", transition_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+        _rule(f"{prefix}canonical_record_hash", record_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+        _rule(f"{prefix}canonical_command_hash", command_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+        _rule(f"{prefix}canonical_revision", str(revision), ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+        _rule(f"{prefix}canonical_operation_id", operation_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+    )
+
+
+def _metadata(record: Any, *, operation: OperationType) -> Mapping[str, Any]:
+    raw = record.authoritative_metadata_changes
+    if not isinstance(raw, Mapping):
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail=f"{operation.value} authoritative metadata is not a mapping",
+        )
+    return raw
+
+
+def _required_metadata_text(metadata: Mapping[str, Any], field: str, operation: OperationType) -> str:
+    value = metadata.get(field)
+    if type(value) is not str or not value:
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail=f"{operation.value} metadata field {field} is missing/invalid",
+        )
+    return value
+
+
+def _metadata_int(metadata: Mapping[str, Any], field: str, operation: OperationType, minimum: int = 0) -> int:
+    value = metadata.get(field)
+    if type(value) is bool:
+        value = None
+    if type(value) is int:
+        result = value
+    elif type(value) is float and value.is_integer():
+        result = int(value)
+    elif type(value) is str and value.isdecimal():
+        result = int(value)
+    else:
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail=f"{operation.value} metadata field {field} is missing/invalid",
+        )
+    if result < minimum:
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail=f"{operation.value} metadata field {field} is below {minimum}",
+        )
+    return result
+
+
+def _require_exact_projection_intents(
+    record: Any,
+    operation: OperationType,
+    expected: Sequence[Mapping[str, Any]],
+) -> None:
+    try:
+        observed = _intent_dicts(record.durable_projection_intents)
+    except ValueError as exc:
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail=f"{operation.value} durable projection intents are corrupt: {exc}",
+        ) from exc
+    if canonical_json_bytes(observed) != canonical_json_bytes(tuple(expected)):
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail=f"{operation.value} durable projection intent contract mismatch",
+        )
+
+
+def _projection_receipt_key(kind: str, operation_id: str) -> str:
+    digest = _reconciliation_hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    return f"{_ReconciliationRedisKey.PREFIX}:{kind}:projection:v1:{digest}"
+
+
+def _event_id_for_run_terminate(run_id: str, final_state: str, task_count: int) -> str:
+    material = f"RUN_TERMINATE\x1f{run_id}\x1f{final_state}\x1f{task_count}"
+    return _reconciliation_hashlib.sha1(material.encode("utf-8")).hexdigest()
+
+
+def _run_create_event_payload_hash(metadata: Mapping[str, Any], operation_id: str) -> str:
+    operation = OperationType.RUN_CREATE
+    payload = metadata.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail="RUN_CREATE payload is not a mapping",
+        )
+    created_at_ms = _metadata_int(metadata, "created_at_ms", operation)
+    event_digest = _reconciliation_hashlib.sha256(
+        f"run-admitted-event:v1:{operation_id}".encode("utf-8")
+    ).hexdigest()
+    seconds = created_at_ms / 1000.0
+    event = _ReconciliationRunAdmittedEvent(
+        event_id=event_digest,
+        timestamp=seconds,
+        trace_parent=None,
+        trace_state=None,
+        run_id=_required_metadata_text(metadata, "run_id", operation),
+        tenant_id=_required_metadata_text(metadata, "tenant_id", operation),
+        agent_type=_required_metadata_text(metadata, "agent_type", operation),
+        priority=_metadata_int(metadata, "priority", operation),
+        preferred_region=str(metadata.get("preferred_region", "") or ""),
+        preferred_placement=_required_metadata_text(metadata, "preferred_placement", operation),
+        payload=dict(payload),
+        estimated_cost_cents=_metadata_int(metadata, "estimated_cost_cents", operation),
+        admitted_at=seconds,
+    )
+    fields = _reconciliation_serialize_event(event)
+    encoded = canonical_json_bytes(fields)
+    return _reconciliation_hashlib.sha256(encoded).hexdigest()
+
+
+class CurrentHeadCanonicalReconciliationReader(RedisCanonicalReconciliationReader):
+    """85.0B extension of the accepted read-only canonical facade.
+
+    Only inherited ``_snapshot`` / ``_probe`` reads are used.  No commit,
+    initialise, conflict-recording or head-repair surface is exposed.
+    """
+
+    async def _exact_record(
+        self,
+        *,
+        identity: CanonicalAggregateIdentity,
+        operation_type: OperationType,
+    ) -> tuple[Any, Any]:
+        if operation_type not in _CURRENT_HEAD_OPERATIONS or operation_type not in OPERATION_CONTRACTS:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail=f"operation {operation_type.value} is outside Sprint 85.0B current-head coverage",
+            )
+        snapshot_a = await self._snapshot(identity)
+        if snapshot_a is None:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail="canonical aggregate is missing",
+            )
+        fingerprint_a = (
+            snapshot_a.revision,
+            snapshot_a.state,
+            snapshot_a.transition_id,
+            snapshot_a.canonical_record_hash,
+            snapshot_a.canonical_command_hash,
+            snapshot_a.operation_id,
+        )
+        probe = await self._probe(identity, snapshot_a.operation_id)
+        try:
+            record, _receipt = self._record_receipt_checks(identity, probe)
+        except ReconciliationEvidenceError as exc:
+            exc.canonical_fingerprint = fingerprint_a
+            raise
+        if record.operation_type != operation_type.value:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail=f"current canonical head is {record.operation_type}, not {operation_type.value}",
+                canonical_fingerprint=fingerprint_a,
+            )
+        checks = (
+            record.to_revision == snapshot_a.revision,
+            record.next_state == snapshot_a.state,
+            record.transition_id == snapshot_a.transition_id,
+            record.canonical_record_hash == snapshot_a.canonical_record_hash,
+            record.canonical_command_hash == snapshot_a.canonical_command_hash,
+            record.operation_id == snapshot_a.operation_id,
+            snapshot_a.updated_at_ms == record.committed_at_ms,
+            snapshot_a.projection_intents_json
+            == canonical_json_bytes(record.durable_projection_intents).decode("utf-8"),
+            bool(record.verify_hash()),
+        )
+        if not all(checks):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail=f"{operation_type.value} snapshot/record head continuity mismatch",
+                canonical_fingerprint=fingerprint_a,
+            )
+        snapshot_b = await self._snapshot(identity)
+        if snapshot_b is None:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                detail="canonical aggregate disappeared during evidence read",
+            )
+        fingerprint_b = (
+            snapshot_b.revision,
+            snapshot_b.state,
+            snapshot_b.transition_id,
+            snapshot_b.canonical_record_hash,
+            snapshot_b.canonical_command_hash,
+            snapshot_b.operation_id,
+        )
+        if fingerprint_a != fingerprint_b:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                detail="canonical head changed during evidence read",
+                canonical_fingerprint=fingerprint_b,
+            )
+        return record, snapshot_b
+
+    @staticmethod
+    def _reference_rules(record: Any) -> tuple[ProjectionRule, ...]:
+        return _proof_rules(
+            transition_id=record.transition_id,
+            record_hash=record.canonical_record_hash,
+            command_hash=record.canonical_command_hash,
+            revision=record.to_revision,
+            operation_id=record.operation_id,
+        )
+
+    async def _predecessor(
+        self,
+        *,
+        identity: CanonicalAggregateIdentity,
+        operation_id: str,
+        operation_type: OperationType,
+        transition_id: str,
+        record_hash: str,
+        command_hash: str,
+        revision: int,
+        next_state: str,
+    ) -> Any:
+        probe = await self._probe(identity, operation_id)
+        try:
+            record, _receipt = self._record_receipt_checks(identity, probe)
+        except ReconciliationEvidenceError as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail=f"{operation_type.value} predecessor proof unreadable: {exc.detail}",
+            ) from exc
+        checks = (
+            record.operation_type == operation_type.value,
+            record.operation_id == operation_id,
+            record.transition_id == transition_id,
+            record.canonical_record_hash == record_hash,
+            record.canonical_command_hash == command_hash,
+            record.to_revision == revision,
+            record.next_state == next_state,
+        )
+        if not all(checks):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail=f"{operation_type.value} durable predecessor proof mismatch",
+            )
+        return record
+
+    async def read_current_head(
+        self,
+        *,
+        operation_type: OperationType,
+        run_id: str,
+        task_id: str | None,
+    ) -> CurrentHeadCanonicalEvidence:
+        if operation_type in {OperationType.RUN_CREATE, OperationType.RUN_TERMINATE}:
+            identity = CanonicalAggregateIdentity(AggregateType.RUN, run_id, None)
+        else:
+            if not task_id:
+                raise ReconciliationEvidenceError(
+                    reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                    detail=f"{operation_type.value} requires task_id",
+                )
+            identity = CanonicalAggregateIdentity(AggregateType.TASK, run_id, task_id)
+        record, _snapshot = await self._exact_record(identity=identity, operation_type=operation_type)
+        if operation_type is OperationType.RUN_CREATE:
+            return self._run_create(identity, record)
+        if operation_type is OperationType.TASK_ADMIT:
+            return self._task_admit(identity, record)
+        if operation_type is OperationType.TASK_DISPATCH:
+            return self._task_dispatch(identity, record)
+        if operation_type is OperationType.TASK_CLAIM:
+            return await self._task_claim(identity, record)
+        if operation_type is OperationType.TASK_COMPLETE:
+            return await self._task_terminal(identity, record, OperationType.TASK_COMPLETE)
+        if operation_type is OperationType.TASK_FAIL:
+            return await self._task_terminal(identity, record, OperationType.TASK_FAIL)
+        if operation_type is OperationType.RUN_TERMINATE:
+            return self._run_terminate(identity, record)
+        raise AssertionError(operation_type)
+
+    def _base(
+        self,
+        *,
+        identity: CanonicalAggregateIdentity,
+        record: Any,
+        tenant_id: str,
+        rules: Sequence[ProjectionRule],
+        key_hints: Mapping[str, Scalar] | None = None,
+    ) -> CurrentHeadCanonicalEvidence:
+        return CurrentHeadCanonicalEvidence(
+            aggregate_type=identity.aggregate_type.value,
+            operation_type=OperationType(record.operation_type),
+            run_id=identity.run_id,
+            task_id=identity.task_id,
+            tenant_id=tenant_id,
+            previous_state=record.previous_state,
+            state=record.next_state,
+            revision=record.to_revision,
+            transition_id=record.transition_id,
+            record_hash=record.canonical_record_hash,
+            command_hash=record.canonical_command_hash,
+            operation_id=record.operation_id,
+            committed_at_ms=record.committed_at_ms,
+            rules=tuple(rules),
+            key_hints=_freeze_fields(key_hints),
+        )
+
+    def _run_create(self, identity: CanonicalAggregateIdentity, record: Any) -> CurrentHeadCanonicalEvidence:
+        op = OperationType.RUN_CREATE
+        md = _metadata(record, operation=op)
+        tenant_id = _required_metadata_text(md, "tenant_id", op)
+        expected_operation_id = f"run-create:v1:{identity.sha256}"
+        if not (
+            record.from_revision == 0
+            and record.to_revision == 1
+            and record.previous_state is None
+            and record.next_state == "pending"
+            and record.operation_id == expected_operation_id
+            and md.get("run_id") == identity.run_id
+            and md.get("legacy_projection_state") == "admitted"
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_CREATE canonical contract mismatch",
+            )
+        _require_exact_projection_intents(
+            record,
+            op,
+            (
+                {
+                    "kind": "RUN_STATUS_PROJECTION",
+                    "legacy_state": "admitted",
+                    "control_stream": _required_metadata_text(md, "control_stream", op),
+                },
+            ),
+        )
+        receipt_key = _projection_receipt_key("run-create", record.operation_id)
+        rules = [
+            _type_rule("run_state", "string"),
+            _rule("run_state", "admitted", ReconciliationReason.RUN_STATE_MISMATCH),
+            _type_rule("projection_receipt", "hash"),
+            _rule("receipt.operation_id", record.operation_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("receipt.canonical_transition_id", record.transition_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("receipt.canonical_record_hash", record.canonical_record_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("receipt.canonical_command_hash", record.canonical_command_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("receipt.canonical_revision", str(record.to_revision), ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("receipt.run_id", identity.run_id, ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+            _rule("receipt.tenant_id", tenant_id, ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+            _rule("receipt.legacy_state", "admitted", ReconciliationReason.RUN_STATE_MISMATCH),
+            _rule("receipt.event_payload_hash", _run_create_event_payload_hash(md, record.operation_id), ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+            _rule("receipt.stream_entry_id_present", True, ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+        ]
+        return self._base(
+            identity=identity,
+            record=record,
+            tenant_id=tenant_id,
+            rules=rules,
+            key_hints={"projection_receipt": receipt_key},
+        )
+
+    def _task_admit(self, identity: CanonicalAggregateIdentity, record: Any) -> CurrentHeadCanonicalEvidence:
+        op = OperationType.TASK_ADMIT
+        md = _metadata(record, operation=op)
+        tenant_id = _required_metadata_text(md, "tenant_id", op)
+        dependency_count = _metadata_int(md, "dependency_count", op)
+        admitted_at = _metadata_int(md, "admitted_at_ms", op)
+        expected_state = "ready" if dependency_count <= 0 else "pending"
+        if not (
+            record.from_revision == 0
+            and record.to_revision == 1
+            and record.previous_state is None
+            and record.next_state == expected_state
+            and record.operation_id == f"task-admit:v1:{identity.sha256}"
+            and md.get("task_id") == identity.task_id
+            and md.get("run_id") == identity.run_id
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="TASK_ADMIT canonical contract mismatch",
+            )
+        expected_intents: tuple[Mapping[str, Any], ...] = (
+            (
+                {
+                    "kind": "READY_QUEUE_IF_READY",
+                    "task_id": identity.task_id,
+                    "tenant_id": tenant_id,
+                    "ready_score": admitted_at,
+                },
+            )
+            if expected_state == "ready"
+            else ()
+        )
+        _require_exact_projection_intents(record, op, expected_intents)
+        identity_rules = [
+            _rule("meta.task_id", identity.task_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.run_id", identity.run_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.tenant_id", tenant_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+        ]
+        value_fields = {
+            "agent_type": str(md.get("agent_type", "") or ""),
+            "priority": str(_metadata_int(md, "priority", op)),
+            "admitted_at": str(admitted_at),
+            "payload_json": str(md.get("payload_json", "") or ""),
+            "trace_parent": str(md.get("trace_parent", "") or ""),
+            "trace_state": str(md.get("trace_state", "") or ""),
+            "region": str(md.get("region", "") or ""),
+            "policy": str(md.get("policy", "") or ""),
+        }
+        rules: list[ProjectionRule] = [
+            _type_rule("task_state", "string"),
+            _rule("task_state", expected_state, ReconciliationReason.TASK_STATE_MISMATCH),
+            _type_rule("task_meta", "hash"),
+            _type_rule("remaining_deps", "string"),
+            _rule("remaining_deps", str(dependency_count), ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+            _type_rule("run_tasks", "set"),
+            _rule("run_tasks_member", True, ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH),
+            _type_rule("ready_queue", "none|zset"),
+        ]
+        rules.extend(identity_rules)
+        rules.extend(
+            _rule(f"meta.{field}", value, ReconciliationReason.PROJECTION_VALUE_MISMATCH, ReconciliationSeverity.WARNING)
+            for field, value in value_fields.items()
+        )
+        if expected_state == "ready":
+            rules.extend(
+                [
+                    _rule("ready_member", True, ReconciliationReason.READY_QUEUE_MEMBERSHIP_MISSING),
+                    _rule("ready_score", float(admitted_at), ReconciliationReason.READY_QUEUE_SCORE_MISMATCH, ReconciliationSeverity.WARNING),
+                    _type_rule("ready_emitted", "string"),
+                    _rule("ready_emitted", "1", ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+                ]
+            )
+        else:
+            rules.extend(
+                [
+                    _rule("ready_member", False, ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH),
+                    _type_rule("ready_emitted", "none|string"),
+                ]
+            )
+        return self._base(
+            identity=identity,
+            record=record,
+            tenant_id=tenant_id,
+            rules=rules,
+            key_hints={
+                "admit_state": expected_state,
+                "dependency_count": str(dependency_count),
+            },
+        )
+
+    def _task_dispatch(self, identity: CanonicalAggregateIdentity, record: Any) -> CurrentHeadCanonicalEvidence:
+        op = OperationType.TASK_DISPATCH
+        md = _metadata(record, operation=op)
+        tenant_id = _required_metadata_text(md, "tenant_id", op)
+        attempt = _metadata_int(md, "dispatch_attempt", op, 1)
+        scheduled_at = _metadata_int(md, "scheduled_at_ms", op)
+        worker_id = _required_metadata_text(md, "worker_id", op)
+        scheduler_epoch = _required_metadata_text(md, "scheduler_epoch", op)
+        expected_operation_id = f"task-dispatch:v1:{identity.sha256}:attempt:{attempt}"
+        if not (
+            record.previous_state == "ready"
+            and record.next_state == "scheduled"
+            and record.operation_id == expected_operation_id
+            and md.get("task_id") == identity.task_id
+            and md.get("run_id") == identity.run_id
+            and md.get("ready_queue") == DagRedisKey.task_ready_queue(tenant_id)
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="TASK_DISPATCH canonical contract mismatch",
+            )
+        _require_exact_projection_intents(
+            record,
+            op,
+            (
+                {"kind": "CONTROL_NOTIFICATION", "stream": _required_metadata_text(md, "control_stream", op)},
+                {"kind": "TASK_REQUEST_MESSAGE", "stream": _required_metadata_text(md, "shard_stream", op)},
+            ),
+        )
+        rules: list[ProjectionRule] = [
+            _type_rule("task_state", "string"),
+            _rule("task_state", "scheduled", ReconciliationReason.TASK_STATE_MISMATCH),
+            _type_rule("task_meta", "hash"),
+            _rule("meta.task_id", identity.task_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.run_id", identity.run_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.tenant_id", tenant_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.dispatch_attempt", str(attempt), ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+            _rule("meta.dispatch_worker_id", worker_id, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            _rule("meta.scheduler_epoch", scheduler_epoch, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            *_proof_rules(
+                transition_id=record.transition_id,
+                record_hash=record.canonical_record_hash,
+                command_hash=record.canonical_command_hash,
+                revision=record.to_revision,
+                operation_id=record.operation_id,
+            ),
+            _type_rule("ready_queue", "none|zset"),
+            _rule("ready_member", False, ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH),
+            _type_rule("scheduled_index", "none|zset"),
+            _rule("scheduled_member", True, ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH),
+            _rule("scheduled_score", float(scheduled_at), ReconciliationReason.PROJECTION_SCORE_MISMATCH, ReconciliationSeverity.WARNING),
+            _type_rule("running_index", "none|zset"),
+            _rule("running_member", False, ReconciliationReason.RUNNING_INDEX_MEMBERSHIP_PRESENT),
+        ]
+        return self._base(
+            identity=identity,
+            record=record,
+            tenant_id=tenant_id,
+            rules=rules,
+            key_hints={
+                "ready_queue": str(md.get("ready_queue") or DagRedisKey.task_ready_queue(tenant_id)),
+                "scheduled_index": _required_metadata_text(md, "scheduled_zset", op),
+                "running_index": _required_metadata_text(md, "running_zset", op),
+            },
+        )
+
+    async def _task_claim(self, identity: CanonicalAggregateIdentity, record: Any) -> CurrentHeadCanonicalEvidence:
+        op = OperationType.TASK_CLAIM
+        md = _metadata(record, operation=op)
+        tenant_id = _required_metadata_text(md, "tenant_id", op)
+        attempt = _metadata_int(md, "dispatch_attempt", op, 1)
+        claim_epoch = _metadata_int(md, "claim_epoch", op, 1)
+        previous_claim_epoch = _metadata_int(md, "previous_claim_epoch", op)
+        dispatch_revision = _metadata_int(md, "dispatch_revision", op, 1)
+        worker = _required_metadata_text(md, "worker_instance_id", op)
+        scheduler_epoch = _required_metadata_text(md, "scheduler_epoch", op)
+        dispatch_operation_id = _required_metadata_text(md, "dispatch_operation_id", op)
+        dispatch_transition_id = _required_metadata_text(md, "dispatch_transition_id", op)
+        dispatch_record_hash = _required_metadata_text(md, "dispatch_record_hash", op)
+        dispatch_command_hash = _required_metadata_text(md, "dispatch_command_hash", op)
+        expected_operation_id = f"task-claim:v1:{identity.sha256}:attempt:{attempt}"
+        if not (
+            record.previous_state == "scheduled"
+            and record.next_state == "running"
+            and record.operation_id == expected_operation_id
+            and record.from_revision == dispatch_revision
+            and record.to_revision == dispatch_revision + 1
+            and record.causation_id == dispatch_transition_id
+            and md.get("task_id") == identity.task_id
+            and md.get("run_id") == identity.run_id
+            and claim_epoch == previous_claim_epoch + 1
+            and dispatch_operation_id
+            == f"task-dispatch:v1:{identity.sha256}:attempt:{attempt}"
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="TASK_CLAIM canonical contract mismatch",
+            )
+        await self._predecessor(
+            identity=identity,
+            operation_id=dispatch_operation_id,
+            operation_type=OperationType.TASK_DISPATCH,
+            transition_id=dispatch_transition_id,
+            record_hash=dispatch_record_hash,
+            command_hash=dispatch_command_hash,
+            revision=dispatch_revision,
+            next_state="scheduled",
+        )
+        _require_exact_projection_intents(
+            record,
+            op,
+            ({"kind": "RUNNING_SET", "tenant_id": tenant_id, "task_id": identity.task_id},),
+        )
+        rules: list[ProjectionRule] = [
+            _type_rule("task_state", "string"),
+            _rule("task_state", "running", ReconciliationReason.TASK_STATE_MISMATCH),
+            _type_rule("task_meta", "hash"),
+            _rule("meta.task_id", identity.task_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.run_id", identity.run_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.tenant_id", tenant_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.worker_instance_id", worker, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            _rule("meta.scheduler_epoch", scheduler_epoch, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            _rule("meta.claimed_at_ms", str(_metadata_int(md, "claimed_at_ms", op)), ReconciliationReason.PROJECTION_VALUE_MISMATCH, ReconciliationSeverity.WARNING),
+            _rule("meta.claim_epoch", str(claim_epoch), ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            _rule("meta.dispatch_attempt", str(attempt), ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.dispatch_worker_id", worker, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            *_proof_rules(
+                transition_id=record.transition_id,
+                record_hash=record.canonical_record_hash,
+                command_hash=record.canonical_command_hash,
+                revision=record.to_revision,
+                operation_id=record.operation_id,
+            ),
+            _rule("meta.claim_canonical_transition_id", record.transition_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_record_hash", record.canonical_record_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_command_hash", record.canonical_command_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_revision", str(record.to_revision), ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_operation_id", record.operation_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.dispatch_canonical_transition_id", dispatch_transition_id, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.dispatch_canonical_record_hash", dispatch_record_hash, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.dispatch_canonical_command_hash", dispatch_command_hash, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.dispatch_canonical_revision", str(dispatch_revision), ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.dispatch_canonical_operation_id", dispatch_operation_id, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _type_rule("scheduled_index", "none|zset"),
+            _rule("scheduled_member", False, ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH),
+            _type_rule("running_index", "none|zset"),
+            _rule("running_member", True, ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH),
+            _rule("worker_reservation_present", False, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            _rule("task_owner_present", False, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+        ]
+        return self._base(
+            identity=identity,
+            record=record,
+            tenant_id=tenant_id,
+            rules=rules,
+            key_hints={
+                "scheduled_index": DagRedisKey.task_scheduled_zset(tenant_id),
+                "running_index": DagRedisKey.task_running_zset(tenant_id),
+                "worker_reservation": DagRedisKey.worker_reservation(worker),
+                "task_owner": DagRedisKey.task_reservation_owner(identity.task_id or ""),
+            },
+        )
+
+    async def _task_terminal(
+        self,
+        identity: CanonicalAggregateIdentity,
+        record: Any,
+        operation_type: OperationType,
+    ) -> CurrentHeadCanonicalEvidence:
+        md = _metadata(record, operation=operation_type)
+        tenant_id = _required_metadata_text(md, "tenant_id", operation_type)
+        claim_epoch = _metadata_int(md, "claim_epoch", operation_type, 1)
+        claim_revision = _metadata_int(md, "claim_revision", operation_type, 1)
+        claim_operation_id = _required_metadata_text(md, "claim_operation_id", operation_type)
+        claim_transition_id = _required_metadata_text(md, "claim_transition_id", operation_type)
+        claim_record_hash = _required_metadata_text(md, "claim_record_hash", operation_type)
+        claim_command_hash = _required_metadata_text(md, "claim_command_hash", operation_type)
+        terminal_state = "done" if operation_type is OperationType.TASK_COMPLETE else "failed"
+        expected_operation_id = f"task-terminal:v1:{identity.sha256}:claim:{claim_epoch}"
+        if not (
+            record.previous_state == "running"
+            and record.next_state == terminal_state
+            and record.operation_id == expected_operation_id
+            and record.from_revision == claim_revision
+            and record.to_revision == claim_revision + 1
+            and record.causation_id == claim_transition_id
+            and md.get("task_id") == identity.task_id
+            and md.get("run_id") == identity.run_id
+            and md.get("terminal_state") == terminal_state
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail=f"{operation_type.value} canonical contract mismatch",
+            )
+        claim_record = await self._predecessor(
+            identity=identity,
+            operation_id=claim_operation_id,
+            operation_type=OperationType.TASK_CLAIM,
+            transition_id=claim_transition_id,
+            record_hash=claim_record_hash,
+            command_hash=claim_command_hash,
+            revision=claim_revision,
+            next_state="running",
+        )
+        claim_md = _metadata(claim_record, operation=OperationType.TASK_CLAIM)
+        terminal_intents: tuple[Mapping[str, Any], ...] = (
+            (
+                {"kind": "OUTPUT_PROJECTION"},
+                {"kind": "DEPENDENCY_FANOUT_INTENT"},
+            )
+            if operation_type is OperationType.TASK_COMPLETE
+            else ({"kind": "DEPENDENCY_FAILURE_FANOUT_INTENT"},)
+        )
+        _require_exact_projection_intents(record, operation_type, terminal_intents)
+        worker = _required_metadata_text(md, "worker_instance_id", operation_type)
+        scheduler_epoch = _required_metadata_text(md, "scheduler_epoch", operation_type)
+        if not (
+            claim_md.get("task_id") == identity.task_id
+            and claim_md.get("run_id") == identity.run_id
+            and claim_md.get("tenant_id") == tenant_id
+            and claim_md.get("claim_epoch") == claim_epoch
+            and claim_md.get("worker_instance_id") == worker
+            and claim_md.get("scheduler_epoch") == scheduler_epoch
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH,
+                detail=f"{operation_type.value} durable TASK_CLAIM predecessor metadata mismatch",
+            )
+        output_sha = str(md.get("output_sha256", "") or "")
+        rules: list[ProjectionRule] = [
+            _type_rule("task_state", "string"),
+            _rule("task_state", terminal_state, ReconciliationReason.TASK_STATE_MISMATCH),
+            _type_rule("task_meta", "hash"),
+            _rule("meta.task_id", identity.task_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.run_id", identity.run_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.tenant_id", tenant_id, ReconciliationReason.TASK_META_IDENTITY_MISMATCH),
+            _rule("meta.completed_at_ms", str(_metadata_int(md, "finished_at_ms", operation_type)), ReconciliationReason.PROJECTION_VALUE_MISMATCH, ReconciliationSeverity.WARNING),
+            _rule("meta.terminal_state", terminal_state, ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+            _rule("meta.completion_reason", _required_metadata_text(md, "reason_code", operation_type), ReconciliationReason.PROJECTION_VALUE_MISMATCH, ReconciliationSeverity.WARNING),
+            # Accepted terminal source RETAINS owner/fence proof.
+            _rule("meta.worker_instance_id", worker, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            _rule("meta.scheduler_epoch", scheduler_epoch, ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            _rule("meta.claim_epoch", str(claim_epoch), ReconciliationReason.OWNERSHIP_PROJECTION_MISMATCH),
+            *_proof_rules(
+                transition_id=record.transition_id,
+                record_hash=record.canonical_record_hash,
+                command_hash=record.canonical_command_hash,
+                revision=record.to_revision,
+                operation_id=record.operation_id,
+            ),
+            _rule("meta.terminal_canonical_transition_id", record.transition_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.terminal_canonical_record_hash", record.canonical_record_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.terminal_canonical_command_hash", record.canonical_command_hash, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.terminal_canonical_revision", str(record.to_revision), ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.terminal_canonical_operation_id", record.operation_id, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.terminal_canonical_operation_type", operation_type.value, ReconciliationReason.CANONICAL_PROOF_MISMATCH),
+            _rule("meta.terminal_output_sha256", output_sha, ReconciliationReason.TASK_OUTPUT_MISMATCH if operation_type is OperationType.TASK_COMPLETE else ReconciliationReason.PROJECTION_VALUE_MISMATCH),
+            _rule("meta.claim_canonical_transition_id", claim_transition_id, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_record_hash", claim_record_hash, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_command_hash", claim_command_hash, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_revision", str(claim_revision), ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _rule("meta.claim_canonical_operation_id", claim_operation_id, ReconciliationReason.CLAIM_PREDECESSOR_PROOF_MISMATCH),
+            _type_rule("running_index", "none|zset"),
+            _rule("running_member", False, ReconciliationReason.RUNNING_INDEX_MEMBERSHIP_PRESENT),
+        ]
+        if operation_type is OperationType.TASK_COMPLETE:
+            rules.extend(
+                [
+                    _type_rule("task_output", "string"),
+                    _rule("task_output", str(md.get("output_data", "")), ReconciliationReason.TASK_OUTPUT_MISMATCH),
+                ]
+            )
+        # TASK_FAIL deliberately has NO output-key absence rule.
+        return self._base(identity=identity, record=record, tenant_id=tenant_id, rules=rules)
+
+    def _run_terminate(self, identity: CanonicalAggregateIdentity, record: Any) -> CurrentHeadCanonicalEvidence:
+        op = OperationType.RUN_TERMINATE
+        md = _metadata(record, operation=op)
+        tenant_id = _required_metadata_text(md, "tenant_id", op)
+        terminal = md.get("terminal_evidence")
+        if not isinstance(terminal, Mapping):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE terminal_evidence is missing/corrupt",
+            )
+        final_state = str(terminal.get("final_state") or "")
+        proof_sha = str(terminal.get("terminal_proof_sha256") or "")
+        if final_state not in {"done", "failed"} or len(proof_sha) != 64:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE terminal evidence contract invalid",
+            )
+        if record.previous_state not in {"pending", "running"} or record.next_state != final_state:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE state transition invalid",
+            )
+        expected_digest = _reconciliation_hashlib.sha256(
+            b"RUN_TERMINATE\x00" + identity.run_id.encode("utf-8") + b"\x00" + proof_sha.encode("ascii")
+        ).hexdigest()
+        if record.operation_id != f"run-terminate:v1:{expected_digest}":
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE operation identity mismatch",
+            )
+        _require_exact_projection_intents(
+            record,
+            op,
+            (
+                {
+                    "kind": "RUN_RESULT_PROJECTION",
+                    "terminal_proof_sha256": proof_sha,
+                    "terminal_state": final_state,
+                },
+            ),
+        )
+        try:
+            task_count = int(terminal.get("task_count", 0))
+            done_count = int(terminal.get("done_count", 0))
+            failed_count = int(terminal.get("failed_count", 0))
+            skipped_count = int(terminal.get("skipped_count", 0))
+        except (TypeError, ValueError) as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE terminal counts are invalid",
+            ) from exc
+        if (
+            task_count < 1
+            or min(done_count, failed_count, skipped_count) < 0
+            or done_count + failed_count + skipped_count != task_count
+            or (final_state == "done" and failed_count != 0)
+            or (final_state == "failed" and failed_count < 1)
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE terminal count/final-state contract invalid",
+            )
+        tasks_raw = terminal.get("tasks")
+        if not isinstance(tasks_raw, Sequence) or isinstance(tasks_raw, (str, bytes, bytearray)):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE terminal task evidence is invalid",
+            )
+        normalized_tasks: list[dict[str, str]] = []
+        observed_done = observed_failed = observed_skipped = 0
+        previous_task_id: str | None = None
+        failure_states = {"failed", "blocked_by_failure", "dead_lettered", "rejected", "cancelled"}
+        for row in tasks_raw:
+            if not isinstance(row, Mapping) or set(row) != {"task_id", "state"}:
+                raise ReconciliationEvidenceError(
+                    reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                    detail="RUN_TERMINATE terminal task row is invalid",
+                )
+            task_id = str(row.get("task_id") or "")
+            task_state = str(row.get("state") or "")
+            if not task_id or (previous_task_id is not None and task_id <= previous_task_id):
+                raise ReconciliationEvidenceError(
+                    reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                    detail="RUN_TERMINATE terminal task ordering is invalid",
+                )
+            previous_task_id = task_id
+            if task_state == "done":
+                observed_done += 1
+            elif task_state == "skipped":
+                observed_skipped += 1
+            elif task_state in failure_states:
+                observed_failed += 1
+            else:
+                raise ReconciliationEvidenceError(
+                    reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                    detail="RUN_TERMINATE terminal task state is invalid",
+                )
+            normalized_tasks.append({"task_id": task_id, "state": task_state})
+        if (
+            len(normalized_tasks) != task_count
+            or observed_done != done_count
+            or observed_failed != failed_count
+            or observed_skipped != skipped_count
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE terminal task/count evidence mismatch",
+            )
+        proof_payload = {
+            "schema_version": int(terminal.get("schema_version", 0)),
+            "run_id": identity.run_id,
+            "tenant_id": tenant_id,
+            "tasks": normalized_tasks,
+            "task_count": task_count,
+            "done_count": done_count,
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "final_state": final_state,
+        }
+        if (
+            proof_payload["schema_version"] != 1
+            or _reconciliation_hashlib.sha256(canonical_json_bytes(proof_payload)).hexdigest()
+            != proof_sha
+        ):
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail="RUN_TERMINATE terminal proof digest mismatch",
+            )
+        payload = {
+            "task_count": task_count,
+            "done_count": done_count,
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "trigger_task_id": str(md.get("trigger_task_id", "") or ""),
+            "trigger_terminal_state": str(md.get("trigger_terminal_state", "") or ""),
+        }
+        payload_json = canonical_json_bytes(payload).decode("utf-8")
+        payload_sha = _reconciliation_hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        event_id = _event_id_for_run_terminate(identity.run_id, final_state, task_count)
+        finalized_at = _metadata_int(md, "finalized_at_ms", op)
+        receipt_key = _projection_receipt_key("run-terminate", record.operation_id)
+        rules: list[ProjectionRule] = [
+            _type_rule("run_state", "string"),
+            _rule("run_state", final_state, ReconciliationReason.RUN_STATE_MISMATCH),
+            _type_rule("run_meta", "hash"),
+            _type_rule("run_result", "hash"),
+            _type_rule("projection_receipt", "hash"),
+            _type_rule("cp_running", "none|zset"),
+            _rule("cp_running_member", False, ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH),
+        ]
+        meta_expected = {
+            "run_id": identity.run_id,
+            "tenant_id": tenant_id,
+            "state": final_state,
+            "finalized_at_ms": str(finalized_at),
+            "finalization_operation": "RUN_TERMINATE",
+            "finalization_source": "terminal_task_aggregate",
+            "terminal_proof_sha256": proof_sha,
+            "canonical_transition_id": record.transition_id,
+            "canonical_record_hash": record.canonical_record_hash,
+            "canonical_revision": str(record.to_revision),
+            "result_event_id": event_id,
+        }
+        result_expected = dict(meta_expected)
+        result_expected.pop("state")
+        result_expected["status"] = final_state
+        result_expected["payload"] = payload_json
+        for field, value in meta_expected.items():
+            reason = ReconciliationReason.CANONICAL_PROOF_MISMATCH if field.startswith("canonical_") else ReconciliationReason.RUN_META_MISMATCH
+            rules.append(_rule(f"run_meta.{field}", value, reason))
+        for field, value in result_expected.items():
+            reason = ReconciliationReason.CANONICAL_PROOF_MISMATCH if field.startswith("canonical_") else ReconciliationReason.RUN_RESULT_MISMATCH
+            rules.append(_rule(f"run_result.{field}", value, reason))
+        receipt_expected = {
+            "operation_id": record.operation_id,
+            "terminal_proof_sha256": proof_sha,
+            "canonical_transition_id": record.transition_id,
+            "canonical_record_hash": record.canonical_record_hash,
+            "canonical_command_hash": record.canonical_command_hash,
+            "canonical_revision": str(record.to_revision),
+            "run_id": identity.run_id,
+            "tenant_id": tenant_id,
+            "final_state": final_state,
+            "finalized_at_ms": str(finalized_at),
+            "result_payload_sha256": payload_sha,
+            "event_id": event_id,
+        }
+        for field, value in receipt_expected.items():
+            reason = ReconciliationReason.CANONICAL_PROOF_MISMATCH if field.startswith("canonical_") or field == "operation_id" else ReconciliationReason.PROJECTION_VALUE_MISMATCH
+            rules.append(_rule(f"receipt.{field}", value, reason))
+        rules.append(_rule("receipt.stream_entry_id_present", True, ReconciliationReason.PROJECTION_VALUE_MISMATCH))
+        return self._base(
+            identity=identity,
+            record=record,
+            tenant_id=tenant_id,
+            rules=rules,
+            key_hints={"projection_receipt": receipt_key},
+        )
+
+
+class CurrentHeadReconciliationRedisReader(ReconciliationRedisReader):
+    """85.0B runtime reader exposing only Redis read operations."""
+
+    def __init__(self, redis: Any) -> None:
+        super().__init__(redis)
+        self.__read_redis = redis
+
+    async def _kind(self, key: str) -> str:
+        return _text(await self.__read_redis.type(key))
+
+    async def _string(self, key: str, kind: str) -> str | None:
+        if kind != "string":
+            return None
+        raw = await self.__read_redis.get(key)
+        return None if raw is None else _text(raw)
+
+    async def _hash(self, key: str, kind: str, fields: Sequence[str]) -> dict[str, str | None]:
+        if kind != "hash":
+            return {field: None for field in fields}
+        raw = await self.__read_redis.hmget(key, *fields)
+        return {
+            field: None if value is None else _text(value)
+            for field, value in zip(fields, raw)
+        }
+
+    async def _zmember(self, key: str, kind: str, member: str) -> tuple[bool, float | None]:
+        if kind != "zset":
+            return False, None
+        raw = await self.__read_redis.zscore(key, member)
+        return raw is not None, None if raw is None else float(raw)
+
+    async def read_current_projection(
+        self,
+        *,
+        canonical: CurrentHeadCanonicalEvidence,
+    ) -> CurrentHeadRuntimeEvidence:
+        try:
+            operation = canonical.operation_type
+            if operation is OperationType.RUN_CREATE:
+                values = await self._read_run_create(canonical)
+            elif operation is OperationType.TASK_ADMIT:
+                values = await self._read_task_admit(canonical)
+            elif operation is OperationType.TASK_DISPATCH:
+                values = await self._read_task_dispatch(canonical)
+            elif operation is OperationType.TASK_CLAIM:
+                values = await self._read_task_claim(canonical)
+            elif operation in {OperationType.TASK_COMPLETE, OperationType.TASK_FAIL}:
+                values = await self._read_task_terminal(canonical)
+            elif operation is OperationType.RUN_TERMINATE:
+                values = await self._read_run_terminate(canonical)
+            else:
+                raise ValueError(f"unsupported current-head operation {operation.value}")
+            return CurrentHeadRuntimeEvidence(operation_type=operation, fields=_freeze_fields(values))
+        except ReconciliationEvidenceError:
+            raise
+        except Exception as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.PROJECTION_EVIDENCE_UNAVAILABLE,
+                detail=f"runtime current-head projection read failed: {exc}",
+            ) from exc
+
+    @staticmethod
+    def _meta_fields(canonical: CurrentHeadCanonicalEvidence) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                field.removeprefix("meta.")
+                for field in {rule.field for rule in canonical.rules}
+                if field.startswith("meta.")
+            )
+        )
+
+    async def _read_run_create(self, c: CurrentHeadCanonicalEvidence) -> dict[str, Scalar]:
+        state_key = _ReconciliationRedisKey.run_state(c.run_id)
+        receipt_key = c.hint("projection_receipt")
+        state_type = await self._kind(state_key)
+        receipt_type = await self._kind(receipt_key)
+        fields = [
+            rule.field.removeprefix("receipt.")
+            for rule in c.rules
+            if rule.field.startswith("receipt.") and rule.field != "receipt.stream_entry_id_present"
+        ]
+        receipt = await self._hash(receipt_key, receipt_type, fields + ["stream_entry_id"])
+        return {
+            "type.run_state": state_type,
+            "run_state": await self._string(state_key, state_type),
+            "type.projection_receipt": receipt_type,
+            **{f"receipt.{field}": receipt.get(field) for field in fields},
+            "receipt.stream_entry_id_present": bool(receipt.get("stream_entry_id")),
+        }
+
+    async def _read_task_admit(self, c: CurrentHeadCanonicalEvidence) -> dict[str, Scalar]:
+        assert c.task_id is not None
+        state_key = DagRedisKey.task_state(c.task_id)
+        meta_key = DagRedisKey.task_meta(c.task_id)
+        remaining_key = DagRedisKey.task_remaining_deps(c.task_id)
+        run_tasks_key = DagRedisKey.run_tasks(c.run_id)
+        ready_key = DagRedisKey.task_ready_queue(c.tenant_id)
+        emitted_key = DagRedisKey.task_ready_emitted(c.task_id)
+        state_type = await self._kind(state_key)
+        meta_type = await self._kind(meta_key)
+        remaining_type = await self._kind(remaining_key)
+        run_tasks_type = await self._kind(run_tasks_key)
+        ready_type = await self._kind(ready_key)
+        emitted_type = await self._kind(emitted_key)
+        meta = await self._hash(meta_key, meta_type, self._meta_fields(c))
+        ready_member, ready_score = await self._zmember(ready_key, ready_type, c.task_id)
+        run_member = bool(await self.__read_redis.sismember(run_tasks_key, c.task_id)) if run_tasks_type == "set" else False
+        result: dict[str, Scalar] = {
+            "type.task_state": state_type,
+            "task_state": await self._string(state_key, state_type),
+            "type.task_meta": meta_type,
+            "type.remaining_deps": remaining_type,
+            "remaining_deps": await self._string(remaining_key, remaining_type),
+            "type.run_tasks": run_tasks_type,
+            "run_tasks_member": run_member,
+            "type.ready_queue": ready_type,
+            "ready_member": ready_member,
+            "ready_score": ready_score,
+            "type.ready_emitted": emitted_type,
+            "ready_emitted": await self._string(emitted_key, emitted_type),
+        }
+        result.update({f"meta.{field}": value for field, value in meta.items()})
+        return result
+
+    async def _read_task_dispatch(self, c: CurrentHeadCanonicalEvidence) -> dict[str, Scalar]:
+        assert c.task_id is not None
+        state_key = DagRedisKey.task_state(c.task_id)
+        meta_key = DagRedisKey.task_meta(c.task_id)
+        ready_key = c.hint("ready_queue")
+        scheduled_key = c.hint("scheduled_index")
+        running_key = c.hint("running_index")
+        state_type = await self._kind(state_key)
+        meta_type = await self._kind(meta_key)
+        ready_type = await self._kind(ready_key)
+        scheduled_type = await self._kind(scheduled_key)
+        running_type = await self._kind(running_key)
+        meta = await self._hash(meta_key, meta_type, self._meta_fields(c))
+        ready_member, _ready_score = await self._zmember(ready_key, ready_type, c.task_id)
+        scheduled_member, scheduled_score = await self._zmember(scheduled_key, scheduled_type, c.task_id)
+        running_member, _running_score = await self._zmember(running_key, running_type, c.task_id)
+        result: dict[str, Scalar] = {
+            "type.task_state": state_type,
+            "task_state": await self._string(state_key, state_type),
+            "type.task_meta": meta_type,
+            "type.ready_queue": ready_type,
+            "ready_member": ready_member,
+            "type.scheduled_index": scheduled_type,
+            "scheduled_member": scheduled_member,
+            "scheduled_score": scheduled_score,
+            "type.running_index": running_type,
+            "running_member": running_member,
+        }
+        result.update({f"meta.{field}": value for field, value in meta.items()})
+        return result
+
+    async def _read_task_claim(self, c: CurrentHeadCanonicalEvidence) -> dict[str, Scalar]:
+        assert c.task_id is not None
+        state_key = DagRedisKey.task_state(c.task_id)
+        meta_key = DagRedisKey.task_meta(c.task_id)
+        scheduled_key = c.hint("scheduled_index")
+        running_key = c.hint("running_index")
+        reservation_key = c.hint("worker_reservation")
+        owner_key = c.hint("task_owner")
+        state_type = await self._kind(state_key)
+        meta_type = await self._kind(meta_key)
+        scheduled_type = await self._kind(scheduled_key)
+        running_type = await self._kind(running_key)
+        reservation_type = await self._kind(reservation_key)
+        owner_type = await self._kind(owner_key)
+        meta = await self._hash(meta_key, meta_type, self._meta_fields(c))
+        scheduled_member, _ = await self._zmember(scheduled_key, scheduled_type, c.task_id)
+        running_member, _heartbeat_score = await self._zmember(running_key, running_type, c.task_id)
+        # _heartbeat_score is intentionally discarded.  TASK_HEARTBEAT may
+        # legitimately advance it between runtime A and runtime B.
+        result: dict[str, Scalar] = {
+            "type.task_state": state_type,
+            "task_state": await self._string(state_key, state_type),
+            "type.task_meta": meta_type,
+            "type.scheduled_index": scheduled_type,
+            "scheduled_member": scheduled_member,
+            "type.running_index": running_type,
+            "running_member": running_member,
+            "worker_reservation_present": reservation_type != "none",
+            "task_owner_present": owner_type != "none",
+        }
+        result.update({f"meta.{field}": value for field, value in meta.items()})
+        return result
+
+    async def _read_task_terminal(self, c: CurrentHeadCanonicalEvidence) -> dict[str, Scalar]:
+        assert c.task_id is not None
+        state_key = DagRedisKey.task_state(c.task_id)
+        meta_key = DagRedisKey.task_meta(c.task_id)
+        running_key = DagRedisKey.task_running_zset(c.tenant_id)
+        state_type = await self._kind(state_key)
+        meta_type = await self._kind(meta_key)
+        running_type = await self._kind(running_key)
+        meta = await self._hash(meta_key, meta_type, self._meta_fields(c))
+        running_member, _ = await self._zmember(running_key, running_type, c.task_id)
+        result: dict[str, Scalar] = {
+            "type.task_state": state_type,
+            "task_state": await self._string(state_key, state_type),
+            "type.task_meta": meta_type,
+            "type.running_index": running_type,
+            "running_member": running_member,
+        }
+        result.update({f"meta.{field}": value for field, value in meta.items()})
+        # TASK_FAIL intentionally never reads task_output as an invariant.
+        if c.operation_type is OperationType.TASK_COMPLETE:
+            output_key = DagRedisKey.task_output(c.task_id)
+            output_type = await self._kind(output_key)
+            result["type.task_output"] = output_type
+            result["task_output"] = await self._string(output_key, output_type)
+        return result
+
+    async def _read_run_terminate(self, c: CurrentHeadCanonicalEvidence) -> dict[str, Scalar]:
+        state_key = _ReconciliationRedisKey.run_state(c.run_id)
+        meta_key = _ReconciliationRedisKey.run_meta(c.run_id)
+        result_key = _ReconciliationRedisKey.run_result(c.run_id)
+        receipt_key = c.hint("projection_receipt")
+        running_key = _ReconciliationRedisKey.cp_running()
+        state_type = await self._kind(state_key)
+        meta_type = await self._kind(meta_key)
+        result_type = await self._kind(result_key)
+        receipt_type = await self._kind(receipt_key)
+        running_type = await self._kind(running_key)
+        meta_fields = sorted(
+            rule.field.removeprefix("run_meta.")
+            for rule in c.rules
+            if rule.field.startswith("run_meta.")
+        )
+        result_fields = sorted(
+            rule.field.removeprefix("run_result.")
+            for rule in c.rules
+            if rule.field.startswith("run_result.")
+        )
+        receipt_fields = sorted(
+            rule.field.removeprefix("receipt.")
+            for rule in c.rules
+            if rule.field.startswith("receipt.") and rule.field != "receipt.stream_entry_id_present"
+        )
+        meta = await self._hash(meta_key, meta_type, meta_fields)
+        run_result = await self._hash(result_key, result_type, result_fields)
+        receipt = await self._hash(receipt_key, receipt_type, receipt_fields + ["stream_entry_id"])
+        running_member, _ = await self._zmember(running_key, running_type, c.run_id)
+        values: dict[str, Scalar] = {
+            "type.run_state": state_type,
+            "run_state": await self._string(state_key, state_type),
+            "type.run_meta": meta_type,
+            "type.run_result": result_type,
+            "type.projection_receipt": receipt_type,
+            "type.cp_running": running_type,
+            "cp_running_member": running_member,
+            "receipt.stream_entry_id_present": bool(receipt.get("stream_entry_id")),
+        }
+        values.update({f"run_meta.{field}": value for field, value in meta.items()})
+        values.update({f"run_result.{field}": value for field, value in run_result.items()})
+        values.update({f"receipt.{field}": value for field, value in receipt.items() if field != "stream_entry_id"})
+        return values
+
+
+def _rule_matches(expected: Scalar, observed: Scalar) -> bool:
+    if isinstance(expected, str) and "|" in expected:
+        return str(observed) in expected.split("|")
+    return expected == observed
+
+
+_TASK_ADMIT_DEPENDENCY_OWNED_MUTABLE_FIELDS = frozenset(
+    {
+        "task_state",
+        "remaining_deps",
+        "ready_member",
+        "ready_emitted",
+    }
+)
+
+
+def _task_admit_dependency_ambiguity_applies(
+    canonical: CurrentHeadCanonicalEvidence,
+) -> bool:
+    """Return whether the child head has the narrow 85.0B fanout ambiguity."""
+    if (
+        canonical.operation_type is not OperationType.TASK_ADMIT
+        or canonical.state != "pending"
+        or canonical.hint("admit_state") != "pending"
+    ):
+        return False
+    raw_original = canonical.hint("dependency_count")
+    return raw_original.isdecimal() and int(raw_original) > 0
+
+
+def _task_admit_dependency_projection_shape(
+    canonical: CurrentHeadCanonicalEvidence,
+    observed: Mapping[str, Scalar],
+) -> str | None:
+    """Classify only the dependency-owned mutable TASK_ADMIT projection shape.
+
+    Independent child invariants are deliberately not interpreted here. The
+    reconciler validates identity, immutable metadata, RUN membership, and
+    Redis schema/type evidence first. Only after those checks are clean may
+    this local classifier decide whether the dependency-owned values are the
+    untouched postimage, a source-reachable cross-TASK evolution requiring
+    85.0C provenance, or a source-impossible projection shape.
+    """
+    if not _task_admit_dependency_ambiguity_applies(canonical):
+        return None
+
+    original = int(canonical.hint("dependency_count"))
+    raw_remaining = observed.get("remaining_deps")
+    if raw_remaining is None or not str(raw_remaining).isdecimal():
+        return "IMPOSSIBLE"
+    remaining = int(str(raw_remaining))
+    state = observed.get("task_state")
+    ready_member = observed.get("ready_member") is True
+    ready_emitted = observed.get("ready_emitted")
+
+    untouched = (
+        state == "pending"
+        and remaining == original
+        and not ready_member
+        and ready_emitted is None
+    )
+    if untouched:
+        return "UNTOUCHED"
+
+    partial_progress = (
+        state == "pending"
+        and 0 < remaining < original
+        and not ready_member
+        and ready_emitted is None
+    )
+    dependency_unlock = (
+        state == "ready"
+        and remaining == 0
+        and ready_member
+        and ready_emitted == "1"
+    )
+    failure_while_pending = (
+        state == "blocked_by_failure"
+        and 1 <= remaining <= original
+        and not ready_member
+        and ready_emitted is None
+    )
+    failure_after_ready = (
+        state == "blocked_by_failure"
+        and remaining == 0
+        and not ready_member
+        and ready_emitted == "1"
+    )
+    if partial_progress or dependency_unlock or failure_while_pending or failure_after_ready:
+        return "EVIDENCE_REQUIRED"
+    return "IMPOSSIBLE"
+
+
+class CurrentHeadReconciler:
+    """Read-only explicit-operation reconciler for Sprint 85.0B."""
+
+    def __init__(
+        self,
+        *,
+        canonical_reader: CurrentHeadCanonicalReader,
+        runtime_reader: CurrentHeadRuntimeReader,
+        clock_ms: Callable[[], int] | None = None,
+    ) -> None:
+        self.__canonical_reader = canonical_reader
+        self.__runtime_reader = runtime_reader
+        self.__clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
+
+    @staticmethod
+    def _contract_id(operation_type: OperationType) -> str:
+        return f"{operation_type.value}_CURRENT_PROJECTION"
+
+    @staticmethod
+    def _empty_reference() -> ReconciliationCanonicalReference:
+        return ReconciliationCanonicalReference(None, None, None, None, None, None, None, None)
+
+    def _finding(
+        self,
+        *,
+        canonical: CurrentHeadCanonicalEvidence | None,
+        operation_type: OperationType,
+        run_id: str,
+        task_id: str | None,
+        status: ReconciliationStatus,
+        severity: ReconciliationSeverity,
+        reason: ReconciliationReason,
+        expected: Mapping[str, Scalar] | None,
+        observed: Mapping[str, Scalar] | None,
+        evidence: ReconciliationEvidenceState,
+        observation: ReconciliationObservation,
+    ) -> ReconciliationFinding:
+        aggregate_type = (
+            canonical.aggregate_type
+            if canonical is not None
+            else (AggregateType.RUN.value if operation_type in {OperationType.RUN_CREATE, OperationType.RUN_TERMINATE} else AggregateType.TASK.value)
+        )
+        return ReconciliationFinding(
+            aggregate_type=aggregate_type,
+            run_id=run_id,
+            task_id=task_id,
+            check_class=ReconciliationCheckClass.CURRENT_PROJECTION,
+            contract_id=self._contract_id(operation_type),
+            contract_version=CURRENT_HEAD_RECONCILIATION_CONTRACT_VERSION,
+            status=status,
+            severity=severity,
+            reason_code=reason,
+            canonical=canonical.canonical_reference if canonical is not None else self._empty_reference(),
+            expected=_freeze_fields(expected),
+            observed=_freeze_fields(observed),
+            evidence=evidence,
+            observation=observation,
+            mutation_attempted=False,
+        )
+
+    def _blocked(
+        self,
+        *,
+        canonical: CurrentHeadCanonicalEvidence | None,
+        operation_type: OperationType,
+        run_id: str,
+        task_id: str | None,
+        reason: ReconciliationReason,
+        detail: str,
+        canonical_proven: bool,
+        canonical_stable: bool,
+        projection_read_complete: bool,
+        projection_stable: bool,
+        observation: ReconciliationObservation,
+        severity: ReconciliationSeverity = ReconciliationSeverity.CRITICAL,
+    ) -> tuple[ReconciliationFinding, ...]:
+        return (
+            self._finding(
+                canonical=canonical,
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+                status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                severity=severity,
+                reason=reason,
+                expected=None,
+                observed={"detail": detail},
+                evidence=ReconciliationEvidenceState(
+                    canonical_proven=canonical_proven,
+                    canonical_stable=canonical_stable,
+                    projection_read_complete=projection_read_complete,
+                    projection_observation_stable=projection_stable,
+                    refs=(detail,),
+                ),
+                observation=observation,
+            ),
+        )
+
+    async def reconcile(
+        self,
+        *,
+        operation_type: OperationType,
+        run_id: str,
+        task_id: str | None = None,
+    ) -> tuple[ReconciliationFinding, ...]:
+        if operation_type not in _CURRENT_HEAD_OPERATIONS:
+            raise ValueError(f"{operation_type.value} is outside Sprint 85.0B coverage")
+        started = int(self.__clock_ms())
+        try:
+            canonical_a = await self.__canonical_reader.read_current_head(
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+            )
+        except ReconciliationEvidenceError as exc:
+            return self._blocked(
+                canonical=None,
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+                reason=exc.reason,
+                detail=exc.detail,
+                canonical_proven=False,
+                canonical_stable=False,
+                projection_read_complete=False,
+                projection_stable=False,
+                observation=ReconciliationObservation(started, int(self.__clock_ms())),
+            )
+        try:
+            runtime_a = await self.__runtime_reader.read_current_projection(canonical=canonical_a)
+            runtime_b = await self.__runtime_reader.read_current_projection(canonical=canonical_a)
+        except ReconciliationEvidenceError as exc:
+            return self._blocked(
+                canonical=canonical_a,
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+                reason=exc.reason,
+                detail=exc.detail,
+                canonical_proven=True,
+                canonical_stable=False,
+                projection_read_complete=False,
+                projection_stable=False,
+                observation=ReconciliationObservation(started, int(self.__clock_ms())),
+            )
+        try:
+            canonical_b = await self.__canonical_reader.read_current_head(
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+            )
+        except ReconciliationEvidenceError as exc:
+            canonical_a_head = (
+                canonical_a.revision,
+                canonical_a.state,
+                canonical_a.transition_id,
+                canonical_a.record_hash,
+                canonical_a.command_hash,
+                canonical_a.operation_id,
+            )
+            changed = (
+                exc.canonical_fingerprint is not None
+                and exc.canonical_fingerprint != canonical_a_head
+            )
+            return self._blocked(
+                canonical=canonical_a,
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION if changed else exc.reason,
+                detail="canonical head changed between observation boundaries" if changed else exc.detail,
+                canonical_proven=True,
+                canonical_stable=False,
+                projection_read_complete=True,
+                projection_stable=runtime_a.fingerprint == runtime_b.fingerprint,
+                observation=ReconciliationObservation(started, int(self.__clock_ms())),
+            )
+        observation = ReconciliationObservation(started, int(self.__clock_ms()))
+        if canonical_a.fingerprint != canonical_b.fingerprint:
+            return self._blocked(
+                canonical=canonical_a,
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                detail="canonical head changed between observation boundaries",
+                canonical_proven=True,
+                canonical_stable=False,
+                projection_read_complete=True,
+                projection_stable=runtime_a.fingerprint == runtime_b.fingerprint,
+                observation=observation,
+            )
+        if runtime_a.fingerprint != runtime_b.fingerprint:
+            return self._blocked(
+                canonical=canonical_b,
+                operation_type=operation_type,
+                run_id=run_id,
+                task_id=task_id,
+                reason=ReconciliationReason.PROJECTION_OBSERVATION_CHANGED,
+                detail="immutable operation-owned runtime projection changed between reads",
+                canonical_proven=True,
+                canonical_stable=True,
+                projection_read_complete=True,
+                projection_stable=False,
+                observation=observation,
+            )
+        evidence = ReconciliationEvidenceState(
+            canonical_proven=True,
+            canonical_stable=True,
+            projection_read_complete=True,
+            projection_observation_stable=True,
+            refs=(f"canonical:{canonical_b.transition_id}", f"operation:{canonical_b.operation_id}"),
+        )
+        observed = dict(runtime_b.fields)
+        findings: list[ReconciliationFinding] = []
+        dependency_ambiguity = _task_admit_dependency_ambiguity_applies(canonical_b)
+        independent_rules = (
+            tuple(
+                rule
+                for rule in canonical_b.rules
+                if rule.field not in _TASK_ADMIT_DEPENDENCY_OWNED_MUTABLE_FIELDS
+            )
+            if dependency_ambiguity
+            else canonical_b.rules
+        )
+        for rule in independent_rules:
+            actual = observed.get(rule.field)
+            if _rule_matches(rule.expected, actual):
+                continue
+            findings.append(
+                self._finding(
+                    canonical=canonical_b,
+                    operation_type=operation_type,
+                    run_id=run_id,
+                    task_id=task_id,
+                    status=ReconciliationStatus.DRIFT,
+                    severity=rule.severity,
+                    reason=rule.reason,
+                    expected={"field": rule.field, "value": rule.expected},
+                    observed={"field": rule.field, "value": actual},
+                    evidence=evidence,
+                    observation=observation,
+                )
+            )
+
+        # Cross-TASK ambiguity is subordinate to independently provable child
+        # invariants. A valid-looking fanout shape must never hide identity,
+        # immutable metadata, membership, or Redis schema/type drift.
+        if dependency_ambiguity and not findings:
+            dependency_shape = _task_admit_dependency_projection_shape(canonical_b, observed)
+            if dependency_shape == "EVIDENCE_REQUIRED":
+                return self._blocked(
+                    canonical=canonical_b,
+                    operation_type=operation_type,
+                    run_id=run_id,
+                    task_id=task_id,
+                    reason=ReconciliationReason.DEPENDENCY_FANOUT_EVIDENCE_REQUIRED,
+                    detail=(
+                        "TASK_ADMIT dependency-owned projection matches an exact "
+                        "source-reachable cross-TASK terminal fanout shape; Sprint "
+                        "85.0B requires cross-aggregate provenance before classifying it"
+                    ),
+                    canonical_proven=True,
+                    canonical_stable=True,
+                    projection_read_complete=True,
+                    projection_stable=True,
+                    observation=observation,
+                    severity=ReconciliationSeverity.WARNING,
+                )
+            if dependency_shape == "IMPOSSIBLE":
+                # Ordinary accepted rules still own the narrowest reason code
+                # for dependency-owned mismatches. They are evaluated only now
+                # so source-reachable fanout evolution is not mislabeled DRIFT.
+                for rule in canonical_b.rules:
+                    if rule.field not in _TASK_ADMIT_DEPENDENCY_OWNED_MUTABLE_FIELDS:
+                        continue
+                    actual = observed.get(rule.field)
+                    if _rule_matches(rule.expected, actual):
+                        continue
+                    findings.append(
+                        self._finding(
+                            canonical=canonical_b,
+                            operation_type=operation_type,
+                            run_id=run_id,
+                            task_id=task_id,
+                            status=ReconciliationStatus.DRIFT,
+                            severity=rule.severity,
+                            reason=rule.reason,
+                            expected={"field": rule.field, "value": rule.expected},
+                            observed={"field": rule.field, "value": actual},
+                            evidence=evidence,
+                            observation=observation,
+                        )
+                    )
+                if not findings:
+                    # Pending TASK_ADMIT intentionally allows ready_emitted's
+                    # Redis type to be none|string, because other accepted
+                    # operations may create the marker. If the overall shape is
+                    # nevertheless source-impossible, the marker value itself
+                    # is positive projection drift rather than evidence lack.
+                    findings.append(
+                        self._finding(
+                            canonical=canonical_b,
+                            operation_type=operation_type,
+                            run_id=run_id,
+                            task_id=task_id,
+                            status=ReconciliationStatus.DRIFT,
+                            severity=ReconciliationSeverity.CRITICAL,
+                            reason=ReconciliationReason.PROJECTION_VALUE_MISMATCH,
+                            expected={"field": "ready_emitted", "value": None},
+                            observed={"field": "ready_emitted", "value": observed.get("ready_emitted")},
+                            evidence=evidence,
+                            observation=observation,
+                        )
+                    )
+        if not findings:
+            findings.append(
+                self._finding(
+                    canonical=canonical_b,
+                    operation_type=operation_type,
+                    run_id=run_id,
+                    task_id=task_id,
+                    status=ReconciliationStatus.CONSISTENT,
+                    severity=ReconciliationSeverity.INFO,
+                    reason=ReconciliationReason.CONSISTENT,
+                    expected={"operation_type": operation_type.value, "state": canonical_b.state},
+                    observed={"operation_type": operation_type.value, "state": canonical_b.state},
+                    evidence=evidence,
+                    observation=observation,
+                )
+            )
+        return tuple(
+            sorted(
+                findings,
+                key=lambda f: (
+                    f.aggregate_type,
+                    f.run_id,
+                    f.task_id or "",
+                    f.check_class.value,
+                    f.reason_code.value,
+                    f.expected,
+                ),
+            )
+        )
