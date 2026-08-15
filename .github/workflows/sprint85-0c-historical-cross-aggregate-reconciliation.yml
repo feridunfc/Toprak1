@@ -104,7 +104,10 @@ jobs:
 
           baseline_functions = functions(btree)
           candidate_functions = functions(ctree)
-          allowed_new = {'RedisCanonicalAuthorityStore.load_aggregate_history'}
+          allowed_new = {
+              'PersistedAggregateHistory.fingerprint',
+              'RedisCanonicalAuthorityStore.load_aggregate_history',
+          }
           for name, node in baseline_functions.items():
               assert name in candidate_functions, f'missing protected symbol {name}'
               assert ast.dump(node, include_attributes=False) == ast.dump(
@@ -277,7 +280,7 @@ jobs:
           mandatory_i={
               'test_85_0c_extra_historical_member_blocks',
               'test_85_0c_duplicate_revision_reaches_uniqueness_validator',
-              'test_85_0c_revision_hole_reaches_revision_chain_validator',
+              'test_85_0c_out_of_range_revision_is_canonical_corruption',
               'test_85_0c_missing_required_resource_immutable_field_blocks',
               'test_85_0c_present_but_wrong_resource_immutable_field_drifts',
               'test_85_0c_r1_1_all_cross_aggregate_observers_zero_logical_mutation',
