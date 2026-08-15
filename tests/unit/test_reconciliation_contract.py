@@ -654,3 +654,505 @@ async def test_85_0b_r1_2_fanout_ambiguity_does_not_mask_run_membership_drift():
     assert {f.status for f in findings} == {ReconciliationStatus.DRIFT}
     assert ReconciliationReason.PROJECTION_MEMBERSHIP_MISMATCH in {f.reason_code for f in findings}
     assert ReconciliationReason.DEPENDENCY_FANOUT_EVIDENCE_REQUIRED not in {f.reason_code for f in findings}
+
+# Sprint 85.0C — read-only historical/cross-aggregate contracts.
+from types import SimpleNamespace as _SimpleNamespace
+
+from hfa.authority import (
+    AggregateType as _85cAggregateType,
+    AuthorityDecisionCode as _85cAuthorityDecisionCode,
+    AuthorityEntryContext as _85cAuthorityEntryContext,
+    CanonicalAggregateIdentity as _85cCanonicalAggregateIdentity,
+    OperationType as _85cOperationType,
+    evaluate_authority_commit as _85c_evaluate_authority_commit,
+)
+from hfa.governance.admission_resource_reservation import (
+    AdmissionResourceReservationReceipt as _85cReservationReceipt,
+    RESERVATION_STATE_FINALIZED as _85c_FINALIZED,
+    RESERVATION_STATE_RELEASED as _85c_RELEASED,
+    RESERVATION_STATE_RESERVED as _85c_RESERVED,
+    RESERVATION_STATE_SETTLED as _85c_SETTLED,
+)
+from hfa_control.reconciliation import (
+    HISTORICAL_RECONCILIATION_CONTRACT_VERSION,
+    HistoricalCrossAggregateReconciler,
+    OperationReachability,
+    ResourceReceiptEvidence,
+    RUN_CREATE_RESOURCE_CONTRACT_ID,
+    RUN_TERMINATE_PROOF_CONTRACT_ID,
+    RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+    operation_reachability,
+)
+from hfa_control.run_create_authority import (
+    WRITER_ID as _85c_RUN_CREATE_WRITER_ID,
+    RunCreateAuthorityInput as _85cRunCreateAuthorityInput,
+    build_run_create_command as _85c_build_run_create_command,
+    resource_reservation_from_run_create_record as _85c_resource_from_record,
+)
+from hfa_control.run_terminate_authority import (
+    WRITER_ID as _85c_RUN_TERMINATE_WRITER_ID,
+    TerminalAggregateProof as _85cTerminalAggregateProof,
+    TerminalTaskEvidence as _85cTerminalTaskEvidence,
+    build_run_terminate_command as _85c_build_run_terminate_command,
+    run_terminate_operation_id as _85c_run_terminate_operation_id,
+)
+
+
+def _85c_record(command, *, revision: int, state: str | None, at_ms: int):
+    writer_id = (
+        _85c_RUN_CREATE_WRITER_ID
+        if command.operation_type is _85cOperationType.RUN_CREATE
+        else _85c_RUN_TERMINATE_WRITER_ID
+        if command.operation_type is _85cOperationType.RUN_TERMINATE
+        else f"test/{command.operation_type.value}"
+    )
+    context = _85cAuthorityEntryContext(
+        authenticated_writer_id=writer_id,
+        allowed_operations=frozenset({command.operation_type}),
+        target_aggregate_identity_sha256=command.aggregate_identity.sha256,
+        fence_required=False,
+        fence_valid=True,
+    )
+    evaluation = _85c_evaluate_authority_commit(
+        context=context,
+        command=command,
+        current_revision=revision,
+        current_state=state,
+        receipt_probe=None,
+        committed_at_ms=at_ms,
+        correlation_id=None,
+    )
+    assert evaluation.decision.code is _85cAuthorityDecisionCode.ACCEPTED
+    assert evaluation.commit_plan is not None
+    return evaluation.commit_plan.record
+
+
+def _85c_create_record(run_id: str = "run-85c"):
+    value = _85cRunCreateAuthorityInput(
+        run_id=run_id,
+        tenant_id="tenant-85c",
+        agent_type="agent",
+        priority=1,
+        payload={"sprint": "85.0C"},
+        estimated_cost_cents=7,
+        preferred_region="",
+        preferred_placement="LEAST_LOADED",
+        created_at_ms=1000,
+        control_stream="hfa:stream:control",
+    )
+    return _85c_record(
+        _85c_build_run_create_command(value), revision=0, state=None, at_ms=1000
+    )
+
+
+def _85c_proof(
+    run_id: str = "run-85c",
+    *,
+    states=("done", "blocked_by_failure", "skipped"),
+):
+    tasks = tuple(
+        _85cTerminalTaskEvidence(task_id=f"task-{index:02d}", state=state)
+        for index, state in enumerate(states, start=1)
+    )
+    done = sum(row.state == "done" for row in tasks)
+    skipped = sum(row.state == "skipped" for row in tasks)
+    failed = len(tasks) - done - skipped
+    final_state = "failed" if failed else "done"
+    return _85cTerminalAggregateProof(
+        schema_version=1,
+        run_id=run_id,
+        tenant_id="tenant-85c",
+        tasks=tasks,
+        task_count=len(tasks),
+        done_count=done,
+        failed_count=failed,
+        skipped_count=skipped,
+        final_state=final_state,
+        proof_sha256="a" * 64,
+        proof_payload_json="{}",
+        finalized_at_ms=2000,
+        worker_instance_id="worker-85c",
+        trigger_task_id=tasks[0].task_id,
+        trigger_terminal_state=tasks[0].state,
+        canonical_expected_revision=1,
+        canonical_previous_state="pending",
+    )
+
+
+def _85c_terminate_record(proof=None):
+    proof = proof or _85c_proof()
+    return _85c_record(
+        _85c_build_run_terminate_command(proof),
+        revision=1,
+        state="pending",
+        at_ms=2000,
+    )
+
+
+class _85cHistory:
+    def __init__(self, *records, fingerprint="stable"):
+        self.operations = tuple(
+            _SimpleNamespace(revision=r.to_revision, operation_digest=f"digest-{i}", record=r, receipt=None)
+            for i, r in enumerate(records, start=1)
+        )
+        self.fingerprint = (fingerprint, tuple(r.record.operation_id for r in self.operations))
+
+
+class _85cHistoryReader:
+    def __init__(self, values):
+        self.values = list(values)
+        self.index = 0
+
+    async def read_history(self, identity):
+        value = self.values[min(self.index, len(self.values) - 1)]
+        self.index += 1
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class _85cProofReader:
+    def __init__(self, values):
+        self.values = list(values)
+        self.index = 0
+
+    async def read_terminal_proof(self, *, run_id):
+        value = self.values[min(self.index, len(self.values) - 1)]
+        self.index += 1
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class _85cResourceReader:
+    def __init__(self, values):
+        self.values = list(values)
+        self.index = 0
+
+    async def read_reservation_receipt(self, reservation):
+        value = self.values[min(self.index, len(self.values) - 1)]
+        self.index += 1
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def _85c_resource_evidence(record, state: str, **overrides):
+    reservation = _85c_resource_from_record(record)
+    values = dict(
+        operation_id=reservation.operation_id,
+        run_id=reservation.run_id,
+        tenant_id=reservation.tenant_id,
+        estimated_cost_cents=reservation.estimated_cost_cents,
+        proof_sha256=reservation.proof_sha256,
+        reservation_version=reservation.reservation_version,
+        state=state,
+        created_at_ms=900,
+        finalized_at_ms=1100 if state in {_85c_FINALIZED, _85c_SETTLED} else None,
+        released_at_ms=1100 if state == _85c_RELEASED else None,
+        settled_at_ms=None,
+    )
+    values.update(overrides)
+    receipt = _85cReservationReceipt(**values)
+    raw = tuple(sorted({
+        "operation_id": receipt.operation_id,
+        "run_id": receipt.run_id,
+        "tenant_id": receipt.tenant_id,
+        "state": receipt.state,
+        "proof_sha256": receipt.proof_sha256,
+    }.items()))
+    return ResourceReceiptEvidence("hash", raw, receipt)
+
+
+def test_85_0c_contract_version_is_frozen():
+    assert HISTORICAL_RECONCILIATION_CONTRACT_VERSION == 1
+
+
+def test_85_0c_reachability_matrix_is_exact():
+    expected = {
+        _85cOperationType.RUN_CREATE: OperationReachability.DERIVABLE_FROM_CURRENT_TRUTH,
+        _85cOperationType.TASK_ADMIT: OperationReachability.DERIVABLE_FROM_CURRENT_TRUTH,
+        _85cOperationType.TASK_DISPATCH: OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        _85cOperationType.TASK_CLAIM: OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        _85cOperationType.TASK_COMPLETE: OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        _85cOperationType.TASK_FAIL: OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        _85cOperationType.TASK_REQUEUE: OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        _85cOperationType.RUN_TERMINATE: OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+    }
+    for operation, facade in expected.items():
+        spec = operation_reachability(operation)
+        assert spec.durable_data is OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX
+        assert spec.current_facade is facade
+
+
+def test_85_0c_run_terminate_reachability_requires_proof_sha():
+    without = operation_reachability(_85cOperationType.RUN_TERMINATE)
+    with_proof = operation_reachability(
+        _85cOperationType.RUN_TERMINATE, terminal_proof_available=True
+    )
+    assert without.operation_id_dependency == "run_id+terminal_proof_sha256"
+    assert without.current_facade is OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID
+    assert with_proof.current_facade is OperationReachability.DERIVABLE_FROM_CURRENT_TRUTH
+    proof = _85c_proof()
+    assert _85c_run_terminate_operation_id(proof.run_id, proof.proof_sha256) == _85c_terminate_record(proof).operation_id
+
+
+def test_85_0c_unknown_operation_reachability_is_rejected():
+    with pytest.raises(ValueError):
+        operation_reachability(_85cOperationType.TASK_HEARTBEAT)
+
+
+@pytest.mark.asyncio
+async def test_85_0c_exact_run_terminate_record_proof_binding_is_consistent():
+    proof = _85c_proof(states=("done", "blocked_by_failure", "skipped"))
+    record = _85c_terminate_record(proof)
+    history = _85cHistory(record)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([proof, proof]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_proof(run_id=proof.run_id)
+    assert len(findings) == 1
+    assert findings[0].contract_id == RUN_TERMINATE_PROOF_CONTRACT_ID
+    assert findings[0].status is ReconciliationStatus.CONSISTENT
+
+
+@pytest.mark.asyncio
+async def test_85_0c_runtime_terminal_vocabulary_does_not_require_canonical_task_mapping():
+    states = (
+        "done", "failed", "blocked_by_failure", "dead_lettered",
+        "rejected", "cancelled", "skipped",
+    )
+    proof = _85c_proof(states=states)
+    record = _85c_terminate_record(proof)
+    history = _85cHistory(record)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([proof, proof]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_proof(run_id=proof.run_id)
+    assert {f.status for f in findings} == {ReconciliationStatus.CONSISTENT}
+    source = inspect.getsource(HistoricalCrossAggregateReconciler)
+    assert "run_tasks" not in source
+    assert "read_current_head" not in source
+
+
+@pytest.mark.asyncio
+async def test_85_0c_terminal_proof_positive_contradiction_is_drift():
+    proof = _85c_proof()
+    record = _85c_terminate_record(proof)
+    bad_terminal = dict(record.authoritative_metadata_changes["terminal_evidence"])
+    bad_terminal["task_count"] = proof.task_count + 1
+    bad_metadata = dict(record.authoritative_metadata_changes)
+    bad_metadata["terminal_evidence"] = bad_terminal
+    bad_record = _SimpleNamespace(**record.__dict__)
+    bad_record.authoritative_metadata_changes = bad_metadata
+    history = _85cHistory(bad_record)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([proof, proof]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_proof(run_id=proof.run_id)
+    assert findings[0].status is ReconciliationStatus.DRIFT
+    assert findings[0].reason_code is ReconciliationReason.CANONICAL_PROOF_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_85_0c_terminal_proof_race_blocks_not_drifts():
+    first = _85c_proof()
+    second = _85cTerminalAggregateProof(**{**first.__dict__, "proof_sha256": "b" * 64})
+    record = _85c_terminate_record(first)
+    history = _85cHistory(record)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([first, second]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_proof(run_id=first.run_id)
+    assert findings[0].status is ReconciliationStatus.BLOCKED_EVIDENCE
+    assert findings[0].reason_code is ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "status", "reason"),
+    [
+        (_85c_RESERVED, ReconciliationStatus.BLOCKED_EVIDENCE, ReconciliationReason.RESOURCE_FINALIZATION_PENDING),
+        (_85c_FINALIZED, ReconciliationStatus.CONSISTENT, ReconciliationReason.CONSISTENT),
+        (_85c_SETTLED, ReconciliationStatus.CONSISTENT, ReconciliationReason.CONSISTENT),
+        (_85c_RELEASED, ReconciliationStatus.DRIFT, ReconciliationReason.RESOURCE_PROOF_MISMATCH),
+    ],
+)
+async def test_85_0c_run_create_resource_state_contract(state, status, reason):
+    create = _85c_create_record()
+    history = _85cHistory(create)
+    resource = _85c_resource_evidence(create, state)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        resource_reader=_85cResourceReader([resource, resource]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_create_resource(run_id=create.aggregate_identity.run_id)
+    assert findings[0].contract_id == RUN_CREATE_RESOURCE_CONTRACT_ID
+    assert findings[0].status is status
+    assert findings[0].reason_code is reason
+
+
+@pytest.mark.asyncio
+async def test_85_0c_resource_immutable_mismatch_is_drift():
+    create = _85c_create_record()
+    history = _85cHistory(create)
+    good = _85c_resource_evidence(create, _85c_FINALIZED)
+    bad = ResourceReceiptEvidence(
+        redis_type="hash",
+        raw_fingerprint=good.raw_fingerprint,
+        receipt=None,
+        immutable_mismatch=True,
+    )
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        resource_reader=_85cResourceReader([bad, bad]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_create_resource(run_id=create.aggregate_identity.run_id)
+    assert findings[0].status is ReconciliationStatus.DRIFT
+    assert findings[0].reason_code is ReconciliationReason.RESOURCE_PROOF_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_85_0c_resource_race_blocks_not_drifts():
+    create = _85c_create_record()
+    history = _85cHistory(create)
+    first = _85c_resource_evidence(create, _85c_RESERVED)
+    second = _85c_resource_evidence(create, _85c_FINALIZED)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        resource_reader=_85cResourceReader([first, second]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_create_resource(run_id=create.aggregate_identity.run_id)
+    assert findings[0].status is ReconciliationStatus.BLOCKED_EVIDENCE
+    assert findings[0].reason_code is ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION
+
+
+@pytest.mark.asyncio
+async def test_85_0c_missing_settlement_with_unresolved_applicability_blocks():
+    create = _85c_create_record()
+    proof = _85c_proof(run_id=create.aggregate_identity.run_id, states=("done",))
+    terminate = _85c_terminate_record(proof)
+    history = _85cHistory(create, terminate)
+    finalized = _85c_resource_evidence(create, _85c_FINALIZED)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([proof, proof]),
+        resource_reader=_85cResourceReader([finalized, finalized]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_settlement(run_id=create.aggregate_identity.run_id)
+    assert findings[0].contract_id == RUN_TERMINATE_RESOURCE_CONTRACT_ID
+    assert findings[0].status is ReconciliationStatus.BLOCKED_EVIDENCE
+    assert findings[0].reason_code is ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE
+
+
+def test_85_0c_reconcilers_expose_no_mutation_surface():
+    forbidden = {
+        "set", "hset", "hdel", "delete", "expire", "xadd", "eval", "evalsha",
+        "commit", "record_authority_conflict", "reserve_once", "finalize_once",
+        "release_once", "settle_once", "capture", "project", "repair", "replay",
+    }
+    public = {
+        name for name, _ in inspect.getmembers(HistoricalCrossAggregateReconciler)
+        if not name.startswith("_")
+    }
+    assert public.isdisjoint(forbidden)
+
+# Sprint 85.0C R1.1 — exact terminal-proof semantics and evidence taxonomy.
+from dataclasses import replace as _85c_replace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("finalized_at_ms", 2001),
+        ("worker_instance_id", "wrong-worker"),
+        ("trigger_task_id", "wrong-task"),
+        ("trigger_terminal_state", "failed"),
+    ],
+)
+async def test_85_0c_r1_1_terminal_proof_metadata_binding_contradiction_drifts(field, value):
+    proof = _85c_proof()
+    record = _85c_terminate_record(proof)
+    bad_metadata = dict(record.authoritative_metadata_changes)
+    bad_metadata[field] = value
+    bad_record = _SimpleNamespace(**record.__dict__)
+    bad_record.authoritative_metadata_changes = bad_metadata
+    history = _85cHistory(bad_record)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([proof, proof]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_proof(run_id=proof.run_id)
+    assert findings[0].status is ReconciliationStatus.DRIFT
+    assert findings[0].reason_code is ReconciliationReason.CANONICAL_PROOF_MISMATCH
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("from_revision", 0),
+        ("to_revision", 3),
+        ("previous_state", "running"),
+    ],
+)
+async def test_85_0c_r1_1_terminal_proof_revision_state_continuity_contradiction_drifts(field, value):
+    proof = _85c_proof()
+    record = _85c_terminate_record(proof)
+    bad_record = _SimpleNamespace(**record.__dict__)
+    setattr(bad_record, field, value)
+    history = _85cHistory(bad_record)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([proof, proof]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_proof(run_id=proof.run_id)
+    assert findings[0].status is ReconciliationStatus.DRIFT
+    assert findings[0].reason_code is ReconciliationReason.CANONICAL_PROOF_MISMATCH
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("worker_instance_id", "worker-raced"),
+        ("finalized_at_ms", 2001),
+        ("trigger_task_id", "task-raced"),
+    ],
+)
+async def test_85_0c_r1_1_complete_terminal_proof_fingerprint_race_blocks(field, value):
+    first = _85c_proof()
+    second = _85c_replace(first, **{field: value})
+    record = _85c_terminate_record(first)
+    history = _85cHistory(record)
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        terminal_proof_reader=_85cProofReader([first, second]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_terminate_proof(run_id=first.run_id)
+    assert findings[0].status is ReconciliationStatus.BLOCKED_EVIDENCE
+    assert findings[0].reason_code is ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION
+
+
+@pytest.mark.asyncio
+async def test_85_0c_r1_1_missing_resource_immutable_field_blocks_not_drifts():
+    create = _85c_create_record()
+    history = _85cHistory(create)
+    evidence = ResourceReceiptEvidence(
+        redis_type="hash",
+        raw_fingerprint=(("operation_id", create.operation_id),),
+        receipt=None,
+        missing_immutable_fields=("tenant_id",),
+    )
+    findings = await HistoricalCrossAggregateReconciler(
+        canonical_reader=_85cHistoryReader([history, history]),
+        resource_reader=_85cResourceReader([evidence, evidence]),
+        clock_ms=lambda: 10,
+    ).reconcile_run_create_resource(run_id=create.aggregate_identity.run_id)
+    assert findings[0].status is ReconciliationStatus.BLOCKED_EVIDENCE
+    assert findings[0].reason_code is ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE

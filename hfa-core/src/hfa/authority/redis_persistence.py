@@ -90,6 +90,53 @@ class PersistedAggregateSnapshot:
     updated_at_ms: int
 
 
+class RedisAuthorityHistoryIncompleteError(RedisAuthorityPersistenceError):
+    """Raised when a canonical head proves historical members must exist but do not."""
+
+
+class RedisAuthorityObservationChangedError(RedisAuthorityPersistenceError):
+    """Raised when the canonical aggregate head changes during a read-only observation."""
+
+
+@dataclass(frozen=True)
+class PersistedHistoricalOperation:
+    revision: int
+    operation_digest: str
+    record: _core.CanonicalTransitionRecord
+    receipt: _core.OperationReceipt
+
+
+@dataclass(frozen=True)
+class PersistedAggregateHistory:
+    snapshot: PersistedAggregateSnapshot
+    operations: tuple[PersistedHistoricalOperation, ...]
+
+    @property
+    def fingerprint(self) -> tuple[Any, ...]:
+        return (
+            self.snapshot.canonical_aggregate_identity_sha256,
+            self.snapshot.revision,
+            self.snapshot.state,
+            self.snapshot.transition_id,
+            self.snapshot.canonical_record_hash,
+            self.snapshot.canonical_command_hash,
+            self.snapshot.operation_id,
+            tuple(
+                (
+                    item.revision,
+                    item.operation_digest,
+                    item.record.operation_id,
+                    item.record.transition_id,
+                    item.record.canonical_record_hash,
+                    item.record.canonical_command_hash,
+                    item.record.previous_state,
+                    item.record.next_state,
+                )
+                for item in self.operations
+            ),
+        )
+
+
 @dataclass(frozen=True)
 class RedisAuthorityKeyspace:
     """Cluster-slot-safe fixed Redis keys for one aggregate authority."""
@@ -717,6 +764,238 @@ class RedisCanonicalAuthorityStore:
             projection_intents_json=projection_intents_json,
             updated_at_ms=updated_at_ms,
         )
+
+    async def load_aggregate_history(self, aggregate_identity: _core.CanonicalAggregateIdentity) -> PersistedAggregateHistory | None:
+        """Read and fully validate one known aggregate's existing canonical history.
+
+        This method is observation-only. It enumerates the already-existing
+        operation-record, receipt and transition-index hashes; it creates no key,
+        index, receipt or repair evidence.
+        """
+        if not isinstance(aggregate_identity, _core.CanonicalAggregateIdentity):
+            raise TypeError("aggregate_identity must be CanonicalAggregateIdentity")
+
+        snapshot_a = await self.get_aggregate_snapshot(aggregate_identity)
+        if snapshot_a is None:
+            return None
+        keyspace = self.keyspace(aggregate_identity.sha256)
+
+        validation_error: RedisAuthorityPersistenceError | None = None
+        raw_records: Mapping[Any, Any] = {}
+        raw_receipts: Mapping[Any, Any] = {}
+        raw_indexes: Mapping[Any, Any] = {}
+        parsed: tuple[PersistedHistoricalOperation, ...] = ()
+
+        try:
+            try:
+                record_type = _as_text(await self._redis.type(keyspace.operation_records))
+                receipt_type = _as_text(await self._redis.type(keyspace.receipts))
+                index_type = _as_text(await self._redis.type(keyspace.transition_indexes))
+            except Exception as exc:
+                raise RedisAuthorityPersistenceError(
+                    f"canonical history Redis type read failed: {exc}"
+                ) from exc
+            if record_type == "none":
+                raise RedisAuthorityHistoryIncompleteError("canonical operation history key is missing")
+            if receipt_type == "none":
+                raise RedisAuthorityHistoryIncompleteError("canonical receipt history key is missing")
+            if index_type == "none":
+                raise RedisAuthorityHistoryIncompleteError("canonical transition-index history key is missing")
+            if record_type != "hash":
+                raise RedisAuthorityCorruptionError("canonical operation history key type mismatch")
+            if receipt_type != "hash":
+                raise RedisAuthorityCorruptionError("canonical receipt history key type mismatch")
+            if index_type != "hash":
+                raise RedisAuthorityCorruptionError("canonical transition-index history key type mismatch")
+
+            try:
+                raw_records = await self._redis.hgetall(keyspace.operation_records)
+                raw_receipts = await self._redis.hgetall(keyspace.receipts)
+                raw_indexes = await self._redis.hgetall(keyspace.transition_indexes)
+            except Exception as exc:
+                raise RedisAuthorityPersistenceError(
+                    f"canonical history Redis read failed: {exc}"
+                ) from exc
+
+            records_by_digest = {_as_text(k): v for k, v in raw_records.items()}
+            receipts_by_digest = {_as_text(k): v for k, v in raw_receipts.items()}
+            indexes_by_transition = {_as_text(k): v for k, v in raw_indexes.items()}
+            expected_count = snapshot_a.revision
+
+            sizes = (
+                len(records_by_digest),
+                len(receipts_by_digest),
+                len(indexes_by_transition),
+            )
+            if any(size < expected_count for size in sizes):
+                raise RedisAuthorityHistoryIncompleteError(
+                    "canonical historical set is missing record/receipt/transition-index members"
+                )
+            if any(size > expected_count for size in sizes):
+                raise RedisAuthorityCorruptionError(
+                    "canonical historical set has members beyond aggregate revision"
+                )
+
+            rows: list[PersistedHistoricalOperation] = []
+            seen_operation_ids: set[str] = set()
+            seen_transition_ids: set[str] = set()
+            seen_revisions: set[int] = set()
+            expected_digests: set[str] = set()
+            expected_transitions: set[str] = set()
+
+            for field_digest, raw_record in records_by_digest.items():
+                try:
+                    _, record_payload = _decode_storage_envelope(
+                        raw_record, field_name="canonical operation record"
+                    )
+                    record = _record_from_payload(record_payload)
+                except (RedisAuthorityPersistenceError, _core.AuthorityContractError, TypeError, ValueError) as exc:
+                    raise RedisAuthorityCorruptionError(
+                        f"canonical historical operation record is invalid: {exc}"
+                    ) from exc
+
+                expected_digest = keyspace.operation_field(record.operation_id)
+                if field_digest != expected_digest:
+                    raise RedisAuthorityCorruptionError(
+                        "canonical historical operation digest field mismatch"
+                    )
+                if (
+                    record.aggregate_identity != aggregate_identity
+                    or record.aggregate_identity_sha256 != aggregate_identity.sha256
+                ):
+                    raise RedisAuthorityCorruptionError(
+                        "canonical historical operation aggregate identity mismatch"
+                    )
+                if not record.verify_hash():
+                    raise RedisAuthorityCorruptionError(
+                        "canonical historical operation record hash mismatch"
+                    )
+                if record.operation_id in seen_operation_ids:
+                    raise RedisAuthorityCorruptionError("duplicate canonical historical operation_id")
+                if record.transition_id in seen_transition_ids:
+                    raise RedisAuthorityCorruptionError("duplicate canonical historical transition_id")
+                if record.to_revision in seen_revisions:
+                    raise RedisAuthorityCorruptionError("duplicate canonical historical revision")
+                seen_operation_ids.add(record.operation_id)
+                seen_transition_ids.add(record.transition_id)
+                seen_revisions.add(record.to_revision)
+                expected_digests.add(expected_digest)
+                expected_transitions.add(record.transition_id)
+
+                raw_receipt = receipts_by_digest.get(expected_digest)
+                if raw_receipt is None:
+                    raise RedisAuthorityHistoryIncompleteError(
+                        f"canonical operation receipt missing for revision {record.to_revision}"
+                    )
+                try:
+                    _, receipt_payload = _decode_storage_envelope(
+                        raw_receipt, field_name="operation receipt"
+                    )
+                    receipt = _receipt_from_payload(receipt_payload)
+                except (RedisAuthorityPersistenceError, _core.AuthorityContractError, TypeError, ValueError) as exc:
+                    raise RedisAuthorityCorruptionError(
+                        f"canonical historical operation receipt is invalid: {exc}"
+                    ) from exc
+                if (
+                    receipt.operation_id != record.operation_id
+                    or receipt.transition_id != record.transition_id
+                    or receipt.canonical_command_hash != record.canonical_command_hash
+                    or receipt.canonical_record_hash != record.canonical_record_hash
+                    or receipt.aggregate_revision != record.to_revision
+                    or receipt.operation_type != record.operation_type
+                    or receipt.committed_at_ms != record.committed_at_ms
+                ):
+                    raise RedisAuthorityCorruptionError(
+                        "canonical historical record/receipt continuity mismatch"
+                    )
+
+                raw_index = indexes_by_transition.get(record.transition_id)
+                if raw_index is None:
+                    raise RedisAuthorityHistoryIncompleteError(
+                        f"canonical transition index missing for revision {record.to_revision}"
+                    )
+                try:
+                    _, index_payload = _decode_storage_envelope(
+                        raw_index, field_name="canonical transition index"
+                    )
+                    _validate_transition_index(index_payload, record)
+                except (RedisAuthorityPersistenceError, _core.AuthorityContractError, TypeError, ValueError) as exc:
+                    raise RedisAuthorityCorruptionError(
+                        f"canonical historical transition index is invalid: {exc}"
+                    ) from exc
+
+                rows.append(
+                    PersistedHistoricalOperation(
+                        revision=record.to_revision,
+                        operation_digest=expected_digest,
+                        record=record,
+                        receipt=receipt,
+                    )
+                )
+
+            if set(receipts_by_digest) != expected_digests:
+                raise RedisAuthorityCorruptionError(
+                    "canonical receipt history contains an orphan or contradictory member"
+                )
+            if set(indexes_by_transition) != expected_transitions:
+                raise RedisAuthorityCorruptionError(
+                    "canonical transition-index history contains an orphan or contradictory member"
+                )
+
+            rows.sort(key=lambda item: item.revision)
+            observed_revisions = tuple(item.revision for item in rows)
+            expected_revisions = tuple(range(1, snapshot_a.revision + 1))
+            if observed_revisions != expected_revisions:
+                if set(observed_revisions) < set(expected_revisions):
+                    raise RedisAuthorityHistoryIncompleteError(
+                        "canonical historical revision sequence has a gap"
+                    )
+                raise RedisAuthorityCorruptionError(
+                    "canonical historical revision sequence is contradictory"
+                )
+
+            previous_record: _core.CanonicalTransitionRecord | None = None
+            for item in rows:
+                record = item.record
+                if record.from_revision != record.to_revision - 1:
+                    raise RedisAuthorityCorruptionError(
+                        "canonical historical from_revision/to_revision continuity mismatch"
+                    )
+                if previous_record is not None:
+                    if record.previous_state != previous_record.next_state:
+                        raise RedisAuthorityCorruptionError(
+                            "canonical historical state chain is discontinuous"
+                        )
+                previous_record = record
+
+            highest = rows[-1].record
+            if not (
+                highest.to_revision == snapshot_a.revision
+                and highest.next_state == snapshot_a.state
+                and highest.operation_id == snapshot_a.operation_id
+                and highest.transition_id == snapshot_a.transition_id
+                and highest.canonical_record_hash == snapshot_a.canonical_record_hash
+                and highest.canonical_command_hash == snapshot_a.canonical_command_hash
+            ):
+                raise RedisAuthorityCorruptionError(
+                    "canonical historical highest revision does not match aggregate head"
+                )
+            parsed = tuple(rows)
+        except RedisAuthorityPersistenceError as exc:
+            validation_error = exc
+        except Exception as exc:
+            raise RedisAuthorityPersistenceError(
+                f"canonical history validation failed: {exc}"
+            ) from exc
+
+        snapshot_b = await self.get_aggregate_snapshot(aggregate_identity)
+        if snapshot_b != snapshot_a:
+            raise RedisAuthorityObservationChangedError(
+                "canonical aggregate head changed during historical enumeration"
+            )
+        if validation_error is not None:
+            raise validation_error
+        return PersistedAggregateHistory(snapshot=snapshot_b, operations=parsed)
 
     @staticmethod
     def canonical_projection_intents_json(value: Any) -> str:
