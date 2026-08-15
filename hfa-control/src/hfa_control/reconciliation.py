@@ -55,6 +55,11 @@ class ReconciliationReason(str, Enum):
     CANONICAL_EVIDENCE_UNAVAILABLE = "CANONICAL_EVIDENCE_UNAVAILABLE"
     CANONICAL_RECORD_CORRUPTION = "CANONICAL_RECORD_CORRUPTION"
     CANONICAL_CHANGED_DURING_OBSERVATION = "CANONICAL_CHANGED_DURING_OBSERVATION"
+    CANONICAL_HISTORY_INCOMPLETE = "CANONICAL_HISTORY_INCOMPLETE"
+    RESOURCE_PROOF_MISMATCH = "RESOURCE_PROOF_MISMATCH"
+    RESOURCE_FINALIZATION_PENDING = "RESOURCE_FINALIZATION_PENDING"
+    RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE = "RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE"
+    DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION = "DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION"
     PROJECTION_EVIDENCE_UNAVAILABLE = "PROJECTION_EVIDENCE_UNAVAILABLE"
     PROJECTION_OBSERVATION_CHANGED = "PROJECTION_OBSERVATION_CHANGED"
     PROJECTION_SCHEMA_MISMATCH = "PROJECTION_SCHEMA_MISMATCH"
@@ -2955,4 +2960,1271 @@ class CurrentHeadReconciler:
                     f.expected,
                 ),
             )
+        )
+
+
+# Sprint 85.0C — read-only historical durable effects + cross-aggregate proof.
+from dataclasses import dataclass as _history_dataclass
+from enum import Enum as _HistoryEnum
+
+from hfa.authority.redis_persistence import (
+    PersistedAggregateHistory as _PersistedAggregateHistory,
+    RedisAuthorityHistoryIncompleteError as _RedisAuthorityHistoryIncompleteError,
+    RedisAuthorityObservationChangedError as _RedisAuthorityObservationChangedError,
+)
+from hfa.governance.admission_resource_reservation import (
+    AdmissionResourceReservationConflictError as _AdmissionResourceReservationConflictError,
+    AdmissionResourceReservationInput as _AdmissionResourceReservationInput,
+    AdmissionResourceReservationManager as _AdmissionResourceReservationManager,
+    AdmissionResourceReservationReceipt as _AdmissionResourceReservationReceipt,
+    AdmissionResourceSettlementInput as _AdmissionResourceSettlementInput,
+    RESERVATION_STATE_FINALIZED as _RESERVATION_STATE_FINALIZED,
+    RESERVATION_STATE_RELEASED as _RESERVATION_STATE_RELEASED,
+    RESERVATION_STATE_RESERVED as _RESERVATION_STATE_RESERVED,
+    RESERVATION_STATE_SETTLED as _RESERVATION_STATE_SETTLED,
+)
+from hfa_control.run_create_authority import (
+    resource_reservation_from_run_create_record as _resource_reservation_from_run_create_record,
+)
+from hfa_control.run_terminate_authority import (
+    RunTerminateAuthorityError as _RunTerminateAuthorityError,
+    TerminalAggregateProof as _TerminalAggregateProof,
+    TerminalAggregateProofManager as _TerminalAggregateProofManager,
+    run_terminate_operation_id as _run_terminate_operation_id,
+)
+
+
+HISTORICAL_RECONCILIATION_CONTRACT_VERSION = 1
+HISTORICAL_CANONICAL_CONTRACT_ID = "CANONICAL_HISTORY"
+RUN_TERMINATE_PROOF_CONTRACT_ID = "RUN_TERMINATE_TERMINAL_PROOF"
+RUN_CREATE_RESOURCE_CONTRACT_ID = "RUN_CREATE_RESOURCE_RESERVATION"
+RUN_TERMINATE_RESOURCE_CONTRACT_ID = "RUN_TERMINATE_RESOURCE_SETTLEMENT"
+
+
+class OperationReachability(str, _HistoryEnum):
+    DISCOVERABLE_BY_EXISTING_INDEX = "DISCOVERABLE_BY_EXISTING_INDEX"
+    DERIVABLE_FROM_CURRENT_TRUTH = "DERIVABLE_FROM_CURRENT_TRUTH"
+    REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID = "REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID"
+    NOT_RELIABLY_REACHABLE = "NOT_RELIABLY_REACHABLE"
+
+
+@_history_dataclass(frozen=True)
+class OperationReachabilitySpec:
+    durable_data: OperationReachability
+    current_facade: OperationReachability
+    operation_id_dependency: str
+    current_facade_with_terminal_proof: OperationReachability | None = None
+
+
+_HISTORICAL_REACHABILITY = {
+    OperationType.RUN_CREATE: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.DERIVABLE_FROM_CURRENT_TRUTH,
+        "run_id",
+    ),
+    OperationType.TASK_ADMIT: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.DERIVABLE_FROM_CURRENT_TRUTH,
+        "run_id+task_id",
+    ),
+    OperationType.TASK_DISPATCH: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        "task_identity+dispatch_attempt",
+    ),
+    OperationType.TASK_CLAIM: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        "task_identity+dispatch_attempt",
+    ),
+    OperationType.TASK_COMPLETE: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        "task_identity+claim_epoch",
+    ),
+    OperationType.TASK_FAIL: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        "task_identity+claim_epoch",
+    ),
+    OperationType.TASK_REQUEUE: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        "task_identity+claim_epoch",
+    ),
+    OperationType.RUN_TERMINATE: OperationReachabilitySpec(
+        OperationReachability.DISCOVERABLE_BY_EXISTING_INDEX,
+        OperationReachability.REACHABLE_ONLY_IF_CALLER_SUPPLIES_ID,
+        "run_id+terminal_proof_sha256",
+        OperationReachability.DERIVABLE_FROM_CURRENT_TRUTH,
+    ),
+}
+
+
+def operation_reachability(
+    operation_type: OperationType,
+    *,
+    terminal_proof_available: bool = False,
+) -> OperationReachabilitySpec:
+    try:
+        spec = _HISTORICAL_REACHABILITY[operation_type]
+    except KeyError as exc:
+        raise ValueError(f"{operation_type.value} is outside Sprint 85.0C reachability coverage") from exc
+    if (
+        operation_type is OperationType.RUN_TERMINATE
+        and terminal_proof_available
+        and spec.current_facade_with_terminal_proof is not None
+    ):
+        return OperationReachabilitySpec(
+            durable_data=spec.durable_data,
+            current_facade=spec.current_facade_with_terminal_proof,
+            operation_id_dependency=spec.operation_id_dependency,
+            current_facade_with_terminal_proof=spec.current_facade_with_terminal_proof,
+        )
+    return spec
+
+
+class HistoricalCanonicalReader(Protocol):
+    async def read_history(
+        self,
+        identity: CanonicalAggregateIdentity,
+    ) -> _PersistedAggregateHistory: ...
+
+
+class TerminalProofReader(Protocol):
+    async def read_terminal_proof(self, *, run_id: str) -> _TerminalAggregateProof | None: ...
+
+
+@_history_dataclass(frozen=True)
+class ResourceReceiptEvidence:
+    redis_type: str
+    raw_fingerprint: tuple[tuple[str, str], ...]
+    receipt: _AdmissionResourceReservationReceipt | None
+    missing_immutable_fields: tuple[str, ...] = ()
+    immutable_mismatch: bool = False
+    corrupt_detail: str = ""
+
+    @property
+    def fingerprint(self) -> tuple[Any, ...]:
+        return (
+            self.redis_type,
+            self.raw_fingerprint,
+            self.missing_immutable_fields,
+            self.immutable_mismatch,
+            self.corrupt_detail,
+        )
+
+
+class ResourceReceiptReader(Protocol):
+    async def read_reservation_receipt(
+        self,
+        reservation: _AdmissionResourceReservationInput,
+    ) -> ResourceReceiptEvidence: ...
+
+
+class HistoricalCanonicalReconciliationReader:
+    """Read-only facade over the 85.0C whole-history store API."""
+
+    def __init__(self, redis: Any, *, namespace: str = "hfa:authority:v1") -> None:
+        self.__store = RedisCanonicalAuthorityStore(redis, namespace=namespace)
+
+    async def read_history(
+        self,
+        identity: CanonicalAggregateIdentity,
+    ) -> _PersistedAggregateHistory:
+        try:
+            history = await self.__store.load_aggregate_history(identity)
+        except _RedisAuthorityObservationChangedError as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                detail=str(exc),
+            ) from exc
+        except _RedisAuthorityHistoryIncompleteError as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_HISTORY_INCOMPLETE,
+                detail=str(exc),
+            ) from exc
+        except RedisAuthorityCorruptionError as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                detail=str(exc),
+            ) from exc
+        except RedisAuthorityPersistenceError as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail=f"canonical history read failed: {exc}",
+            ) from exc
+        if history is None:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail="canonical aggregate history is missing",
+            )
+        return history
+
+
+class ReadOnlyTerminalProofReader:
+    """Expose only immutable terminal-proof reads to reconciliation."""
+
+    def __init__(self, redis: Any) -> None:
+        self.__manager = _TerminalAggregateProofManager(redis)
+
+    async def read_terminal_proof(self, *, run_id: str) -> _TerminalAggregateProof | None:
+        try:
+            return await self.__manager.load_existing(run_id)
+        except _RunTerminateAuthorityError as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail=f"terminal proof unavailable: {exc}",
+            ) from exc
+        except Exception as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail=f"terminal proof read failed: {exc}",
+            ) from exc
+
+
+class ReadOnlyResourceReceiptReader:
+    """Read-only reservation/settlement receipt adapter with stable raw proof."""
+
+    def __init__(self, redis: Any) -> None:
+        self.__redis = redis
+        self.__manager = _AdmissionResourceReservationManager(redis)
+
+    @staticmethod
+    def _decode_hash(raw: Mapping[Any, Any]) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((_text(k), _text(v)) for k, v in raw.items()))
+
+    async def read_reservation_receipt(
+        self,
+        reservation: _AdmissionResourceReservationInput,
+    ) -> ResourceReceiptEvidence:
+        key = self.__manager.reservation_receipt_key(reservation.operation_id)
+        try:
+            kind = _text(await self.__redis.type(key))
+            if kind == "none":
+                return ResourceReceiptEvidence("none", (), None)
+            if kind != "hash":
+                return ResourceReceiptEvidence(
+                    kind,
+                    (),
+                    None,
+                    corrupt_detail="resource receipt key has wrong Redis type",
+                )
+            raw_before = await self.__redis.hgetall(key)
+            before = self._decode_hash(raw_before)
+            values = dict(before)
+            immutable_expected = {
+                "operation_id": reservation.operation_id,
+                "run_id": reservation.run_id,
+                "tenant_id": reservation.tenant_id,
+                "estimated_cost_cents": str(reservation.estimated_cost_cents),
+                "reservation_version": str(reservation.reservation_version),
+                "proof_sha256": reservation.proof_sha256,
+            }
+            missing_immutable_fields = tuple(
+                sorted(field for field in immutable_expected if field not in values)
+            )
+            immutable_mismatch = any(
+                values[field] != expected
+                for field, expected in immutable_expected.items()
+                if field in values
+            )
+            receipt: _AdmissionResourceReservationReceipt | None = None
+            corrupt_detail = ""
+            if not missing_immutable_fields and not immutable_mismatch:
+                try:
+                    receipt = await self.__manager.get_receipt(reservation)
+                except _AdmissionResourceReservationConflictError as exc:
+                    corrupt_detail = str(exc)
+            raw_after = await self.__redis.hgetall(key)
+            after = self._decode_hash(raw_after)
+        except ReconciliationEvidenceError:
+            raise
+        except Exception as exc:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                detail=f"resource receipt read failed: {exc}",
+            ) from exc
+        if before != after:
+            raise ReconciliationEvidenceError(
+                reason=ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION,
+                detail="resource receipt changed during one read-only observation",
+            )
+        return ResourceReceiptEvidence(
+            redis_type="hash",
+            raw_fingerprint=after,
+            receipt=receipt,
+            missing_immutable_fields=missing_immutable_fields,
+            immutable_mismatch=immutable_mismatch,
+            corrupt_detail=corrupt_detail,
+        )
+
+
+def _history_record(
+    history: _PersistedAggregateHistory,
+    operation_type: OperationType,
+) -> Any:
+    rows = [item.record for item in history.operations if item.record.operation_type == operation_type.value]
+    if not rows:
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+            detail=f"canonical history has no {operation_type.value} operation",
+        )
+    if operation_type in {OperationType.RUN_CREATE, OperationType.RUN_TERMINATE} and len(rows) != 1:
+        raise ReconciliationEvidenceError(
+            reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+            detail=f"canonical history has multiple {operation_type.value} operations",
+        )
+    return rows[-1]
+
+
+def _record_reference(record: Any) -> ReconciliationCanonicalReference:
+    return ReconciliationCanonicalReference(
+        revision=record.to_revision,
+        operation_type=record.operation_type,
+        state=record.next_state,
+        transition_id=record.transition_id,
+        record_hash=record.canonical_record_hash,
+        command_hash=record.canonical_command_hash,
+        operation_id=record.operation_id,
+        committed_at_ms=record.committed_at_ms,
+    )
+
+
+def _proof_fingerprint(value: _TerminalAggregateProof | None) -> tuple[Any, ...]:
+    if value is None:
+        return ("ABSENT",)
+    return (
+        value.schema_version,
+        value.run_id,
+        value.tenant_id,
+        tuple((row.task_id, row.state) for row in value.tasks),
+        value.task_count,
+        value.done_count,
+        value.failed_count,
+        value.skipped_count,
+        value.final_state,
+        value.proof_sha256,
+        value.proof_payload_json,
+        value.finalized_at_ms,
+        value.worker_instance_id,
+        value.trigger_task_id,
+        value.trigger_terminal_state,
+        value.canonical_expected_revision,
+        value.canonical_previous_state,
+    )
+
+
+def _terminal_tasks_json(proof: _TerminalAggregateProof) -> str:
+    return canonical_json_bytes(
+        [{"task_id": row.task_id, "state": row.state} for row in proof.tasks]
+    ).decode("utf-8")
+
+
+def _terminal_record_observed(record: Any) -> dict[str, Scalar]:
+    metadata = record.authoritative_metadata_changes
+    terminal = metadata.get("terminal_evidence") if isinstance(metadata, Mapping) else None
+    if not isinstance(terminal, Mapping):
+        return {"terminal_evidence": "MISSING_OR_INVALID"}
+    tasks = terminal.get("tasks")
+    try:
+        tasks_json = canonical_json_bytes(tasks).decode("utf-8")
+    except Exception:
+        tasks_json = "INVALID"
+    return {
+        "run_id": str(metadata.get("run_id") or ""),
+        "tenant_id": str(metadata.get("tenant_id") or ""),
+        "terminal_proof_sha256": str(terminal.get("terminal_proof_sha256") or ""),
+        "task_count": terminal.get("task_count") if type(terminal.get("task_count")) is int else None,
+        "done_count": terminal.get("done_count") if type(terminal.get("done_count")) is int else None,
+        "failed_count": terminal.get("failed_count") if type(terminal.get("failed_count")) is int else None,
+        "skipped_count": terminal.get("skipped_count") if type(terminal.get("skipped_count")) is int else None,
+        "tasks_json": tasks_json,
+        "final_state": str(terminal.get("final_state") or ""),
+        "finalized_at_ms": metadata.get("finalized_at_ms") if type(metadata.get("finalized_at_ms")) is int else None,
+        "worker_instance_id": str(metadata.get("worker_instance_id") or ""),
+        "trigger_task_id": str(metadata.get("trigger_task_id") or ""),
+        "trigger_terminal_state": str(metadata.get("trigger_terminal_state") or ""),
+        "from_revision": record.from_revision,
+        "to_revision": record.to_revision,
+        "previous_state": record.previous_state,
+        "next_state": record.next_state,
+    }
+
+
+def _terminal_proof_expected(proof: _TerminalAggregateProof) -> dict[str, Scalar]:
+    return {
+        "run_id": proof.run_id,
+        "tenant_id": proof.tenant_id,
+        "terminal_proof_sha256": proof.proof_sha256,
+        "task_count": proof.task_count,
+        "done_count": proof.done_count,
+        "failed_count": proof.failed_count,
+        "skipped_count": proof.skipped_count,
+        "tasks_json": _terminal_tasks_json(proof),
+        "final_state": proof.final_state,
+        "finalized_at_ms": proof.finalized_at_ms,
+        "worker_instance_id": proof.worker_instance_id,
+        "trigger_task_id": proof.trigger_task_id,
+        "trigger_terminal_state": proof.trigger_terminal_state,
+        "from_revision": proof.canonical_expected_revision,
+        "to_revision": proof.canonical_expected_revision + 1,
+        "previous_state": proof.canonical_previous_state,
+        "next_state": proof.final_state,
+    }
+
+
+def _run_terminate_proof_matches(record: Any, proof: _TerminalAggregateProof) -> bool:
+    metadata = record.authoritative_metadata_changes
+    terminal = metadata.get("terminal_evidence") if isinstance(metadata, Mapping) else None
+    if not isinstance(metadata, Mapping) or not isinstance(terminal, Mapping):
+        return False
+    expected_tasks = [{"task_id": row.task_id, "state": row.state} for row in proof.tasks]
+    return all(
+        (
+            record.operation_type == OperationType.RUN_TERMINATE.value,
+            record.aggregate_identity.aggregate_type is AggregateType.RUN,
+            record.aggregate_identity.run_id == proof.run_id,
+            record.operation_id == _run_terminate_operation_id(proof.run_id, proof.proof_sha256),
+            record.from_revision == proof.canonical_expected_revision,
+            record.to_revision == proof.canonical_expected_revision + 1,
+            record.previous_state == proof.canonical_previous_state,
+            record.next_state == proof.final_state,
+            metadata.get("run_id") == proof.run_id,
+            metadata.get("tenant_id") == proof.tenant_id,
+            metadata.get("finalized_at_ms") == proof.finalized_at_ms,
+            metadata.get("worker_instance_id") == proof.worker_instance_id,
+            metadata.get("trigger_task_id") == proof.trigger_task_id,
+            metadata.get("trigger_terminal_state") == proof.trigger_terminal_state,
+            terminal.get("schema_version") == proof.schema_version,
+            terminal.get("terminal_proof_sha256") == proof.proof_sha256,
+            terminal.get("task_count") == proof.task_count,
+            terminal.get("done_count") == proof.done_count,
+            terminal.get("failed_count") == proof.failed_count,
+            terminal.get("skipped_count") == proof.skipped_count,
+            terminal.get("final_state") == proof.final_state,
+            canonical_json_bytes(terminal.get("tasks")) == canonical_json_bytes(expected_tasks),
+        )
+    )
+
+
+class HistoricalCrossAggregateReconciler:
+    """85.0C read-only historical/cross-aggregate reconciler."""
+
+    def __init__(
+        self,
+        *,
+        canonical_reader: HistoricalCanonicalReader,
+        terminal_proof_reader: TerminalProofReader | None = None,
+        resource_reader: ResourceReceiptReader | None = None,
+        clock_ms: Callable[[], int] | None = None,
+    ) -> None:
+        self.__canonical_reader = canonical_reader
+        self.__terminal_proof_reader = terminal_proof_reader
+        self.__resource_reader = resource_reader
+        self.__clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
+
+    @staticmethod
+    def _empty_reference() -> ReconciliationCanonicalReference:
+        return ReconciliationCanonicalReference(None, None, None, None, None, None, None, None)
+
+    def _finding(
+        self,
+        *,
+        aggregate_type: str,
+        run_id: str,
+        task_id: str | None,
+        contract_id: str,
+        check_class: ReconciliationCheckClass,
+        status: ReconciliationStatus,
+        severity: ReconciliationSeverity,
+        reason: ReconciliationReason,
+        canonical_record: Any | None,
+        expected: Mapping[str, Scalar] | None,
+        observed: Mapping[str, Scalar] | None,
+        refs: Sequence[str],
+        started_at_ms: int,
+    ) -> ReconciliationFinding:
+        return ReconciliationFinding(
+            aggregate_type=aggregate_type,
+            run_id=run_id,
+            task_id=task_id,
+            check_class=check_class,
+            contract_id=contract_id,
+            contract_version=HISTORICAL_RECONCILIATION_CONTRACT_VERSION,
+            status=status,
+            severity=severity,
+            reason_code=reason,
+            canonical=(
+                _record_reference(canonical_record)
+                if canonical_record is not None
+                else self._empty_reference()
+            ),
+            expected=_freeze_fields(expected),
+            observed=_freeze_fields(observed),
+            evidence=ReconciliationEvidenceState(
+                canonical_proven=canonical_record is not None,
+                canonical_stable=status is not ReconciliationStatus.BLOCKED_EVIDENCE
+                or reason
+                not in {
+                    ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                    ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                    ReconciliationReason.CANONICAL_HISTORY_INCOMPLETE,
+                    ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                },
+                projection_read_complete=status is not ReconciliationStatus.BLOCKED_EVIDENCE
+                or reason
+                not in {
+                    ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                },
+                projection_observation_stable=reason
+                not in {
+                    ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                    ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION,
+                },
+                refs=tuple(refs),
+            ),
+            observation=ReconciliationObservation(started_at_ms, int(self.__clock_ms())),
+            mutation_attempted=False,
+        )
+
+    async def reconcile_history(
+        self,
+        identity: CanonicalAggregateIdentity,
+    ) -> tuple[ReconciliationFinding, ...]:
+        started = int(self.__clock_ms())
+        try:
+            history = await self.__canonical_reader.read_history(identity)
+        except ReconciliationEvidenceError as exc:
+            return (
+                self._finding(
+                    aggregate_type=identity.aggregate_type.value,
+                    run_id=identity.run_id,
+                    task_id=identity.task_id,
+                    contract_id=HISTORICAL_CANONICAL_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.HISTORICAL_DURABLE_EFFECT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=(
+                        ReconciliationSeverity.WARNING
+                        if exc.reason is ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION
+                        else ReconciliationSeverity.CRITICAL
+                    ),
+                    reason=exc.reason,
+                    canonical_record=None,
+                    expected={"history": "COMPLETE_AND_STABLE"},
+                    observed={"detail": exc.detail},
+                    refs=(exc.detail,),
+                    started_at_ms=started,
+                ),
+            )
+        highest = history.operations[-1].record
+        return (
+            self._finding(
+                aggregate_type=identity.aggregate_type.value,
+                run_id=identity.run_id,
+                task_id=identity.task_id,
+                contract_id=HISTORICAL_CANONICAL_CONTRACT_ID,
+                check_class=ReconciliationCheckClass.HISTORICAL_DURABLE_EFFECT,
+                status=ReconciliationStatus.CONSISTENT,
+                severity=ReconciliationSeverity.INFO,
+                reason=ReconciliationReason.CONSISTENT,
+                canonical_record=highest,
+                expected={"revision_count": history.snapshot.revision},
+                observed={"revision_count": len(history.operations)},
+                refs=(f"canonical:{highest.transition_id}",),
+                started_at_ms=started,
+            ),
+        )
+
+    async def _two_proofs(
+        self,
+        *,
+        run_id: str,
+    ) -> tuple[_TerminalAggregateProof | None, _TerminalAggregateProof | None, ReconciliationEvidenceError | None]:
+        if self.__terminal_proof_reader is None:
+            return None, None, ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail="terminal proof reader is unavailable",
+            )
+        first: _TerminalAggregateProof | None = None
+        second: _TerminalAggregateProof | None = None
+        first_error: ReconciliationEvidenceError | None = None
+        second_error: ReconciliationEvidenceError | None = None
+        try:
+            first = await self.__terminal_proof_reader.read_terminal_proof(run_id=run_id)
+        except ReconciliationEvidenceError as exc:
+            first_error = exc
+        try:
+            second = await self.__terminal_proof_reader.read_terminal_proof(run_id=run_id)
+        except ReconciliationEvidenceError as exc:
+            second_error = exc
+        first_fp = ("ERROR", first_error.reason.value, first_error.detail) if first_error else _proof_fingerprint(first)
+        second_fp = ("ERROR", second_error.reason.value, second_error.detail) if second_error else _proof_fingerprint(second)
+        if first_fp != second_fp:
+            return first, second, ReconciliationEvidenceError(
+                reason=ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION,
+                detail="terminal proof changed between read-only observations",
+            )
+        if first_error is not None:
+            return None, None, first_error
+        if first is None:
+            return None, None, ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail="immutable terminal proof is missing",
+            )
+        return first, second, None
+
+    async def reconcile_run_terminate_proof(
+        self,
+        *,
+        run_id: str,
+    ) -> tuple[ReconciliationFinding, ...]:
+        started = int(self.__clock_ms())
+        identity = CanonicalAggregateIdentity(AggregateType.RUN, run_id, None)
+        try:
+            history_a = await self.__canonical_reader.read_history(identity)
+            record_a = _history_record(history_a, OperationType.RUN_TERMINATE)
+        except ReconciliationEvidenceError as exc:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_PROOF_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=exc.reason,
+                    canonical_record=None,
+                    expected={"terminal_proof": "READABLE"},
+                    observed={"detail": exc.detail},
+                    refs=(exc.detail,),
+                    started_at_ms=started,
+                ),
+            )
+        proof_a, _proof_b, proof_error = await self._two_proofs(run_id=run_id)
+        try:
+            history_b = await self.__canonical_reader.read_history(identity)
+        except ReconciliationEvidenceError as exc:
+            proof_error = exc
+            history_b = history_a
+        if history_a.fingerprint != history_b.fingerprint:
+            proof_error = ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                detail="canonical RUN history changed around terminal-proof observation",
+            )
+        if proof_error is not None or proof_a is None:
+            error = proof_error or ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail="immutable terminal proof is unavailable",
+            )
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_PROOF_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=(
+                        ReconciliationSeverity.WARNING
+                        if error.reason in {
+                            ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                            ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION,
+                        }
+                        else ReconciliationSeverity.CRITICAL
+                    ),
+                    reason=error.reason,
+                    canonical_record=record_a,
+                    expected={"terminal_proof": "STABLE_AND_VALID"},
+                    observed={"detail": error.detail},
+                    refs=(error.detail,),
+                    started_at_ms=started,
+                ),
+            )
+        record_b = _history_record(history_b, OperationType.RUN_TERMINATE)
+        expected = _terminal_proof_expected(proof_a)
+        observed = _terminal_record_observed(record_b)
+        if not _run_terminate_proof_matches(record_b, proof_a):
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_PROOF_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.DRIFT,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.CANONICAL_PROOF_MISMATCH,
+                    canonical_record=record_b,
+                    expected=expected,
+                    observed=observed,
+                    refs=(f"proof:{proof_a.proof_sha256}",),
+                    started_at_ms=started,
+                ),
+            )
+        return (
+            self._finding(
+                aggregate_type=AggregateType.RUN.value,
+                run_id=run_id,
+                task_id=None,
+                contract_id=RUN_TERMINATE_PROOF_CONTRACT_ID,
+                check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                status=ReconciliationStatus.CONSISTENT,
+                severity=ReconciliationSeverity.INFO,
+                reason=ReconciliationReason.CONSISTENT,
+                canonical_record=record_b,
+                expected=expected,
+                observed=observed,
+                refs=(f"proof:{proof_a.proof_sha256}",),
+                started_at_ms=started,
+            ),
+        )
+
+    async def _two_resources(
+        self,
+        reservation: _AdmissionResourceReservationInput,
+    ) -> tuple[ResourceReceiptEvidence | None, ResourceReceiptEvidence | None, ReconciliationEvidenceError | None]:
+        if self.__resource_reader is None:
+            return None, None, ReconciliationEvidenceError(
+                reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                detail="resource receipt reader is unavailable",
+            )
+        try:
+            first = await self.__resource_reader.read_reservation_receipt(reservation)
+            second = await self.__resource_reader.read_reservation_receipt(reservation)
+        except ReconciliationEvidenceError as exc:
+            return None, None, exc
+        if first.fingerprint != second.fingerprint:
+            return first, second, ReconciliationEvidenceError(
+                reason=ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION,
+                detail="resource receipt changed between read-only observations",
+            )
+        return first, second, None
+
+    async def reconcile_run_create_resource(
+        self,
+        *,
+        run_id: str,
+    ) -> tuple[ReconciliationFinding, ...]:
+        started = int(self.__clock_ms())
+        identity = CanonicalAggregateIdentity(AggregateType.RUN, run_id, None)
+        try:
+            history_a = await self.__canonical_reader.read_history(identity)
+            create_a = _history_record(history_a, OperationType.RUN_CREATE)
+            reservation = _resource_reservation_from_run_create_record(create_a)
+        except (ReconciliationEvidenceError, ValueError) as exc:
+            reason = exc.reason if isinstance(exc, ReconciliationEvidenceError) else ReconciliationReason.CANONICAL_RECORD_CORRUPTION
+            detail = exc.detail if isinstance(exc, ReconciliationEvidenceError) else str(exc)
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_CREATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=reason,
+                    canonical_record=None,
+                    expected={"reservation": "READABLE"},
+                    observed={"detail": detail},
+                    refs=(detail,),
+                    started_at_ms=started,
+                ),
+            )
+        resource_a, _resource_b, resource_error = await self._two_resources(reservation)
+        try:
+            history_b = await self.__canonical_reader.read_history(identity)
+        except ReconciliationEvidenceError as exc:
+            resource_error = exc
+            history_b = history_a
+        if history_a.fingerprint != history_b.fingerprint:
+            resource_error = ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                detail="canonical RUN history changed around resource observation",
+            )
+        create_b = _history_record(history_b, OperationType.RUN_CREATE)
+        if resource_error is not None or resource_a is None:
+            error = resource_error or ReconciliationEvidenceError(
+                reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                detail="resource receipt is unavailable",
+            )
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_CREATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.WARNING,
+                    reason=error.reason,
+                    canonical_record=create_b,
+                    expected={"resource_receipt": "STABLE_AND_VALID"},
+                    observed={"detail": error.detail},
+                    refs=(error.detail,),
+                    started_at_ms=started,
+                ),
+            )
+        if resource_a.missing_immutable_fields:
+            detail = "missing required immutable resource fields: " + ",".join(resource_a.missing_immutable_fields)
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_CREATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    canonical_record=create_b,
+                    expected={"resource_receipt": "COMPLETE_IMMUTABLE_IDENTITY"},
+                    observed={"detail": detail},
+                    refs=(detail,),
+                    started_at_ms=started,
+                ),
+            )
+        if resource_a.immutable_mismatch:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_CREATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.DRIFT,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.RESOURCE_PROOF_MISMATCH,
+                    canonical_record=create_b,
+                    expected={"reservation_proof_sha256": reservation.proof_sha256},
+                    observed={"resource_receipt": "IMMUTABLE_MISMATCH"},
+                    refs=("resource:immutable-mismatch",),
+                    started_at_ms=started,
+                ),
+            )
+        if resource_a.corrupt_detail:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_CREATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    canonical_record=create_b,
+                    expected={"resource_receipt": "VALID"},
+                    observed={"detail": resource_a.corrupt_detail},
+                    refs=(resource_a.corrupt_detail,),
+                    started_at_ms=started,
+                ),
+            )
+        receipt = resource_a.receipt
+        if receipt is None:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_CREATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.WARNING,
+                    reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    canonical_record=create_b,
+                    expected={"resource_receipt": "PRESENT"},
+                    observed={"resource_receipt": "ABSENT"},
+                    refs=("resource:absent",),
+                    started_at_ms=started,
+                ),
+            )
+        if receipt.state == _RESERVATION_STATE_RESERVED:
+            status = ReconciliationStatus.BLOCKED_EVIDENCE
+            reason = ReconciliationReason.RESOURCE_FINALIZATION_PENDING
+            severity = ReconciliationSeverity.WARNING
+        elif receipt.state in {_RESERVATION_STATE_FINALIZED, _RESERVATION_STATE_SETTLED}:
+            status = ReconciliationStatus.CONSISTENT
+            reason = ReconciliationReason.CONSISTENT
+            severity = ReconciliationSeverity.INFO
+        elif receipt.state == _RESERVATION_STATE_RELEASED:
+            status = ReconciliationStatus.DRIFT
+            reason = ReconciliationReason.RESOURCE_PROOF_MISMATCH
+            severity = ReconciliationSeverity.CRITICAL
+        else:
+            status = ReconciliationStatus.BLOCKED_EVIDENCE
+            reason = ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE
+            severity = ReconciliationSeverity.CRITICAL
+        return (
+            self._finding(
+                aggregate_type=AggregateType.RUN.value,
+                run_id=run_id,
+                task_id=None,
+                contract_id=RUN_CREATE_RESOURCE_CONTRACT_ID,
+                check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                status=status,
+                severity=severity,
+                reason=reason,
+                canonical_record=create_b,
+                expected={"reservation_proof_sha256": reservation.proof_sha256},
+                observed={
+                    "reservation_proof_sha256": receipt.proof_sha256,
+                    "resource_state": receipt.state,
+                },
+                refs=(f"resource:{receipt.proof_sha256}",),
+                started_at_ms=started,
+            ),
+        )
+
+    async def reconcile_run_terminate_settlement(
+        self,
+        *,
+        run_id: str,
+    ) -> tuple[ReconciliationFinding, ...]:
+        started = int(self.__clock_ms())
+        identity = CanonicalAggregateIdentity(AggregateType.RUN, run_id, None)
+        try:
+            history_a = await self.__canonical_reader.read_history(identity)
+            create_a = _history_record(history_a, OperationType.RUN_CREATE)
+            terminate_a = _history_record(history_a, OperationType.RUN_TERMINATE)
+            reservation = _resource_reservation_from_run_create_record(create_a)
+        except (ReconciliationEvidenceError, ValueError) as exc:
+            reason = exc.reason if isinstance(exc, ReconciliationEvidenceError) else ReconciliationReason.CANONICAL_RECORD_CORRUPTION
+            detail = exc.detail if isinstance(exc, ReconciliationEvidenceError) else str(exc)
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=reason,
+                    canonical_record=None,
+                    expected={"settlement": "READABLE"},
+                    observed={"detail": detail},
+                    refs=(detail,),
+                    started_at_ms=started,
+                ),
+            )
+
+        proof_a: _TerminalAggregateProof | None = None
+        proof_b: _TerminalAggregateProof | None = None
+        resource_a: ResourceReceiptEvidence | None = None
+        resource_b: ResourceReceiptEvidence | None = None
+        proof_error: ReconciliationEvidenceError | None = None
+        resource_error: ReconciliationEvidenceError | None = None
+
+        # Frozen cross-aggregate observation order:
+        # RUN A -> terminal proof A -> settlement A -> settlement B
+        # -> terminal proof B -> RUN B.
+        if self.__terminal_proof_reader is None:
+            proof_error = ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail="terminal proof reader is unavailable",
+            )
+        else:
+            try:
+                proof_a = await self.__terminal_proof_reader.read_terminal_proof(run_id=run_id)
+            except ReconciliationEvidenceError as exc:
+                proof_error = exc
+
+        if proof_error is None:
+            if self.__resource_reader is None:
+                resource_error = ReconciliationEvidenceError(
+                    reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    detail="resource receipt reader is unavailable",
+                )
+            else:
+                try:
+                    resource_a = await self.__resource_reader.read_reservation_receipt(reservation)
+                    resource_b = await self.__resource_reader.read_reservation_receipt(reservation)
+                except ReconciliationEvidenceError as exc:
+                    resource_error = exc
+                if (
+                    resource_error is None
+                    and resource_a is not None
+                    and resource_b is not None
+                    and resource_a.fingerprint != resource_b.fingerprint
+                ):
+                    resource_error = ReconciliationEvidenceError(
+                        reason=ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION,
+                        detail="resource receipt changed between read-only observations",
+                    )
+
+            try:
+                proof_b = await self.__terminal_proof_reader.read_terminal_proof(run_id=run_id)
+            except ReconciliationEvidenceError as exc:
+                proof_error = exc
+            if (
+                proof_error is None
+                and proof_a is not None
+                and proof_b is not None
+                and _proof_fingerprint(proof_a) != _proof_fingerprint(proof_b)
+            ):
+                proof_error = ReconciliationEvidenceError(
+                    reason=ReconciliationReason.DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION,
+                    detail="terminal proof changed between read-only observations",
+                )
+
+        try:
+            history_b = await self.__canonical_reader.read_history(identity)
+        except ReconciliationEvidenceError as exc:
+            history_b = history_a
+            proof_error = exc
+        if history_a.fingerprint != history_b.fingerprint:
+            proof_error = ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_CHANGED_DURING_OBSERVATION,
+                detail="canonical RUN history changed around settlement observation",
+            )
+        terminate_b = _history_record(history_b, OperationType.RUN_TERMINATE)
+        if proof_error is not None or proof_a is None:
+            error = proof_error or ReconciliationEvidenceError(
+                reason=ReconciliationReason.CANONICAL_EVIDENCE_UNAVAILABLE,
+                detail="terminal proof is unavailable",
+            )
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.WARNING,
+                    reason=error.reason,
+                    canonical_record=terminate_b,
+                    expected={"terminal_proof": "STABLE_AND_VALID"},
+                    observed={"detail": error.detail},
+                    refs=(error.detail,),
+                    started_at_ms=started,
+                ),
+            )
+        if not _run_terminate_proof_matches(terminate_b, proof_a):
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.DRIFT,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.CANONICAL_PROOF_MISMATCH,
+                    canonical_record=terminate_b,
+                    expected=_terminal_proof_expected(proof_a),
+                    observed=_terminal_record_observed(terminate_b),
+                    refs=(f"proof:{proof_a.proof_sha256}",),
+                    started_at_ms=started,
+                ),
+            )
+        if resource_error is not None or resource_a is None:
+            error = resource_error or ReconciliationEvidenceError(
+                reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                detail="settlement evidence is unavailable",
+            )
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.WARNING,
+                    reason=error.reason,
+                    canonical_record=terminate_b,
+                    expected={"settlement": "STABLE_AND_VALID"},
+                    observed={"detail": error.detail},
+                    refs=(error.detail,),
+                    started_at_ms=started,
+                ),
+            )
+        if resource_a.missing_immutable_fields:
+            detail = "missing required immutable resource fields: " + ",".join(resource_a.missing_immutable_fields)
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    canonical_record=terminate_b,
+                    expected={"settlement": "COMPLETE_IMMUTABLE_RESERVATION_IDENTITY"},
+                    observed={"detail": detail},
+                    refs=(detail,),
+                    started_at_ms=started,
+                ),
+            )
+        if resource_a.immutable_mismatch:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.DRIFT,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.RESOURCE_PROOF_MISMATCH,
+                    canonical_record=terminate_b,
+                    expected={"reservation_proof_sha256": reservation.proof_sha256},
+                    observed={"resource_receipt": "IMMUTABLE_MISMATCH"},
+                    refs=("resource:immutable-mismatch",),
+                    started_at_ms=started,
+                ),
+            )
+        if resource_a.corrupt_detail:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    canonical_record=terminate_b,
+                    expected={"settlement": "VALID"},
+                    observed={"detail": resource_a.corrupt_detail},
+                    refs=(resource_a.corrupt_detail,),
+                    started_at_ms=started,
+                ),
+            )
+        receipt = resource_a.receipt
+        if receipt is None or receipt.state != _RESERVATION_STATE_SETTLED:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.WARNING,
+                    reason=ReconciliationReason.RESOURCE_EFFECT_EVIDENCE_UNAVAILABLE,
+                    canonical_record=terminate_b,
+                    expected={"settlement_state": _RESERVATION_STATE_SETTLED},
+                    observed={"settlement_state": None if receipt is None else receipt.state},
+                    refs=("settlement:applicability-unresolved",),
+                    started_at_ms=started,
+                ),
+            )
+        try:
+            expected_settlement = _AdmissionResourceSettlementInput(
+                run_create_operation_id=reservation.operation_id,
+                run_id=reservation.run_id,
+                tenant_id=reservation.tenant_id,
+                estimated_cost_cents=reservation.estimated_cost_cents,
+                run_create_reservation_proof_sha256=reservation.proof_sha256,
+                run_terminate_operation_id=terminate_b.operation_id,
+                terminal_proof_sha256=proof_a.proof_sha256,
+                canonical_transition_id=terminate_b.transition_id,
+                canonical_record_hash=terminate_b.canonical_record_hash,
+                canonical_command_hash=terminate_b.canonical_command_hash,
+                canonical_revision=terminate_b.to_revision,
+                final_state=terminate_b.next_state,
+            )
+        except ValueError as exc:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.BLOCKED_EVIDENCE,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.CANONICAL_RECORD_CORRUPTION,
+                    canonical_record=terminate_b,
+                    expected={"settlement_input": "VALID"},
+                    observed={"detail": str(exc)},
+                    refs=(str(exc),),
+                    started_at_ms=started,
+                ),
+            )
+        settlement_matches = all(
+            (
+                receipt.operation_id == expected_settlement.run_create_operation_id,
+                receipt.run_id == expected_settlement.run_id,
+                receipt.tenant_id == expected_settlement.tenant_id,
+                receipt.estimated_cost_cents == expected_settlement.estimated_cost_cents,
+                receipt.proof_sha256 == expected_settlement.run_create_reservation_proof_sha256,
+                receipt.run_terminate_operation_id == expected_settlement.run_terminate_operation_id,
+                receipt.terminal_proof_sha256 == expected_settlement.terminal_proof_sha256,
+                receipt.canonical_transition_id == expected_settlement.canonical_transition_id,
+                receipt.canonical_record_hash == expected_settlement.canonical_record_hash,
+                receipt.canonical_command_hash == expected_settlement.canonical_command_hash,
+                receipt.canonical_revision == expected_settlement.canonical_revision,
+                receipt.final_state == expected_settlement.final_state,
+                receipt.settlement_proof_sha256 == expected_settlement.proof_sha256,
+            )
+        )
+        if not settlement_matches:
+            return (
+                self._finding(
+                    aggregate_type=AggregateType.RUN.value,
+                    run_id=run_id,
+                    task_id=None,
+                    contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                    check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                    status=ReconciliationStatus.DRIFT,
+                    severity=ReconciliationSeverity.CRITICAL,
+                    reason=ReconciliationReason.RESOURCE_PROOF_MISMATCH,
+                    canonical_record=terminate_b,
+                    expected={
+                        "run_terminate_operation_id": expected_settlement.run_terminate_operation_id,
+                        "terminal_proof_sha256": expected_settlement.terminal_proof_sha256,
+                        "canonical_record_hash": expected_settlement.canonical_record_hash,
+                        "settlement_proof_sha256": expected_settlement.proof_sha256,
+                    },
+                    observed={
+                        "run_terminate_operation_id": receipt.run_terminate_operation_id,
+                        "terminal_proof_sha256": receipt.terminal_proof_sha256,
+                        "canonical_record_hash": receipt.canonical_record_hash,
+                        "settlement_proof_sha256": receipt.settlement_proof_sha256,
+                    },
+                    refs=(f"settlement:{receipt.settlement_proof_sha256}",),
+                    started_at_ms=started,
+                ),
+            )
+        return (
+            self._finding(
+                aggregate_type=AggregateType.RUN.value,
+                run_id=run_id,
+                task_id=None,
+                contract_id=RUN_TERMINATE_RESOURCE_CONTRACT_ID,
+                check_class=ReconciliationCheckClass.CROSS_AGGREGATE_INVARIANT,
+                status=ReconciliationStatus.CONSISTENT,
+                severity=ReconciliationSeverity.INFO,
+                reason=ReconciliationReason.CONSISTENT,
+                canonical_record=terminate_b,
+                expected={
+                    "run_terminate_operation_id": expected_settlement.run_terminate_operation_id,
+                    "terminal_proof_sha256": expected_settlement.terminal_proof_sha256,
+                    "canonical_record_hash": expected_settlement.canonical_record_hash,
+                    "settlement_proof_sha256": expected_settlement.proof_sha256,
+                },
+                observed={
+                    "run_terminate_operation_id": receipt.run_terminate_operation_id,
+                    "terminal_proof_sha256": receipt.terminal_proof_sha256,
+                    "canonical_record_hash": receipt.canonical_record_hash,
+                    "settlement_proof_sha256": receipt.settlement_proof_sha256,
+                },
+                refs=(f"settlement:{receipt.settlement_proof_sha256}",),
+                started_at_ms=started,
+            ),
         )

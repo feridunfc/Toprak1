@@ -1,0 +1,441 @@
+name: Sprint 85.0C Historical Cross-Aggregate Reconciliation
+
+on:
+  pull_request:
+    branches: [baseline/local-import]
+    paths:
+      - 'hfa-core/src/hfa/authority/redis_persistence.py'
+      - 'hfa-control/src/hfa_control/reconciliation.py'
+      - 'tests/unit/test_reconciliation_contract.py'
+      - 'tests/integration/test_historical_cross_aggregate_reconciliation_integration.py'
+      - '.github/workflows/sprint85-0a-read-only-reconciliation.yml'
+      - '.github/workflows/sprint85-0b-current-head-reconciliation.yml'
+      - '.github/workflows/sprint85-0c-historical-cross-aggregate-reconciliation.yml'
+      - 'docs/implementation/sprint85/SPRINT85.0C-historical-cross-aggregate-reconciliation.md'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  REDIS_URL: redis://127.0.0.1:6389/0
+  USE_EXISTING_REDIS: '1'
+  ACCEPTED_PARENT: be2ab4e620b2ab0c75a77943fe96d30b59165656
+  FEATURE_BRANCH: sprint/85-0c-historical-durable-effects-cross-aggregate-invariants
+
+jobs:
+  verify:
+    if: ${{ github.head_ref == 'sprint/85-0c-historical-durable-effects-cross-aggregate-invariants' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    services:
+      redis:
+        image: redis:7
+        ports: ['6389:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Exact parent branch scope and clean index
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ github.event.pull_request.base.sha }}" = "$ACCEPTED_PARENT"
+          test "${{ github.head_ref }}" = "$FEATURE_BRANCH"
+          python - <<'PY'
+          import os, subprocess
+          allowed = {
+              'hfa-core/src/hfa/authority/redis_persistence.py',
+              'hfa-control/src/hfa_control/reconciliation.py',
+              'tests/unit/test_reconciliation_contract.py',
+              '.github/workflows/sprint85-0a-read-only-reconciliation.yml',
+              '.github/workflows/sprint85-0b-current-head-reconciliation.yml',
+              'tests/integration/test_historical_cross_aggregate_reconciliation_integration.py',
+              '.github/workflows/sprint85-0c-historical-cross-aggregate-reconciliation.yml',
+              'docs/implementation/sprint85/SPRINT85.0C-historical-cross-aggregate-reconciliation.md',
+          }
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--name-only', os.environ['ACCEPTED_PARENT'] + '...HEAD'],
+              text=True,
+          ).splitlines())
+          assert changed == allowed, {
+              'missing': sorted(allowed - changed),
+              'unexpected': sorted(changed - allowed),
+          }
+          assert subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True) == ''
+          print('SPRINT85_0C_EXACT_SCOPE_OK', len(changed))
+          PY
+
+      - name: Protected redis persistence baseline parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast, os, subprocess
+          from pathlib import Path
+
+          path = 'hfa-core/src/hfa/authority/redis_persistence.py'
+          baseline = subprocess.check_output(
+              ['git', 'show', f"{os.environ['ACCEPTED_PARENT']}:{path}"], text=True
+          )
+          candidate = Path(path).read_text(encoding='utf-8')
+          btree = ast.parse(baseline)
+          ctree = ast.parse(candidate)
+
+          def functions(tree):
+              result = {}
+              for top in tree.body:
+                  if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                      result[top.name] = top
+                  elif isinstance(top, ast.ClassDef):
+                      for item in top.body:
+                          if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                              result[f'{top.name}.{item.name}'] = item
+              return result
+
+          baseline_functions = functions(btree)
+          candidate_functions = functions(ctree)
+          allowed_new = {
+              'PersistedAggregateHistory.fingerprint',
+              'RedisCanonicalAuthorityStore.load_aggregate_history',
+          }
+          for name, node in baseline_functions.items():
+              assert name in candidate_functions, f'missing protected symbol {name}'
+              assert ast.dump(node, include_attributes=False) == ast.dump(
+                  candidate_functions[name], include_attributes=False
+              ), f'protected symbol changed: {name}'
+          unexpected_new = set(candidate_functions) - set(baseline_functions) - allowed_new
+          assert not unexpected_new, {'unexpected_new_functions': sorted(unexpected_new)}
+
+          def class_node(tree, name):
+              return next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == name)
+          assert ast.dump(class_node(btree, 'RedisAuthorityKeyspace'), include_attributes=False) == ast.dump(
+              class_node(ctree, 'RedisAuthorityKeyspace'), include_attributes=False
+          ), 'RedisAuthorityKeyspace changed'
+
+          assert '_operation_digest' in baseline_functions
+          print('SPRINT85_0C_REDIS_WRITER_AST_PARITY_PASS', len(baseline_functions))
+          PY
+
+      - name: Historical workflow applicability-only parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, subprocess, yaml
+          from pathlib import Path
+
+          rules = {
+              '.github/workflows/sprint85-0a-read-only-reconciliation.yml':
+                  "github.head_ref == 'sprint/85-0a-reconciliation-truth-inventory-first-vertical-slice'",
+              '.github/workflows/sprint85-0b-current-head-reconciliation.yml':
+                  "github.head_ref == 'sprint/85-0b-current-head-reconciliation-coverage'",
+          }
+          for path, expected_guard in rules.items():
+              baseline_text = subprocess.check_output(
+                  ['git','show',f"{os.environ['ACCEPTED_PARENT']}:{path}"], text=True
+              )
+              candidate_text = Path(path).read_text(encoding='utf-8')
+              # PyYAML 1.1 treats the key ``on`` specially, so source parity is
+              # deliberately stronger than object equality here: removing exactly
+              # one job-level applicability line must reproduce the accepted parent.
+              candidate_lines = candidate_text.splitlines(keepends=True)
+              matching = [
+                  line for line in candidate_lines
+                  if line.lstrip().startswith('if:') and expected_guard in line
+              ]
+              assert len(matching) == 1, (path, matching)
+              removed = False
+              filtered = []
+              for line in candidate_lines:
+                  if not removed and line == matching[0]:
+                      removed = True
+                      continue
+                  filtered.append(line)
+              stripped = ''.join(filtered)
+              assert stripped == baseline_text, f'{path}: change beyond job applicability guard'
+              print('HISTORICAL_WORKFLOW_APPLICABILITY_ONLY_PASS', path)
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
+          python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
+
+      - name: Normalize editable-install generated metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+          dirty=subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()
+          unexpected=[path for path in dirty if '.egg-info/' not in path.replace('\\','/')]
+          assert not unexpected, {'unexpected_post_install_tracked_changes':unexpected,'all_dirty':dirty}
+          if dirty:
+              subprocess.run(['git','restore','--worktree','--',*dirty],check=True)
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()==[]
+          print('EDITABLE_INSTALL_METADATA_NORMALIZED',len(dirty))
+          PY
+
+      - name: Redis 7 preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, redis
+          client = redis.Redis.from_url(os.environ['REDIS_URL'], decode_responses=True)
+          assert client.ping() is True
+          version = str(client.info('server')['redis_version'])
+          assert int(version.split('.', 1)[0]) >= 7, version
+          print('REDIS_PREFLIGHT_PASS', version)
+          client.close()
+          PY
+
+      - name: Static read-only and authority boundary audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          reconciliation = Path('hfa-control/src/hfa_control/reconciliation.py').read_text(encoding='utf-8')
+          tree = ast.parse(reconciliation)
+          forbidden_calls = {
+              'set','hset','hdel','delete','zadd','zrem','xadd','expire','eval','evalsha',
+              'commit','initialise','record_authority_conflict','validate_authority_head',
+              'reserve_once','finalize_once','release_once','settle_once','capture','project',
+              'repair','replay',
+          }
+          used = {
+              node.func.attr
+              for node in ast.walk(tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+          }
+          assert not (used & forbidden_calls), sorted(used & forbidden_calls)
+          assert 'run_tasks' not in reconciliation.split('# Sprint 85.0C', 1)[-1]
+          assert 'proof-listed TASK state == canonical TASK state' not in reconciliation
+          assert 'DURABLE_EVIDENCE_CHANGED_DURING_OBSERVATION' in reconciliation
+          assert 'CANONICAL_HISTORY_INCOMPLETE' in reconciliation
+          print('SPRINT85_0C_STATIC_READ_ONLY_AUDIT_PASS')
+          PY
+
+      - name: Compile and YAML parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q hfa-core/src/hfa/authority/redis_persistence.py hfa-control/src/hfa_control/reconciliation.py tests/unit/test_reconciliation_contract.py tests/integration/test_historical_cross_aggregate_reconciliation_integration.py
+          python - <<'PY'
+          import yaml
+          from pathlib import Path
+          for path in (
+              '.github/workflows/sprint85-0a-read-only-reconciliation.yml',
+              '.github/workflows/sprint85-0b-current-head-reconciliation.yml',
+              '.github/workflows/sprint85-0c-historical-cross-aggregate-reconciliation.yml',
+          ):
+              value = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
+              assert isinstance(value, dict), path
+          print('SPRINT85_0C_YAML_PARSE_PASS')
+          PY
+
+      - name: R1.1 authored inventory freeze
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          unit=Path('tests/unit/test_reconciliation_contract.py')
+          integ=Path('tests/integration/test_historical_cross_aggregate_reconciliation_integration.py')
+          def functions(path):
+              tree=ast.parse(path.read_text(encoding='utf-8'))
+              return [n.name for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith('test_')]
+          u=functions(unit); i=functions(integ)
+          assert len(u)==49,u
+          assert len(i)==21,i
+          text=unit.read_text(encoding='utf-8')+integ.read_text(encoding='utf-8')
+          for banned in ('pytest.skip','pytest.xfail','@pytest.mark.skip','@pytest.mark.xfail','--deselect'):
+              assert banned not in text,banned
+          mandatory={
+              'test_85_0c_r1_1_terminal_proof_metadata_binding_contradiction_drifts',
+              'test_85_0c_r1_1_terminal_proof_revision_state_continuity_contradiction_drifts',
+              'test_85_0c_r1_1_complete_terminal_proof_fingerprint_race_blocks',
+              'test_85_0c_r1_1_missing_resource_immutable_field_blocks_not_drifts',
+          }
+          assert mandatory <= set(u), sorted(mandatory-set(u))
+          mandatory_i={
+              'test_85_0c_extra_historical_member_blocks',
+              'test_85_0c_duplicate_revision_reaches_uniqueness_validator',
+              'test_85_0c_out_of_range_revision_is_canonical_corruption',
+              'test_85_0c_missing_required_resource_immutable_field_blocks',
+              'test_85_0c_present_but_wrong_resource_immutable_field_drifts',
+              'test_85_0c_r1_1_all_cross_aggregate_observers_zero_logical_mutation',
+          }
+          assert mandatory_i <= set(i), sorted(mandatory_i-set(i))
+          print('SPRINT85_0C_R1_1_AUTHORED_INVENTORY_PASS',len(u),len(i))
+          PY
+
+      - name: Focused unit acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out
+          python -m pytest tests/unit/test_reconciliation_contract.py -q --tb=short -p no:cacheprovider | tee local_out/s85_0c_r1_1_unit.txt
+          python - <<'PY'
+          import re
+          text=open('local_out/s85_0c_r1_1_unit.txt',encoding='utf-8').read()
+          assert re.search(r'(^|\D)59 passed',text),text
+          assert not re.search(r'\b[1-9]\d* (skipped|deselected|xfailed|xpassed)\b',text,re.I),text
+          print('SPRINT85_0C_R1_1_UNIT_PASS',59)
+          PY
+
+      - name: Real Redis 85.0C acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out
+          python -m pytest tests/integration/test_historical_cross_aggregate_reconciliation_integration.py -q --tb=short -p no:cacheprovider | tee local_out/s85_0c_r1_1_redis.txt
+          python - <<'PY'
+          import re
+          text=open('local_out/s85_0c_r1_1_redis.txt',encoding='utf-8').read()
+          assert re.search(r'(^|\D)30 passed',text),text
+          assert not re.search(r'\b[1-9]\d* (skipped|deselected|xfailed|xpassed)\b',text,re.I),text
+          print('SPRINT85_0C_R1_1_REDIS_PASS',30)
+          PY
+
+      - name: Sprint 85.0A TASK_REQUEUE reconciliation regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest tests/integration/test_task_requeue_reconciliation_integration.py -q --tb=short -p no:cacheprovider | tee local_out/s85_0c_85_0a.txt
+          python - <<'PY'
+          import re
+          text=open('local_out/s85_0c_85_0a.txt',encoding='utf-8').read()
+          assert re.search(r'(^|\D)13 passed',text),text
+          assert not re.search(r'\b[1-9]\d* (skipped|deselected|xfailed|xpassed)\b',text,re.I),text
+          PY
+
+      - name: Sprint 85.0B current-head reconciliation regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest tests/integration/test_current_head_reconciliation_integration.py -q --tb=short -p no:cacheprovider | tee local_out/s85_0c_85_0b.txt
+          python - <<'PY'
+          import re
+          text=open('local_out/s85_0c_85_0b.txt',encoding='utf-8').read()
+          assert re.search(r'(^|\D)64 passed',text),text
+          assert not re.search(r'\b[1-9]\d* (skipped|deselected|xfailed|xpassed)\b',text,re.I),text
+          PY
+
+      - name: Historical accepted green regression matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_count(){
+            name="$1"; expected="$2"; shift 2
+            out="local_out/s85_0c_${name}.txt"; mkdir -p local_out
+            python -m pytest "$@" -q --tb=short -p no:cacheprovider | tee "$out"
+            python - "$out" "$expected" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding='utf-8').read(); expected=int(sys.argv[2])
+          assert re.search(rf'(^|\D){expected} passed',text),text
+          assert not re.search(r'\b[1-9]\d* (skipped|deselected|xfailed|xpassed)\b',text,re.I),text
+          PY
+          }
+          run_count s84_9_unit 13 tests/unit/test_task_requeue_authority_contract.py
+          run_count s84_9_authority 8 tests/integration/test_task_requeue_authority_integration.py
+          run_count s84_9_recovery 11 tests/integration/test_task_recovery_canonical_requeue_integration.py
+          run_count s84_9_production 16 tests/integration/test_task_recovery_production_composition_integration.py
+          run_count s84_8_focused 66 tests/unit/test_admission_resource_reservation.py tests/unit/test_run_terminate_resource_settlement_contract.py tests/core/test_production_worker_resource_settlement_composition_contract.py
+          run_count s84_8_redis 20 tests/integration/test_run_terminate_resource_settlement_integration.py tests/integration/test_worker_resource_settlement_canonical_composition_integration.py
+          run_count s84_7e_focused 8 tests/core/test_production_worker_crash_retry_contract.py
+          run_count s84_7e_redis 7 tests/integration/test_worker_crash_retry_canonical_composition_integration.py
+          run_count s84_7d_focused 7 tests/core/test_production_worker_run_terminate_canonical_composition_contract.py
+          run_count s84_7d_redis 6 tests/integration/test_worker_run_terminate_canonical_composition_integration.py
+          run_count run_authority 23 tests/unit/test_run_terminate_authority_binding.py tests/integration/test_run_terminate_authority_binding_integration.py
+          run_count c2_focused 22 tests/core/test_production_worker_terminal_composition_contract.py tests/core/test_production_worker_process_root_terminal_contract.py
+          run_count c2_redis 3 tests/integration/test_worker_task_terminal_canonical_composition_integration.py
+          run_count c1_unit 7 tests/unit/test_task_terminal_authority_contract.py
+          run_count c1_redis 23 tests/integration/test_task_terminal_authority_integration.py
+          run_count legacy_terminal 18 tests/core/test_task_complete_lua_contract.py tests/core/test_task_consumer_fenced_completion_contract.py tests/integration/test_task_complete_owner_integration.py tests/integration/test_task_complete_unlock_integration.py tests/integration/test_task_output_persistence_integration.py tests/integration/test_failure_sweeper_integration.py
+          run_count s84_7b 76 tests/core/test_production_worker_composition_contract.py tests/core/test_production_worker_process_root_contract.py tests/core/test_task_claim_service_legacy_quarantine_contract.py tests/core/test_task_requested_routing_contract.py tests/unit/test_task_claim_authority_binding.py tests/unit/test_task_claim_authority_contract.py
+          run_count task_claim 83 tests/unit/test_task_claim_authority_binding.py tests/unit/test_task_claim_authority_contract.py tests/core/test_task_claim_legacy_direct_gate_contract.py tests/core/test_task_claim_reservation_owner_lookup_contract.py tests/core/test_task_claim_service_legacy_quarantine_contract.py tests/core/test_task_claim_start_contract.py tests/core/test_task_claim_status_taxonomy_contract.py tests/integration/test_task_claim_authority_binding_integration.py tests/integration/test_task_claim_authority_projection_integration.py tests/integration/test_task_claim_legacy_direct_gate_integration.py tests/integration/test_task_claim_reservation_integration.py tests/integration/test_task_claim_start_integration.py tests/integration/test_worker_task_claim_canonical_composition_integration.py
+          run_count run_finalization 41 tests/core/test_production_run_finalization_binding.py tests/integration/test_production_run_finalization_binding_integration.py tests/integration/test_terminal_task_run_finalization.py tests/integration/test_runtime_alpha_product_acceptance_83_2.py
+          run_count production_worker 43 tests/core/test_production_worker_composition_contract.py tests/core/test_production_worker_process_root_contract.py tests/core/test_worker_service_lifecycle_contract.py tests/core/test_worker_startup_failure_projection_red.py tests/core/test_worker_ack_authority_contract.py
+          run_count sprint83_7 174 tests/unit/test_product_alpha_profile.py tests/unit/test_product_alpha_worker_capabilities.py tests/unit/test_product_alpha_readiness.py tests/unit/test_product_alpha_run_shape.py tests/unit/test_product_alpha_failure_contract.py tests/core/test_production_run_finalization_binding.py tests/core/test_production_scheduler_composition_contract.py tests/unit/test_run_submission_coordinator.py tests/unit/test_run_status_result_read_model.py tests/unit/test_user_facing_run_result.py tests/integration/test_run_status_result_read_model_integration.py tests/integration/test_product_alpha_closure_e2e_83_7.py
+          run_count sprint83_8 199 tests/unit/test_product_alpha_profile.py tests/unit/test_product_alpha_worker_capabilities.py tests/unit/test_product_alpha_readiness.py tests/unit/test_product_alpha_run_shape.py tests/unit/test_product_alpha_failure_contract.py tests/unit/test_submission_idempotency.py tests/core/test_production_run_finalization_binding.py tests/core/test_production_scheduler_composition_contract.py tests/unit/test_run_submission_coordinator.py tests/unit/test_run_status_result_read_model.py tests/unit/test_user_facing_run_result.py tests/integration/test_run_status_result_read_model_integration.py tests/integration/test_product_alpha_closure_e2e_83_7.py tests/integration/test_product_alpha_idempotent_submission_e2e_83_8.py
+
+      - name: Authority audit banned zero
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local_out
+          python scripts/authority_audit.py --repo-root . --format dashboard --output local_out/sprint85_0c_authority.json --fail-on banned
+          python - <<'PY'
+          import json
+          d=json.load(open('local_out/sprint85_0c_authority.json',encoding='utf-8'))
+          c=d.get('counts') or d.get('summary') or {}
+          banned=int(c.get('banned',d.get('banned',0)) or 0)
+          assert banned == 0,d
+          print('AUTHORITY_BANNED_ZERO_PASS',banned)
+          PY
+
+      - name: Zero mutation source guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          path = Path('hfa-core/src/hfa/authority/redis_persistence.py')
+          tree = ast.parse(path.read_text(encoding='utf-8'))
+          store = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'RedisCanonicalAuthorityStore')
+          method = next(n for n in store.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'load_aggregate_history')
+          forbidden = {'set','hset','hdel','delete','expire','xadd','eval','evalsha','commit','record_authority_conflict'}
+          calls = {
+              n.func.attr for n in ast.walk(method)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+          }
+          assert not (calls & forbidden), sorted(calls & forbidden)
+          integration=Path('tests/integration/test_historical_cross_aggregate_reconciliation_integration.py').read_text(encoding='utf-8')
+          assert 'test_85_0c_r1_1_all_cross_aggregate_observers_zero_logical_mutation' in integration
+          print('SPRINT85_0C_HISTORY_ZERO_MUTATION_STATIC_PASS')
+          PY
+
+      - name: Final tracked checkout hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check "$ACCEPTED_PARENT...HEAD"
+          test -z "$(git diff --name-only)"
+          test -z "$(git diff --cached --name-only)"
+          python - <<'PY'
+          import os,subprocess
+          allowed={
+              'hfa-core/src/hfa/authority/redis_persistence.py',
+              'hfa-control/src/hfa_control/reconciliation.py',
+              'tests/unit/test_reconciliation_contract.py',
+              '.github/workflows/sprint85-0a-read-only-reconciliation.yml',
+              '.github/workflows/sprint85-0b-current-head-reconciliation.yml',
+              'tests/integration/test_historical_cross_aggregate_reconciliation_integration.py',
+              '.github/workflows/sprint85-0c-historical-cross-aggregate-reconciliation.yml',
+              'docs/implementation/sprint85/SPRINT85.0C-historical-cross-aggregate-reconciliation.md',
+          }
+          changed=set(subprocess.check_output(['git','diff','--name-only',os.environ['ACCEPTED_PARENT']+'...HEAD'],text=True).splitlines())
+          assert changed==allowed, {'missing':sorted(allowed-changed),'unexpected':sorted(changed-allowed)}
+          print('SPRINT85_0C_FINAL_TRACKED_HYGIENE_PASS')
+          PY
