@@ -12,6 +12,7 @@ import redis.asyncio as redis_async
 from hfa_control.product_profile import (
     ProductMode,
     parse_product_mode,
+    require_alpha_deterministic_executor_mode,
 )
 from hfa_worker.main import WorkerService
 
@@ -75,6 +76,10 @@ def config_from_env(
             "WORKER_EXECUTOR_MODE is required for the production worker "
             "process root"
         )
+
+    require_alpha_deterministic_executor_mode(
+        product_mode=product_mode, executor_mode=executor_mode,
+    )
 
     return {
         "redis_url": source.get("REDIS_URL", "redis://localhost:6379/0"),

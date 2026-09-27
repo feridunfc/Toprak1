@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from hfa_control.product_profile import ALPHA_CANONICAL_COMPOSITION_CAPABILITY
 from hfa_worker.executor import BaseExecutor
 from hfa_worker.fake_executor import FakeExecutor
 from hfa_worker.main import WorkerService
@@ -63,8 +64,13 @@ def alpha_config(executor=None, **overrides):
         "region": "eu-west-1",
         "shards": [0],
         "capacity": 1,
-        "executor": executor or DeterministicExecutor(),
+        "executor": executor or FakeExecutor(),
         "run_termination_binding_enabled": True,
+        "canonical_task_admit_binding": True,
+        "canonical_task_dispatch_binding": True,
+        "canonical_task_claim_binding": True,
+        "canonical_task_terminal_binding": True,
+        "canonical_resource_settlement_binding": True,
         "capabilities": ["python", "base"],
     }
     values.update(overrides)
@@ -111,6 +117,7 @@ def test_alpha_capabilities_derive_from_actual_composition():
     assert service.runtime_capabilities == (
         "base",
         "executor:deterministic",
+        ALPHA_CANONICAL_COMPOSITION_CAPABILITY,
         "product:single-task-v1",
         "python",
         "run-finalization:v1",
@@ -132,6 +139,7 @@ def test_declared_reserved_capabilities_cannot_spoof_runtime():
             capabilities=[
                 "base",
                 "product:single-task-v1",
+                ALPHA_CANONICAL_COMPOSITION_CAPABILITY,
                 "run-finalization:v1",
                 "executor:deterministic",
             ],
@@ -145,15 +153,16 @@ def test_declared_reserved_capabilities_cannot_spoof_runtime():
     assert "product:single-task-v1" not in (
         service.runtime_capabilities
     )
+    assert ALPHA_CANONICAL_COMPOSITION_CAPABILITY not in service.runtime_capabilities
     assert "run-finalization:v1" not in (
         service.runtime_capabilities
     )
 
 
-def test_unmarked_executor_uses_configured_fallback():
+def test_internal_unmarked_executor_uses_configured_fallback():
     service = WorkerService(
         RedisProbe(),
-        alpha_config(executor=UnmarkedExecutor()),
+        internal_config(executor=UnmarkedExecutor()),
     )
 
     assert "executor:configured" in service.runtime_capabilities
@@ -162,10 +171,10 @@ def test_unmarked_executor_uses_configured_fallback():
     )
 
 
-def test_invalid_executor_marker_fails_closed_to_configured():
+def test_internal_invalid_executor_marker_falls_back_to_configured():
     service = WorkerService(
         RedisProbe(),
-        alpha_config(executor=InvalidMarkedExecutor()),
+        internal_config(executor=InvalidMarkedExecutor()),
     )
 
     assert "executor:configured" in service.runtime_capabilities
@@ -181,6 +190,7 @@ def test_internal_worker_does_not_claim_alpha_product():
     assert "product:single-task-v1" not in (
         service.runtime_capabilities
     )
+    assert ALPHA_CANONICAL_COMPOSITION_CAPABILITY not in service.runtime_capabilities
     assert "run-finalization:v1" not in (
         service.runtime_capabilities
     )

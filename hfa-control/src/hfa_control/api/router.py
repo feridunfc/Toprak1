@@ -62,6 +62,7 @@ from hfa_control.exceptions import (
     LeadershipError,
 )
 from hfa_control.run_submission import SingleTaskRunSubmission
+from hfa_control.product_profile import ProductMode, parse_product_mode
 from hfa_tools.middleware.tenant import (
     TenantFormatError as RunIdFormatError,
     validate_run_id_format,
@@ -125,6 +126,24 @@ from hfa_control.auth import require_operator, require_tenant  # noqa: E402
 def _require_operator(x_cp_auth: str = "") -> None:
     """Delegate to auth module — constant-time HMAC validation."""
     require_operator(x_cp_auth)
+
+
+def _reject_alpha_operator_mutation(request: Request, operation: str) -> None:
+    """Reject a forbidden command before owner calls, Redis reads or audit."""
+    control = getattr(request.app.state, "cp", None)
+    profile = getattr(control, "product_profile", None)
+    mode = getattr(profile, "product_mode", None)
+    if mode is None:
+        raise HTTPException(status_code=503, detail="product_profile_unavailable")
+    try:
+        mode = parse_product_mode(mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="product_profile_unavailable") from exc
+    if mode is ProductMode.SINGLE_TASK_ALPHA:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "product_profile_mutation_forbidden", "operation": operation},
+        )
 
 
 def _tenant_header(x_tenant_id: str) -> str:
@@ -582,6 +601,7 @@ async def force_reschedule(
 ) -> dict:
     _tenant_header(x_tenant_id)
     _require_operator(x_cp_auth)
+    _reject_alpha_operator_mutation(request, "force_reschedule")
     try:
         await request.app.state.cp._leader.assert_leader()
     except LeadershipError as exc:
@@ -700,6 +720,7 @@ async def replay_dlq(
 ) -> dict:
     _tenant_header(x_tenant_id)
     _require_operator(x_cp_auth)
+    _reject_alpha_operator_mutation(request, "dlq_replay")
     try:
         await request.app.state.cp.recovery.replay_dlq_run(run_id, x_tenant_id)
         audit = getattr(request.app.state.cp, "_audit", None)
@@ -723,6 +744,7 @@ async def delete_dlq(
 ) -> dict:
     _tenant_header(x_tenant_id)
     _require_operator(x_cp_auth)
+    _reject_alpha_operator_mutation(request, "dlq_delete")
     redis = request.app.state.redis
     meta = await redis.hgetall(RedisKey.cp_dlq_meta(run_id))
     if not meta:
@@ -995,6 +1017,7 @@ async def task_terminal_duplicate_cleanup(
     state, write persistent audit records, or assert production readiness.
     """
     _require_operator(x_cp_auth)
+    _reject_alpha_operator_mutation(request, "terminal_duplicate_cleanup")
     result = await execute_terminal_duplicate_cleanup_command(
         request.app.state.redis,
         task_id=task_id,

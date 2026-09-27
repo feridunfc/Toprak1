@@ -8,6 +8,7 @@ from typing import Any
 
 from hfa.state import transition_state
 from hfa_control.scheduler_loop import SchedulerLoop
+from hfa_control.product_profile import require_alpha_canonical_bindings
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,12 @@ def build_production_scheduler(
             "HFA_CANONICAL_TASK_DISPATCH_BINDING requires "
             "HFA_CANONICAL_TASK_ADMIT_BINDING"
         )
+    require_alpha_canonical_bindings(
+        product_mode=getattr(config, "product_mode", None),
+        component="scheduler",
+        canonical_task_admit_binding=canonical_task_admit_binding,
+        canonical_task_dispatch_binding=canonical_task_dispatch_binding,
+    )
     dag_lua = DagLua(
         redis,
         canonical_task_admit_binding=(
@@ -289,6 +296,7 @@ def build_production_scheduler(
         shards=shards,
         reservation_manager=reservation_manager,
         dag_lua=dag_lua,
+        product_mode=getattr(config, "product_mode", None),
     )
     snapshot_builder = SchedulerSnapshotBuilder(
         redis,

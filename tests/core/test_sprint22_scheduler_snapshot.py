@@ -87,7 +87,7 @@ async def test_canonical_worker_snapshot_comprehensive():
         registry=mock_registry,
         tenant_queue=AsyncMock(),
         tenant_fairness=MagicMock(),
-        config=MagicMock(scheduler_loop_max_dispatches=32),
+        config=MagicMock(scheduler_loop_max_dispatches=32, product_mode="RUNTIME_INTERNAL"),
     )
 
     snapshot = await builder.build_capacity_snapshot()
@@ -157,7 +157,7 @@ async def test_duplicate_worker_id_is_resolved_deterministically(caplog):
         registry=mock_registry,
         tenant_queue=AsyncMock(),
         tenant_fairness=MagicMock(),
-        config=MagicMock(scheduler_loop_max_dispatches=32),
+        config=MagicMock(scheduler_loop_max_dispatches=32, product_mode="RUNTIME_INTERNAL"),
     )
 
     snapshot = await builder.build_capacity_snapshot()
@@ -192,7 +192,7 @@ async def test_unhealthy_worker_is_visible_and_blocked():
         registry=mock_registry,
         tenant_queue=AsyncMock(),
         tenant_fairness=MagicMock(),
-        config=MagicMock(scheduler_loop_max_dispatches=32),
+        config=MagicMock(scheduler_loop_max_dispatches=32, product_mode="RUNTIME_INTERNAL"),
     )
 
     snapshot = await builder.build_capacity_snapshot()
@@ -237,7 +237,7 @@ async def test_empty_worker_ids_are_skipped_safely():
         registry=mock_registry,
         tenant_queue=AsyncMock(),
         tenant_fairness=MagicMock(),
-        config=MagicMock(scheduler_loop_max_dispatches=32),
+        config=MagicMock(scheduler_loop_max_dispatches=32, product_mode="RUNTIME_INTERNAL"),
     )
 
     snapshot = await builder.build_capacity_snapshot()
@@ -270,7 +270,7 @@ async def test_candidate_tenants_are_sorted_and_sanitized():
         registry=AsyncMock(),
         tenant_queue=tenant_queue,
         tenant_fairness=tenant_fairness,
-        config=MagicMock(),
+        config=MagicMock(product_mode="RUNTIME_INTERNAL"),
     )
 
     result = await builder.list_candidate_tenants()

@@ -105,7 +105,9 @@ async def test_terminal_duplicate_cleanup_endpoint_is_thin_body_based_adapter(mo
         fake_execute,
     )
 
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(redis="redis")))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(redis="redis", cp=SimpleNamespace(
+        product_profile=SimpleNamespace(product_mode="RUNTIME_INTERNAL"),
+    ))))
     body = TerminalDuplicateCleanupRequest(
         shard=7,
         group="worker_consumers",

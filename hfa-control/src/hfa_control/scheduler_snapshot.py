@@ -13,6 +13,11 @@ from typing import Optional, Tuple
 
 from hfa.config.keys import RedisKey
 from hfa_control.models import WorkerStatus
+from hfa_control.product_profile import (
+    ProductMode,
+    alpha_worker_is_compatible,
+    parse_product_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +129,7 @@ class SchedulerSnapshotBuilder:
         self._tenant_queue = tenant_queue
         self._tenant_fairness = tenant_fairness
         self._config = config
+        self._product_mode = parse_product_mode(getattr(config, "product_mode", None))
 
     async def list_candidate_tenants(self) -> list[TenantSchedulingSnapshot]:
         result: list[TenantSchedulingSnapshot] = []
@@ -237,6 +243,11 @@ class SchedulerSnapshotBuilder:
                 blocked_reason = "draining"
             elif not is_healthy:
                 blocked_reason = "unhealthy"
+            elif (
+                self._product_mode is ProductMode.SINGLE_TASK_ALPHA
+                and not alpha_worker_is_compatible(getattr(worker, "capabilities", None))
+            ):
+                blocked_reason = "product_profile_incompatible"
             elif capacity == 0:
                 blocked_reason = "capacity_zero"
             elif available <= 0:

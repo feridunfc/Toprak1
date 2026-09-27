@@ -21,6 +21,7 @@ from hfa_control.service import (
 )
 from hfa_control.task_admit_authority import FEATURE_FLAG
 from hfa_worker.main import WorkerService
+from hfa_worker.fake_executor import FakeExecutor
 from hfa_worker.process_root import config_from_env
 from hfa_worker.run_finalizing_runtime import (
     RunFinalizingTaskConsumer,
@@ -70,6 +71,9 @@ def valid_control_profile(**overrides):
         "strict_cas_mode": True,
         "canonical_task_admit_binding": True,
         "single_task_submission_surface": True,
+        "canonical_run_create_binding": True,
+        "canonical_task_dispatch_binding": True,
+        "canonical_task_requeue_binding": True,
     }
     values.update(overrides)
     return validate_control_product_profile(**values)
@@ -83,6 +87,11 @@ def valid_worker_profile(**overrides):
         "worker_group": "group-alpha",
         "executor_configured": True,
         "run_termination_binding_enabled": True,
+        "canonical_task_admit_binding": True,
+        "canonical_task_dispatch_binding": True,
+        "canonical_task_claim_binding": True,
+        "canonical_task_terminal_binding": True,
+        "canonical_resource_settlement_binding": True,
     }
     values.update(overrides)
     return validate_worker_product_profile(**values)
@@ -97,8 +106,13 @@ def alpha_worker_config(**overrides):
         "region": "eu-west-1",
         "shards": [0],
         "capacity": 1,
-        "executor": ExecutorProbe(),
+        "executor": FakeExecutor(),
         "run_termination_binding_enabled": True,
+        "canonical_task_admit_binding": True,
+        "canonical_task_dispatch_binding": True,
+        "canonical_task_claim_binding": True,
+        "canonical_task_terminal_binding": True,
+        "canonical_resource_settlement_binding": True,
     }
     values.update(overrides)
     return values
@@ -250,6 +264,11 @@ def test_control_service_alpha_preflight_accepts_valid_profile(
     monkeypatch,
 ):
     monkeypatch.setenv(FEATURE_FLAG, "1")
+    monkeypatch.setenv("HFA_CANONICAL_RUN_CREATE_BINDING", "1")
+    monkeypatch.setenv("HFA_CANONICAL_TASK_DISPATCH_BINDING", "1")
+    monkeypatch.setenv("HFA_CANONICAL_TASK_CLAIM_BINDING", "1")
+    monkeypatch.setenv("HFA_CANONICAL_TASK_TERMINAL_BINDING", "1")
+    monkeypatch.setenv("HFA_CANONICAL_TASK_REQUEUE_BINDING", "1")
     config = ControlPlaneConfig(
         instance_id="cp-alpha",
         strict_cas_mode=True,

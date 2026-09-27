@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from hfa_control.api.router import router
 from hfa_control.product_profile import (
     TenantIdentityBoundary,
+    ALPHA_CANONICAL_COMPOSITION_CAPABILITY,
     validate_control_product_profile,
 )
 from hfa_control.service import ControlPlaneService
@@ -83,6 +84,9 @@ def alpha_profile():
         ),
         strict_cas_mode=True,
         canonical_task_admit_binding=True,
+        canonical_run_create_binding=True,
+        canonical_task_dispatch_binding=True,
+        canonical_task_requeue_binding=True,
         single_task_submission_surface=True,
     )
 
@@ -104,6 +108,7 @@ def compatible_worker(
     return WorkerProbe(
         capabilities=[
             "base",
+            ALPHA_CANONICAL_COMPOSITION_CAPABILITY,
             executor,
             "product:single-task-v1",
             "run-finalization:v1",

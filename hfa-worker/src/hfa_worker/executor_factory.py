@@ -39,6 +39,7 @@ from typing import Any
 
 from hfa_worker.executor import BaseExecutor
 from hfa_worker.fake_executor import FakeExecutor
+from hfa_control.product_profile import require_alpha_deterministic_executor_mode
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,10 @@ def build_executor(config: Any = None) -> BaseExecutor:
     mode = str(
         _cfg(config, "executor_mode", os.getenv("EXECUTOR_MODE", "fake"))
     ).lower()
+    require_alpha_deterministic_executor_mode(
+        product_mode=_cfg(config, "product_mode", os.getenv("HFA_PRODUCT_MODE")),
+        executor_mode=mode,
+    )
 
     logger.info("Building executor: mode=%s", mode)
 

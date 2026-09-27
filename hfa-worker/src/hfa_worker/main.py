@@ -16,9 +16,13 @@ from hfa_control.task_terminal_authority import TaskTerminalAuthorityBinding
 from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding
 from hfa_control.run_termination import RunTerminationCoordinator
 from hfa_control.product_profile import (
+    ALPHA_CANONICAL_COMPOSITION_CAPABILITY,
+    PRODUCT_EXECUTOR_CAPABILITIES,
     ProductMode,
     WorkerProductProfile,
     parse_product_mode,
+    require_alpha_canonical_bindings,
+    require_alpha_deterministic_executor_mode,
     validate_worker_product_profile,
 )
 from hfa_control.shard import OWNER_TTL, ShardOwnershipManager
@@ -26,6 +30,7 @@ from hfa_worker.consumer import WorkerConsumer
 from hfa_worker.drain import DrainManager
 from hfa_worker.executor import BaseExecutor
 from hfa_worker.executor_factory import build_executor
+from hfa_worker.fake_executor import FakeExecutor
 from hfa_worker.heartbeat import WorkerHeartbeatPublisher
 from hfa_worker.run_finalizing_runtime import (
     RunFinalizingTaskConsumer,
@@ -41,12 +46,6 @@ _RESERVED_PRODUCT_CAPABILITY_PREFIXES = (
     "run-finalization:",
     "executor:",
 )
-_ALLOWED_EXECUTOR_CAPABILITIES = frozenset({
-    "executor:configured",
-    "executor:deterministic",
-    "executor:external",
-    "executor:cognitive",
-})
 
 
 def _sanitize_declared_capabilities(
@@ -77,7 +76,7 @@ def _executor_product_capability(
         )
         or ""
     ).strip()
-    if capability not in _ALLOWED_EXECUTOR_CAPABILITIES:
+    if capability not in PRODUCT_EXECUTOR_CAPABILITIES:
         return "executor:configured"
     return capability
 
@@ -351,6 +350,12 @@ class WorkerService:
         self._shard_renewer_task: asyncio.Task | None = None
 
         executor: BaseExecutor | None = config.get("executor")
+        if self._product_mode is ProductMode.SINGLE_TASK_ALPHA:
+            if executor is None or config.get("executor_mode") is not None:
+                require_alpha_deterministic_executor_mode(
+                    product_mode=self._product_mode,
+                    executor_mode=config.get("executor_mode"),
+                )
         if executor is None:
             executor_mode = str(
                 config.get("executor_mode") or ""
@@ -383,7 +388,26 @@ class WorkerService:
             run_termination_binding_enabled=(
                 self._run_termination_binding_enabled
             ),
+            canonical_task_admit_binding=self._canonical_task_admit_binding_enabled,
+            canonical_task_dispatch_binding=self._canonical_task_dispatch_binding_enabled,
+            canonical_task_claim_binding=self._canonical_task_claim_binding_enabled,
+            canonical_task_terminal_binding=self._canonical_task_terminal_binding_enabled,
+            canonical_resource_settlement_binding=self._canonical_resource_settlement_binding_enabled,
         )
+
+        if self._product_profile.single_task_alpha:
+            # A self-declared capability is not proof of an injected executor's
+            # behavior. Alpha owns the existing fake executor and its adapter.
+            if (
+                type(executor) is not FakeExecutor
+                or "execute" in vars(executor)
+                or _executor_product_capability(executor) != "executor:deterministic"
+                or config.get("task_executor") is not None
+            ):
+                raise ValueError(
+                    "SINGLE_TASK_ALPHA requires the built-in FakeExecutor "
+                    "and forbids executor/task_executor overrides"
+                )
 
         self._dag_lua: DagLua | None = None
         self._task_claim_manager: TaskClaimManager | None = None
@@ -495,10 +519,38 @@ class WorkerService:
                 completion_manager=completion_manager,
             )
 
-        self._derive_runtime_capabilities(
-            executor=executor,
-            worker_consumer_type=worker_consumer_type,
-        )
+        if self._product_profile.single_task_alpha:
+            coordinator = self._run_termination_coordinator
+            terminal_gateway = self._task_terminal_completion_gateway
+            require_alpha_canonical_bindings(
+                product_mode=self._product_mode,
+                component="worker composition",
+                task_terminal_authority=(
+                    self._task_terminal_authority_binding is not None
+                    and getattr(terminal_gateway, "_binding", None)
+                    is self._task_terminal_authority_binding
+                ),
+                run_terminate_authority=(
+                    self._run_terminate_authority_binding is not None
+                    and getattr(coordinator, "_authority_binding", None)
+                    is self._run_terminate_authority_binding
+                ),
+                resource_settlement=(
+                    self._resource_settlement_manager is not None
+                    and getattr(self._run_terminate_authority_binding, "resource_manager", None)
+                    is self._resource_settlement_manager
+                ),
+                task_completion_routing=(
+                    coordinator is not None
+                    and getattr(self._task_consumer, "_completion_manager", None) is coordinator
+                    and getattr(coordinator, "_task_completion_gateway", None) is terminal_gateway
+                ),
+                task_claim_authority=(
+                    getattr(self._task_claim_manager, "_canonical_task_claim_binding_enabled", False)
+                    is True
+                    and getattr(self._task_consumer, "_claim_manager", None) is self._task_claim_manager
+                ),
+            )
 
         self._consumer = worker_consumer_type(
             redis=redis,
@@ -520,6 +572,26 @@ class WorkerService:
                 if worker_consumer_type is RunFinalizingWorkerConsumer
                 else {}
             ),
+        )
+
+        if self._product_profile.single_task_alpha:
+            require_alpha_canonical_bindings(
+                product_mode=self._product_mode,
+                component="worker consumer",
+                task_consumer_routing=(
+                    getattr(self._consumer, "_task_consumer", None) is self._task_consumer
+                    and getattr(self._consumer, "_canonical_task_claim_binding_enabled", False) is True
+                ),
+                terminal_redelivery_authority=(
+                    getattr(self._consumer, "_task_terminal_authority_binding", None)
+                    is self._task_terminal_authority_binding
+                ),
+            )
+
+        # Advertise only after every alpha composition/consumer check succeeds.
+        self._derive_runtime_capabilities(
+            executor=executor,
+            worker_consumer_type=worker_consumer_type,
         )
 
         self._heartbeat = WorkerHeartbeatPublisher(
@@ -583,6 +655,7 @@ class WorkerService:
             and finalization_bound
         ):
             capabilities.add("product:single-task-v1")
+            capabilities.add(ALPHA_CANONICAL_COMPOSITION_CAPABILITY)
 
         self._capabilities[:] = sorted(capabilities)
 

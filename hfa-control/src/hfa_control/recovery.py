@@ -37,7 +37,7 @@ from hfa.lua.loader import LuaScriptLoader
 from hfa.runtime.tenant_utils import decrement_tenant_inflight_if_needed
 from hfa_control.exceptions import DLQEntryNotFoundError, TenantMismatchError
 from hfa_control.models import ControlPlaneConfig
-from hfa_control.product_profile import parse_strict_bool
+from hfa_control.product_profile import parse_strict_bool, require_alpha_canonical_bindings
 from hfa_control.run_create_authority import (
     FEATURE_FLAG as RUN_CREATE_FEATURE_FLAG,
     resource_reservation_from_run_create_record,
@@ -154,6 +154,11 @@ class RecoveryService:
             parse_task_requeue_binding_flag(
                 os.getenv(TASK_REQUEUE_FEATURE_FLAG)
             )
+        )
+        require_alpha_canonical_bindings(
+            product_mode=getattr(config, "product_mode", None),
+            component="recovery",
+            canonical_task_requeue_binding=self._canonical_task_requeue_binding,
         )
         self._task_recovery: TaskRecoveryManager | None = None
         self._resource_manager: AdmissionResourceReservationManager | None = None

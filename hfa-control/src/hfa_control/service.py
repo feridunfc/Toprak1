@@ -19,12 +19,23 @@ from hfa_control.product_profile import (
     ControlProductProfile,
     ProductMode,
     TenantIdentityBoundary,
+    alpha_worker_is_compatible,
+    product_worker_capabilities,
     parse_strict_bool,
+    require_alpha_canonical_bindings,
     validate_control_product_profile,
 )
 from hfa_control.task_admit_authority import (
     FEATURE_FLAG as TASK_ADMIT_FEATURE_FLAG,
     parse_task_admit_binding_flag,
+)
+from hfa_control.task_dispatch_authority import (
+    FEATURE_FLAG as TASK_DISPATCH_FEATURE_FLAG,
+    parse_task_dispatch_binding_flag,
+)
+from hfa_control.task_requeue_authority import (
+    FEATURE_FLAG as TASK_REQUEUE_FEATURE_FLAG,
+    parse_task_requeue_binding_flag,
 )
 from hfa_control.run_create_authority import (
     FEATURE_FLAG as RUN_CREATE_FEATURE_FLAG,
@@ -121,6 +132,13 @@ class ControlPlaneService:
                     canonical_task_admit_binding
                 ),
                 single_task_submission_surface=True,
+                canonical_run_create_binding=canonical_run_create_binding,
+                canonical_task_dispatch_binding=parse_task_dispatch_binding_flag(
+                    os.getenv(TASK_DISPATCH_FEATURE_FLAG)
+                ),
+                canonical_task_requeue_binding=parse_task_requeue_binding_flag(
+                    os.getenv(TASK_REQUEUE_FEATURE_FLAG)
+                ),
             )
         )
         self._leader = LeaderElection(redis, self._config.instance_id, self._config)
@@ -189,6 +207,32 @@ class ControlPlaneService:
             ),
         )
         self._recovery = RecoveryService(redis, self._config)
+        if self._product_profile.single_task_alpha:
+            require_alpha_canonical_bindings(
+                product_mode=self._product_profile.product_mode,
+                component="control composition",
+                run_create_authority=(
+                    self._admitter._canonical_run_create_binding_enabled is True
+                    and self._admitter._run_create_authority is not None
+                ),
+                task_admit_authority=(
+                    getattr(scheduler_dag_lua, "_canonical_task_admit_binding_enabled", False) is True
+                ),
+                task_dispatch_authority=(
+                    getattr(scheduler_dag_lua, "_canonical_task_dispatch_binding_enabled", False) is True
+                ),
+                task_recovery_authority=(
+                    getattr(self._recovery._task_recovery, "_canonical_task_requeue_binding", False) is True
+                    and getattr(self._recovery._task_recovery, "_requeue_authority", None) is not None
+                    and getattr(self._recovery._task_recovery, "_terminal_authority", None) is not None
+                ),
+                run_recovery_authority=(self._recovery._run_terminate_authority is not None),
+                recovery_resource_settlement=(
+                    self._recovery._resource_manager is not None
+                    and getattr(self._recovery._run_terminate_authority, "resource_manager", None)
+                    is self._recovery._resource_manager
+                ),
+            )
         self._redis_monitor = RedisHealthMonitor(redis)
         self._leader_task: Optional[asyncio.Task] = None
         self._sched_started = False
@@ -374,17 +418,8 @@ class ControlPlaneService:
         run_finalization_available = False
         executor_available = False
         for worker in schedulable_workers:
-            capabilities = {
-                str(value).strip()
-                for value in (
-                    getattr(worker, "capabilities", [])
-                    or []
-                )
-                if str(value).strip()
-            }
-            has_product = (
-                "product:single-task-v1"
-                in capabilities
+            capabilities = product_worker_capabilities(
+                getattr(worker, "capabilities", None)
             )
             has_finalization = (
                 "run-finalization:v1"
@@ -401,11 +436,7 @@ class ControlPlaneService:
             executor_available = (
                 executor_available or has_executor
             )
-            if (
-                has_product
-                and has_finalization
-                and has_executor
-            ):
+            if alpha_worker_is_compatible(capabilities):
                 compatible_worker_count += 1
 
         ready = bool(

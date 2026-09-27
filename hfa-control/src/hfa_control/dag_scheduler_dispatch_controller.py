@@ -11,6 +11,11 @@ from hfa_control.scheduler_capability_selector import (
     WorkerCandidate,
 )
 from hfa_control.scheduler_scoring import SchedulerScoring, ScoringCandidate
+from hfa_control.product_profile import (
+    ProductMode,
+    alpha_worker_is_compatible,
+    parse_product_mode,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,7 @@ class DagSchedulerDispatchController:
         shards,
         reservation_manager=None,
         dag_lua=None,
+        product_mode=None,
     ) -> None:
         self._ready_queue = ready_queue
         self._tenant_fairness = tenant_fairness
@@ -49,6 +55,7 @@ class DagSchedulerDispatchController:
         self._shards = shards
         self._reservation_manager = reservation_manager
         self._dag_lua = dag_lua
+        self._product_mode = parse_product_mode(product_mode)
         self._dependencies_initialised = False
         self._last_result = DagDispatchOnceResult(False, "no_task_available")
 
@@ -189,7 +196,20 @@ class DagSchedulerDispatchController:
                 reason="payload_scheduler_epoch_mismatch",
             )
 
-        workers = self._worker_candidates(getattr(snapshot, "workers", ()) or ())
+        snapshot_workers = tuple(getattr(snapshot, "workers", ()) or ())
+        if self._product_mode is ProductMode.SINGLE_TASK_ALPHA and snapshot_workers:
+            snapshot_workers = tuple(
+                worker for worker in snapshot_workers
+                if alpha_worker_is_compatible(getattr(worker, "capabilities", None))
+            )
+            if not snapshot_workers:
+                return self._record(
+                    "no_worker_available",
+                    task_id=authoritative_task_id,
+                    run_id=authoritative_run_id,
+                    reason="product_profile_incompatible",
+                )
+        workers = self._worker_candidates(snapshot_workers)
         if not workers:
             return self._record(
                 "no_worker_available",
