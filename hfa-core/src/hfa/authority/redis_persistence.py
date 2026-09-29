@@ -576,15 +576,23 @@ class RedisCanonicalAuthorityStore:
             raw_receipt=raw_receipt,
         )
 
-    async def commit(self, plan: _core.AuthorityCommitPlan) -> RedisAuthorityCommitResult:
+    async def commit(
+        self, plan: _core.AuthorityCommitPlan, *, require_task_admit_root_binding: bool = False,
+    ) -> RedisAuthorityCommitResult:
+        if type(require_task_admit_root_binding) is not bool:
+            raise TypeError("require_task_admit_root_binding must be a boolean")
         try:
-            return await self._commit_impl(plan)
+            return await self._commit_impl(
+                plan, require_task_admit_root_binding=require_task_admit_root_binding,
+            )
         except RedisAuthorityPersistenceError:
             raise
         except Exception as exc:
             raise RedisAuthorityPersistenceError(f"canonical authority commit failed: {exc}") from exc
 
-    async def parent_run_guard(self, run_id: str) -> tuple[list[str], list[str]]:
+    async def parent_run_guard(
+        self, run_id: str, *, allow_absent: bool = False,
+    ) -> tuple[list[str], list[str]]:
         """Prepare existing RUN evidence for atomic validation by the caller Lua.
 
         This read is not the ordering decision. The shared head validator must
@@ -595,6 +603,8 @@ class RedisCanonicalAuthorityStore:
         )
         snapshot = await self.get_aggregate_snapshot(identity)
         if snapshot is None:
+            if allow_absent:
+                return self.keyspace(identity.sha256).commit_keys()[:6], []
             raise RedisAuthorityCorruptionError("parent canonical RUN head is missing")
         probe = await self.load_receipt_probe(identity, snapshot.operation_id)
         if probe is None or probe.canonical_store_record is None:
@@ -612,7 +622,31 @@ class RedisCanonicalAuthorityStore:
             snapshot.projection_intents_json, str(snapshot.updated_at_ms),
         ]
 
-    async def _commit_impl(self, plan: _core.AuthorityCommitPlan) -> RedisAuthorityCommitResult:
+    async def _task_admit_parent_guard(self, run_id: str) -> tuple[list[str], list[str], list[str]]:
+        keys, guard = await self.parent_run_guard(run_id, allow_absent=True)
+        if not guard:
+            return keys, guard, []
+        head_record = json.loads(guard[7])
+        if head_record["operation_type"] == _core.OperationType.RUN_CREATE.value:
+            return keys, guard, [guard[2], guard[7], guard[8], guard[9]]
+        identity = _core.CanonicalAggregateIdentity(
+            aggregate_type=_core.AggregateType.RUN, run_id=run_id,
+        )
+        # Fixed existing RUN_CREATE operation lookup, never a membership scan.
+        probe = await self.load_receipt_probe(identity, f"run-create:v1:{identity.sha256}")
+        if probe is None or probe.canonical_store_record is None:
+            raise RedisAuthorityCorruptionError("parent canonical RUN_CREATE proof is missing")
+        record = probe.canonical_store_record
+        return keys, guard, [
+            self.keyspace(identity.sha256).operation_field(record.operation_id),
+            _canonical_text(_record_payload(record)),
+            _canonical_text(_receipt_payload(probe.receipt)),
+            _canonical_text(_transition_index_payload(record)),
+        ]
+
+    async def _commit_impl(
+        self, plan: _core.AuthorityCommitPlan, *, require_task_admit_root_binding: bool = False,
+    ) -> RedisAuthorityCommitResult:
         _validate_plan(plan)
         record = plan.record
         receipt = plan.receipt
@@ -634,6 +668,12 @@ class RedisCanonicalAuthorityStore:
             head_prevalidation = await self._prevalidate_head_proof(keyspace)
             parent_keys: list[str] = []
             parent_args: list[str] = []
+            root_proof: list[str] = []
+            if (record.operation_type == _core.OperationType.TASK_ADMIT.value
+                    and operation_prevalidation.status == "ABSENT"):
+                parent_keys, parent_args, root_proof = await self._task_admit_parent_guard(
+                    record.aggregate_identity.run_id,
+                )
             if record.operation_type in {
                 _core.OperationType.TASK_COMPLETE.value,
                 _core.OperationType.TASK_FAIL.value,
@@ -671,6 +711,8 @@ class RedisCanonicalAuthorityStore:
                     head_prevalidation.receipt_sha1,
                     head_prevalidation.index_sha1,
                     _canonical_text(parent_args),
+                    "1" if require_task_admit_root_binding else "0",
+                    _canonical_text(root_proof),
                 ],
             )
             result = self._parse_commit_result(raw)

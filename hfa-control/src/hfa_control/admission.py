@@ -226,6 +226,12 @@ class AdmissionController:
 
     async def admit(self, request) -> str:
         """Dispatch to the default legacy path or flagged canonical RUN_CREATE."""
+        from hfa_control.product_profile import ProductMode, parse_product_mode
+
+        if parse_product_mode(getattr(self._config, "product_mode", None)) is ProductMode.SINGLE_TASK_ALPHA:
+            root = getattr(request, "root_task_id", None)
+            if not isinstance(root, str) or not root.strip():
+                raise ValueError("SINGLE_TASK_ALPHA RUN_CREATE requires root_task_id")
         if not self._canonical_run_create_binding_enabled:
             return await self._admit_legacy(request)
         return await self._admit_canonical(request)

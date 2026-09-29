@@ -8,7 +8,7 @@ from typing import Any
 
 from hfa.state import transition_state
 from hfa_control.scheduler_loop import SchedulerLoop
-from hfa_control.product_profile import require_alpha_canonical_bindings
+from hfa_control.product_profile import ProductMode, parse_product_mode, require_alpha_canonical_bindings
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +266,10 @@ def build_production_scheduler(
     )
     dag_lua = DagLua(
         redis,
+        require_root_task_binding=(
+            parse_product_mode(getattr(config, "product_mode", None))
+            is ProductMode.SINGLE_TASK_ALPHA
+        ),
         canonical_task_admit_binding=(
             canonical_task_admit_binding
         ),

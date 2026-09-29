@@ -189,6 +189,7 @@ class RunCreateAuthorityInput:
     created_at_ms: int
     control_stream: str
     run_state_ttl_seconds: int = RedisTTL.RUN_STATE
+    root_task_id: str | None = None
 
 
 def normalize_run_create_input(value: RunCreateAuthorityInput) -> RunCreateAuthorityInput:
@@ -199,6 +200,10 @@ def normalize_run_create_input(value: RunCreateAuthorityInput) -> RunCreateAutho
         raise ValueError("payload must normalize to an object")
     return replace(
         value,
+        root_task_id=(
+            None if value.root_task_id is None
+            else _required_text(value.root_task_id, "root_task_id")
+        ),
         run_id=_required_text(value.run_id, "run_id"),
         tenant_id=_required_text(value.tenant_id, "tenant_id"),
         agent_type=_required_text(value.agent_type, "agent_type"),
@@ -245,6 +250,9 @@ def build_run_create_command(value: RunCreateAuthorityInput) -> AuthorityCommand
         "run_state_ttl_seconds": normalized.run_state_ttl_seconds,
         "legacy_projection_state": "admitted",
     }
+    # Omission preserves historical v1 command bytes and exact duplicates.
+    if normalized.root_task_id is not None:
+        metadata["root_task_id"] = normalized.root_task_id
     return AuthorityCommand(
         aggregate_identity=identity,
         operation_type=OperationType.RUN_CREATE,
@@ -304,6 +312,7 @@ def _input_from_record(record: Any) -> RunCreateAuthorityInput:
         created_at_ms=raw.get("created_at_ms"),
         control_stream=raw.get("control_stream"),
         run_state_ttl_seconds=raw.get("run_state_ttl_seconds"),
+        root_task_id=raw.get("root_task_id"),
     )
     normalized = normalize_run_create_input(value)
     if raw.get("legacy_projection_state") != "admitted":
@@ -921,6 +930,9 @@ class RunCreateAuthorityBinding:
             getattr(request, "preferred_placement", "LEAST_LOADED"),
             "preferred_placement",
         )
+        root_task_id = getattr(request, "root_task_id", None)
+        if root_task_id is not None:
+            root_task_id = _required_text(root_task_id, "root_task_id")
         tenant_inflight_limit = _optional_safe_limit(
             tenant_inflight_limit,
             "tenant_inflight_limit",
@@ -999,6 +1011,7 @@ class RunCreateAuthorityBinding:
         value = normalize_run_create_input(
             RunCreateAuthorityInput(
                 run_id=run_id,
+                root_task_id=root_task_id,
                 tenant_id=tenant_id,
                 agent_type=agent_type,
                 priority=priority,

@@ -10,7 +10,9 @@
 -- KEYS[8] append-only conflict evidence stream
 --
 -- KEYS[9..14] existing parent RUN head/index/receipt/record/log/outbox for
--- TASK_COMPLETE / TASK_FAIL only; ARGV[28] exact head-validation arguments.
+-- TASK_ADMIT / TASK_COMPLETE / TASK_FAIL; ARGV[28] exact head-validation args.
+-- TASK_ADMIT: ARGV[29] requires a bound root (alpha); ARGV[30] exact existing
+-- RUN_CREATE operation digest/record/receipt/index. No additional Redis keys.
 -- Cross-aggregate terminal ordering uses standalone Redis, without rekeying.
 -- All data-dependent validation
 -- precedes an accepted lifecycle write. Conflict outcomes append their durable,
@@ -517,6 +519,76 @@ if existing_receipt_raw or existing_record_raw then
     return emit_conflict("IDEMPOTENCY_CONFLICT", proof.receipt.canonical_command_hash, proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
 elseif operation_prevalidation_status ~= "ABSENT" then
     return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "operation_proof_disappeared")
+end
+
+-- F02A1: resolve durable TASK duplicates above before inspecting the parent.
+if operation_type == "TASK_ADMIT" then
+    local guard = decode_object(ARGV[28])
+    local creation = decode_object(ARGV[30])
+    if #KEYS ~= 14 or not guard or not creation
+        or (ARGV[29] ~= "0" and ARGV[29] ~= "1") then
+        return result("INVALID_COMMIT_PLAN", nil, nil, "task_admit_parent_guard_missing")
+    end
+    if #guard == 0 then
+        -- Explicit historical/internal compatibility, never an alpha escape.
+        for i = 9, 14 do
+            if redis.call("EXISTS", KEYS[i]) ~= 0 then
+                return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "parent_run_proof_appeared")
+            end
+        end
+        if ARGV[29] == "1" then
+            return result("ILLEGAL_STATE_TRANSITION", nil, nil, "parent_run_root_binding_required")
+        end
+    else
+        if #guard ~= 14 or #creation ~= 4 then
+            return result("INVALID_COMMIT_PLAN", nil, nil, "parent_run_create_guard_missing")
+        end
+        if redis_type(KEYS[9]) == "hash"
+            and redis.call("HGET", KEYS[9], "revision") ~= guard[5] then
+            return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "parent_run_head_changed")
+        end
+        local checked = validate_parent_run_head(
+            {KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14]}, guard
+        )
+        if checked[1] ~= "VALID" then
+            return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil,
+                "parent_run_" .. (checked[2] or "invalid"))
+        end
+        local expected_creation = decode_object(creation[2])
+        if not expected_creation or not validate_record_structure(expected_creation) then
+            return result("INVALID_COMMIT_PLAN", nil, nil, "parent_run_create_guard_invalid")
+        end
+        local proof = validate_proof(
+            redis.call("HGET", KEYS[12], creation[1]),
+            redis.call("HGET", KEYS[11], creation[1]),
+            redis.call("HGET", KEYS[10], expected_creation.transition_id),
+            guard[1], expected_creation.operation_id
+        )
+        if not proof or proof.record_payload ~= creation[2]
+            or proof.receipt_payload ~= creation[3] or proof.index_payload ~= creation[4] then
+            return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "parent_run_create_proof_changed")
+        end
+        local record = proof.record
+        if record.operation_type ~= "RUN_CREATE" or record.aggregate_type ~= "run"
+            or record.from_revision ~= 0 or record.to_revision ~= 1
+            or record.canonical_aggregate_identity.run_id ~= incoming_record.canonical_aggregate_identity.run_id then
+            return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "parent_run_create_identity_mismatch")
+        end
+        local root = record.authoritative_metadata_changes.root_task_id
+        if root ~= nil then
+            if type(root) ~= "string" or root == "" then
+                return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "parent_run_root_binding_invalid")
+            end
+            if root ~= incoming_record.canonical_aggregate_identity.task_id then
+                return result("ILLEGAL_STATE_TRANSITION", nil, nil, "parent_run_root_task_mismatch")
+            end
+            if guard[11] ~= "pending" and guard[11] ~= "running" then
+                return result("ILLEGAL_STATE_TRANSITION", nil, nil, "parent_run_not_nonterminal")
+            end
+        elseif ARGV[29] == "1" then
+            return result("ILLEGAL_STATE_TRANSITION", nil, nil, "parent_run_root_binding_required")
+        end
+    end
 end
 
 -- F03: receipt-first duplicates remain read-only. A new terminal decision

@@ -217,6 +217,7 @@ class ControlPlaneService:
                 ),
                 task_admit_authority=(
                     getattr(scheduler_dag_lua, "_canonical_task_admit_binding_enabled", False) is True
+                    and getattr(scheduler_dag_lua, "_require_root_task_binding", False) is True
                 ),
                 task_dispatch_authority=(
                     getattr(scheduler_dag_lua, "_canonical_task_dispatch_binding_enabled", False) is True

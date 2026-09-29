@@ -221,6 +221,7 @@ class _RunAdmissionRequest:
     estimated_cost_cents: int
     preferred_region: str
     preferred_placement: str
+    root_task_id: str
 
 
 class RunSubmissionCoordinator:
@@ -611,6 +612,7 @@ class RunSubmissionCoordinator:
         payload = dict(normalized.payload)
         admission_request = _RunAdmissionRequest(
             run_id=run_id,
+            root_task_id=task_id,
             tenant_id=tenant_id,
             agent_type=normalized.agent_type,
             priority=normalized.priority,

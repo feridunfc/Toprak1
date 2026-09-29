@@ -146,8 +146,11 @@ class TaskAdmitAuthorityBinding:
     redis: Any
     legacy_admit: Callable[[Any], Awaitable[Any]]
     store: RedisCanonicalAuthorityStore | None = None
+    require_root_task_binding: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.require_root_task_binding) is not bool:
+            raise ValueError("require_root_task_binding must be a boolean")
         if self.store is None:
             self.store = RedisCanonicalAuthorityStore(self.redis)
         self._initialised = False
@@ -310,7 +313,12 @@ class TaskAdmitAuthorityBinding:
                     detail="accepted authority evaluation did not provide a commit plan",
                 )
             try:
-                persisted = await self.store.commit(evaluation.commit_plan)
+                if self.require_root_task_binding:
+                    persisted = await self.store.commit(
+                        evaluation.commit_plan, require_task_admit_root_binding=True,
+                    )
+                else:
+                    persisted = await self.store.commit(evaluation.commit_plan)
             except Exception as exc:
                 raise TaskAdmitAuthorityConflictError(
                     status=self._persistence_status(exc), detail=str(exc)

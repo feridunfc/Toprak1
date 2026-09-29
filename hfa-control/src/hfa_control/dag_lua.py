@@ -210,8 +210,14 @@ class DagLua:
         *,
         canonical_task_admit_binding: bool = False,
         canonical_task_dispatch_binding: bool = False,
+        require_root_task_binding: bool = False,
     ) -> None:
         self._redis = redis
+        if type(require_root_task_binding) is not bool:
+            raise ValueError("require_root_task_binding must be a boolean")
+        if require_root_task_binding and not canonical_task_admit_binding:
+            raise ValueError("root TASK binding requires canonical TASK_ADMIT")
+        self._require_root_task_binding = require_root_task_binding
         self._canonical_task_admit_binding_enabled = bool(
             canonical_task_admit_binding
         )
@@ -259,7 +265,8 @@ class DagLua:
                 from hfa_control.task_admit_authority import TaskAdmitAuthorityBinding
 
                 self._task_admit_authority_binding = TaskAdmitAuthorityBinding(
-                    self._redis, self._task_admit_canonical_projection
+                    self._redis, self._task_admit_canonical_projection,
+                    require_root_task_binding=self._require_root_task_binding,
                 )
             return await self._task_admit_authority_binding.admit(seed)
         return await self._task_admit_legacy(seed)
