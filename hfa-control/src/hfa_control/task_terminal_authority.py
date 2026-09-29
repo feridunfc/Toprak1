@@ -455,6 +455,7 @@ class TaskTerminalProjectionResult:
     already_projected: bool = False
     unlocked_count: int = 0
     blocked_count: int = 0
+    exact_no_op: bool = False
 
 
 class TaskTerminalProjectionManager:
@@ -488,6 +489,7 @@ class TaskTerminalProjectionManager:
             self._loader = LuaScriptLoader(
                 self._redis,
                 _lua_path("task_complete.lua"),
+                helpers={"validate_parent_run_head": _lua_path("authority_head_validate.lua")},
             )
         await self._loader.load()
         self._initialised = True
@@ -728,12 +730,13 @@ class TaskTerminalProjectionManager:
         # predecessor TASK_CLAIM evidence and the exact terminal record+receipt
         # are proven durable in the canonical store and equal the current head.
         await self._validate_durable_authority(projection)
+        parent_keys, parent_args = await self._store.parent_run_guard(projection.run_id)
 
         child_state_pfx = DagRedisKey.task_state_prefix()
         child_remaining_pfx = DagRedisKey.task_remaining_deps_prefix()
         child_emitted_pfx = DagRedisKey.task_ready_emitted_prefix()
         raw = await self._loader.run(
-            num_keys=9,
+            num_keys=15,
             keys=[
                 DagRedisKey.task_state(projection.task_id),
                 DagRedisKey.task_meta(projection.task_id),
@@ -744,6 +747,7 @@ class TaskTerminalProjectionManager:
                 RedisKey.run_state(projection.run_id),
                 RedisKey.runtime_truth_conflict_index(),
                 RedisKey.runtime_truth_conflict_stream(),
+                *parent_keys,
             ],
             args=[
                 projection.task_id,
@@ -780,6 +784,7 @@ class TaskTerminalProjectionManager:
                 projection.claim_operation_id,
                 str(projection.claim_epoch),
                 projection.output_sha256,
+                json.dumps(parent_args, separators=(",", ":")),
             ],
         )
         if not isinstance(raw, (list, tuple)) or len(raw) < 4:
@@ -807,6 +812,7 @@ class TaskTerminalProjectionManager:
                 already_projected=True,
                 unlocked_count=unlocked,
                 blocked_count=blocked,
+                exact_no_op=len(raw) > 5 and _decode(raw[5]) == "1",
             )
         raise TaskTerminalAuthorityError(
             status=status or TASK_TERMINAL_PROJECTION_PENDING_STATUS,
@@ -831,6 +837,7 @@ class TaskTerminalBindingResult:
     projection_already_applied: bool
     unlocked_count: int = 0
     blocked_count: int = 0
+    exact_no_op: bool = False
 
 @dataclass
 class TaskTerminalAuthorityBinding:
@@ -1676,6 +1683,7 @@ class TaskTerminalAuthorityBinding:
             projection_already_applied=projected.already_projected,
             unlocked_count=projected.unlocked_count,
             blocked_count=projected.blocked_count,
+            exact_no_op=projected.exact_no_op,
         )
 
     async def complete(

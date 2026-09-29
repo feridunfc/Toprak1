@@ -143,6 +143,11 @@ class RunFinalizingWorkerConsumer(WorkerConsumer):
         stream: str,
         authority_worker_instance_id: str | None = None,
     ) -> None:
+        # Explicit delivery recovery; never the TASK terminal exact-no-op result.
+        logger.info(
+            "Delivery recovery operation_scope=RUN_TERMINATE_THEN_MESSAGE_ACK run=%s task=%s",
+            ctx.run_id, ctx.task_id,
+        )
         finalize = getattr(
             self._task_consumer,
             "finalize_terminal_duplicate",
@@ -294,6 +299,8 @@ class RunFinalizingWorkerConsumer(WorkerConsumer):
             ctx.task_id,
             terminal.terminal_state,
         )
+        if bool(getattr(terminal, "exact_no_op", False)):
+            return
         await self._finalize_run_and_ack(
             ctx,
             terminal_state=terminal.terminal_state,

@@ -61,9 +61,14 @@ class LuaScriptLoader:
         script_path: Path to the .lua file to load.
     """
 
-    def __init__(self, redis, script_path: Path) -> None:
+    def __init__(
+        self, redis, script_path: Path, *, helpers: dict[str, Path] | None = None
+    ) -> None:
         self._redis = redis
         self._path = script_path
+        self._helpers = dict(helpers or {})
+        if any(not name.isascii() or not name.isidentifier() for name in self._helpers):
+            raise ValueError("Lua helper names must be ASCII identifiers")
         self._sha: Optional[str] = None
         self._source: Optional[str] = None
 
@@ -81,6 +86,13 @@ class LuaScriptLoader:
             RuntimeError:      If SCRIPT LOAD fails on real Redis.
         """
         source = self._path.read_text(encoding="utf-8")
+        # Embed existing read-only validators in the caller's atomic execution.
+        # The helper receives its own KEYS/ARGV; no second EVAL or writer exists.
+        source = "".join(
+            f"local function {name}(KEYS, ARGV)\n"
+            + path.read_text(encoding="utf-8") + "\nend\n"
+            for name, path in self._helpers.items()
+        ) + source
         self._source = source
 
         try:

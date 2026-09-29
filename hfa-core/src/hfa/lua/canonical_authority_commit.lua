@@ -9,7 +9,10 @@
 -- KEYS[7] deterministic conflict index hash (field = conflict_id)
 -- KEYS[8] append-only conflict evidence stream
 --
--- Every key shares one Redis Cluster hash tag. All data-dependent validation
+-- KEYS[9..14] existing parent RUN head/index/receipt/record/log/outbox for
+-- TASK_COMPLETE / TASK_FAIL only; ARGV[28] exact head-validation arguments.
+-- Cross-aggregate terminal ordering uses standalone Redis, without rekeying.
+-- All data-dependent validation
 -- precedes an accepted lifecycle write. Conflict outcomes append their durable,
 -- deduplicated evidence in this same Lua execution without consuming revision.
 
@@ -514,6 +517,29 @@ if existing_receipt_raw or existing_record_raw then
     return emit_conflict("IDEMPOTENCY_CONFLICT", proof.receipt.canonical_command_hash, proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
 elseif operation_prevalidation_status ~= "ABSENT" then
     return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "operation_proof_disappeared")
+end
+
+-- F03: receipt-first duplicates remain read-only. A new terminal decision
+-- must serialize with RUN_TERMINATE on the existing parent RUN authority.
+if operation_type == "TASK_COMPLETE" or operation_type == "TASK_FAIL" then
+    local guard = decode_object(ARGV[28])
+    if #KEYS ~= 14 or not guard or #guard ~= 14 then
+        return result("INVALID_COMMIT_PLAN", nil, nil, "parent_run_guard_missing")
+    end
+    if redis_type(KEYS[9]) == "hash"
+        and redis.call("HGET", KEYS[9], "revision") ~= guard[5] then
+        return result("PREVALIDATION_RETRY_REQUIRED", nil, nil, "parent_run_head_changed")
+    end
+    local checked = validate_parent_run_head(
+        {KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14]}, guard
+    )
+    if checked[1] ~= "VALID" then
+        return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil,
+            "parent_run_" .. (checked[2] or "invalid"))
+    end
+    if guard[11] ~= "pending" and guard[11] ~= "running" then
+        return result("ILLEGAL_STATE_TRANSITION", nil, nil, "parent_run_not_nonterminal")
+    end
 end
 
 if redis.call("HEXISTS", KEYS[2], transition_id) == 1 then

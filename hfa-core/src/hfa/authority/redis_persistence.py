@@ -4,8 +4,10 @@ Sprint 81.2 adds a persistence boundary only. It does not wire existing
 scheduler/worker writers to this adapter, migrate historical keys, or authorize
 runtime cutover.
 
-All keys participating in one authority decision share the same Redis Cluster
-hash tag. The Lua script performs receipt-first proof validation, strict
+Each aggregate retains its existing Redis Cluster hash tag. TASK terminal
+decisions additionally read the parent RUN proof in the same Lua execution;
+that cross-aggregate path requires the established standalone Redis topology.
+No Redis Cluster cross-slot support is claimed. The Lua script performs receipt-first proof validation, strict
 revision/state CAS, immutable record/receipt insertion, aggregate-head
 continuity checks, durable conflict recording, and append-only log/outbox writes
 in one Redis script execution.
@@ -401,7 +403,10 @@ class RedisCanonicalAuthorityStore:
         self._redis = redis
         self._namespace = namespace
         script_path = Path(__file__).resolve().parent.parent / "lua" / "canonical_authority_commit.lua"
-        self._commit_loader = LuaScriptLoader(redis, script_path)
+        self._commit_loader = LuaScriptLoader(
+            redis, script_path,
+            helpers={"validate_parent_run_head": script_path.with_name("authority_head_validate.lua")},
+        )
         conflict_script_path = Path(__file__).resolve().parent.parent / "lua" / "authority_conflict_record.lua"
         self._conflict_loader = LuaScriptLoader(redis, conflict_script_path)
         head_validate_path = Path(__file__).resolve().parent.parent / "lua" / "authority_head_validate.lua"
@@ -579,6 +584,34 @@ class RedisCanonicalAuthorityStore:
         except Exception as exc:
             raise RedisAuthorityPersistenceError(f"canonical authority commit failed: {exc}") from exc
 
+    async def parent_run_guard(self, run_id: str) -> tuple[list[str], list[str]]:
+        """Prepare existing RUN evidence for atomic validation by the caller Lua.
+
+        This read is not the ordering decision. The shared head validator must
+        run inside the TASK commit/projector before its first accepted write.
+        """
+        identity = _core.CanonicalAggregateIdentity(
+            aggregate_type=_core.AggregateType.RUN, run_id=run_id,
+        )
+        snapshot = await self.get_aggregate_snapshot(identity)
+        if snapshot is None:
+            raise RedisAuthorityCorruptionError("parent canonical RUN head is missing")
+        probe = await self.load_receipt_probe(identity, snapshot.operation_id)
+        if probe is None or probe.canonical_store_record is None:
+            raise RedisAuthorityCorruptionError("parent canonical RUN proof is missing")
+        record, receipt = probe.canonical_store_record, probe.receipt
+        keyspace = self.keyspace(identity.sha256)
+        return keyspace.commit_keys()[:6], [
+            identity.sha256, snapshot.operation_id, snapshot.operation_digest,
+            snapshot.transition_id, str(snapshot.revision),
+            snapshot.canonical_command_hash, snapshot.canonical_record_hash,
+            _canonical_text(_record_payload(record)),
+            _canonical_text(_receipt_payload(receipt)),
+            _canonical_text(_transition_index_payload(record)),
+            snapshot.state or "", "1" if snapshot.state is None else "0",
+            snapshot.projection_intents_json, str(snapshot.updated_at_ms),
+        ]
+
     async def _commit_impl(self, plan: _core.AuthorityCommitPlan) -> RedisAuthorityCommitResult:
         _validate_plan(plan)
         record = plan.record
@@ -599,9 +632,16 @@ class RedisCanonicalAuthorityStore:
                 record.operation_id,
             )
             head_prevalidation = await self._prevalidate_head_proof(keyspace)
+            parent_keys: list[str] = []
+            parent_args: list[str] = []
+            if record.operation_type in {
+                _core.OperationType.TASK_COMPLETE.value,
+                _core.OperationType.TASK_FAIL.value,
+            }:
+                parent_keys, parent_args = await self.parent_run_guard(record.aggregate_identity.run_id)
             raw = await self._commit_loader.run(
-                num_keys=8,
-                keys=keyspace.commit_keys(),
+                num_keys=8 + len(parent_keys),
+                keys=keyspace.commit_keys() + parent_keys,
                 args=[
                     record.aggregate_identity_sha256,
                     str(record.from_revision),
@@ -630,6 +670,7 @@ class RedisCanonicalAuthorityStore:
                     head_prevalidation.record_sha1,
                     head_prevalidation.receipt_sha1,
                     head_prevalidation.index_sha1,
+                    _canonical_text(parent_args),
                 ],
             )
             result = self._parse_commit_result(raw)

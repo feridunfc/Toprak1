@@ -86,6 +86,24 @@ async def _seed_claimed_task(
 ):
     store = RedisCanonicalAuthorityStore(redis_client)
     await store.initialise()
+    run_identity = CanonicalAggregateIdentity(aggregate_type=AggregateType.RUN, run_id=run_id)
+    if await store.get_aggregate_snapshot(run_identity) is None:
+        await _commit(
+            store,
+            AuthorityCommand(
+                aggregate_identity=run_identity,
+                operation_type=OperationType.RUN_CREATE,
+                operation_id=f"run-create:v1:{run_identity.sha256}",
+                expected_revision=0,
+                intended_previous_state=None,
+                intended_next_state="pending",
+                authoritative_payload={"run_id": run_id, "tenant_id": tenant_id},
+                authoritative_metadata_changes={"run_id": run_id, "tenant_id": tenant_id},
+                requested_child_effects={},
+                requested_projection_intents=({"kind": "RUN_STATUS_PROJECTION"},),
+            ),
+            revision=0, state=None, committed_at_ms=50,
+        )
     identity = CanonicalAggregateIdentity(
         aggregate_type=AggregateType.TASK,
         run_id=run_id,

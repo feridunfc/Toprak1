@@ -48,6 +48,8 @@
 -- 32  claim_operation_id
 -- 33  canonical_claim_epoch
 -- 34  output_sha256
+-- 35  parent RUN exact head-validation arguments (canonical path only)
+-- Canonical KEYS[10..15]: existing RUN head/index/receipt/record/log/outbox.
 --
 -- RETURN
 -- { committed_flag, status_string, unlocked_count, already_terminal_flag, blocked_count }
@@ -239,7 +241,8 @@ local function canonical_terminal_exact_duplicate()
         'canonical_record_hash',
         'canonical_command_hash',
         'canonical_revision',
-        'canonical_operation_id'
+        'canonical_operation_id',
+        'task_id', 'run_id', 'tenant_id'
     )
     if values[1] ~= finished_at_ms
         or values[2] ~= terminal_state
@@ -263,8 +266,14 @@ local function canonical_terminal_exact_duplicate()
         or values[20] ~= canonical_record_hash
         or values[21] ~= canonical_command_hash
         or values[22] ~= canonical_revision
-        or values[23] ~= canonical_operation_id then
+        or values[23] ~= canonical_operation_id
+        or values[24] ~= task_id or values[25] ~= run_id or values[26] ~= tenant_id then
         return false
+    end
+    for _, key in ipairs({task_running_zset, tenant_ready_queue}) do
+        local kind = redis_type(key)
+        if kind ~= 'none' and kind ~= 'zset' then return false end
+        if kind == 'zset' and redis.call('ZSCORE', key, task_id) then return false end
     end
     if terminal_state == 'done' then
         if redis_type(task_output_key) ~= 'string' then
@@ -272,7 +281,7 @@ local function canonical_terminal_exact_duplicate()
         end
         return redis.call('GET', task_output_key) == output_json
     end
-    return true
+    return redis_type(task_output_key) == 'none'
 end
 
 local function canonical_projection_preflight()
@@ -421,14 +430,39 @@ end
 if canonical_projection and not canonical_projection_input_valid() then
     return {0, 'canonical_projection_conflict', 0, 0, 0}
 end
+-- C belongs to the already-projected TASK operation, independently of RUN
+-- state. Never turn this retry into RUN finalization, settlement or ACK work.
+-- Compare before the parent guard so RUN movement cannot invalidate exact C.
 if is_terminal(current_state) then
     if canonical_projection then
-        if canonical_terminal_exact_duplicate() then
-            return {1, 'canonical_terminal_already_projected', 0, 1, 0}
+        if current_state == terminal_state and canonical_terminal_exact_duplicate() then
+            return {1, 'canonical_terminal_already_projected', 0, 1, 0, 1}
         end
         return {0, 'canonical_projection_conflict', 0, 1, 0}
     end
     return {0, 'already_terminal', 0, 1, 0}
+end
+local canonical_run_terminal = false
+if canonical_projection then
+    local ok, guard = pcall(cjson.decode, ARGV[35] or '')
+    if #KEYS ~= 15 or not ok or type(guard) ~= 'table' or #guard ~= 14 then
+        return {0, 'canonical_run_guard_missing', 0, 0, 0}
+    end
+    local checked = validate_parent_run_head(
+        {KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14], KEYS[15]}, guard
+    )
+    if checked[1] ~= 'VALID' then
+        return {0, 'canonical_run_proof_conflict', 0, 0, 0}
+    end
+    canonical_run_terminal = guard[11] == 'done' or guard[11] == 'failed'
+    if not canonical_run_terminal and guard[11] ~= 'pending' and guard[11] ~= 'running' then
+        return {0, 'canonical_run_state_conflict', 0, 0, 0}
+    end
+end
+-- A durable TASK decision with missing projection is B, never an exact C.
+-- No normal TASK effect, conflict event, or TTL refresh follows RUN terminal.
+if canonical_run_terminal then
+    return {0, 'run_terminal_projection_blocked', 0, 0, 0}
 end
 if current_state ~= 'running' then
     return {0, 'illegal_transition', 0, 0, 0}

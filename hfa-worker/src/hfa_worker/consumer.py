@@ -782,6 +782,9 @@ class WorkerConsumer:
                 )
                 return
 
+            if bool(getattr(completed, "exact_no_op", False)):
+                logger.info("TASK terminal exact no-op; no ACK in this operation run=%s", ctx.run_id)
+                return
             await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
         finally:
             self._canonical_inflight.discard(inflight_identity)

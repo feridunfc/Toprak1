@@ -89,6 +89,7 @@ class CoordinatedTaskCompleteResult:
     task_committed: bool = False
     ack_allowed: bool = False
     run_termination: RunTerminationResult | None = None
+    exact_no_op: bool = False
 
 
 class RunTerminationCoordinator:
@@ -200,6 +201,15 @@ class RunTerminationCoordinator:
 
     async def task_complete(self, **kwargs: Any) -> Any:
         task_result = await self._task_completion_gateway.task_complete(**kwargs)
+        if bool(getattr(task_result, "completed", False)) and bool(
+            getattr(task_result, "exact_no_op", False)
+        ):
+            # F03 C is the TASK operation's read-only result. RUN recovery,
+            # resource settlement and transport ACK are separate operations.
+            return CoordinatedTaskCompleteResult(
+                completed=True, status=task_result.status, already_terminal=True,
+                task_committed=True, ack_allowed=False, exact_no_op=True,
+            )
         if not bool(getattr(task_result, "completed", False)) or not self._enabled:
             return task_result
 
