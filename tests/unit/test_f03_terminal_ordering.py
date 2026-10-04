@@ -88,10 +88,12 @@ def terminal(task, state):
 
 
 async def terminate_run(store, run, state="done"):
-    result = await store.commit(plan(
+    # Exercise F03 against already-durable history; F02B no longer allows this
+    # unbound RUN fixture to create a new terminal decision through the gateway.
+    from tests.canonical_history import install_historical_run_termination
+    await install_historical_run_termination(store._redis, store, plan(
         run, OperationType.RUN_TERMINATE, "pending", state, 1, ["RUN_RESULT_PROJECTION"],
     ))
-    assert result.committed
 
 
 async def snapshot(redis, keys):

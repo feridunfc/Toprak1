@@ -601,6 +601,12 @@ class RedisCanonicalAuthorityStore:
         identity = _core.CanonicalAggregateIdentity(
             aggregate_type=_core.AggregateType.RUN, run_id=run_id,
         )
+        return await self._authority_head_guard(identity, allow_absent=allow_absent)
+
+    async def _authority_head_guard(
+        self, identity: _core.CanonicalAggregateIdentity, *, allow_absent: bool = False,
+    ) -> tuple[list[str], list[str]]:
+        """Prepare the existing exact head witness for atomic Lua validation."""
         snapshot = await self.get_aggregate_snapshot(identity)
         if snapshot is None:
             if allow_absent:
@@ -644,6 +650,23 @@ class RedisCanonicalAuthorityStore:
             _canonical_text(_transition_index_payload(record)),
         ]
 
+    async def run_terminate_task_guard(self, run_id: str) -> tuple[list[str], list[str], list[str]]:
+        """Resolve only the immutable RUN_CREATE root; never runtime membership."""
+        _, run_guard, creation = await self._task_admit_parent_guard(run_id)
+        if not run_guard or not creation:
+            raise RedisAuthorityCorruptionError("canonical RUN_CREATE root binding is missing")
+        record = json.loads(creation[1])
+        root = record["authoritative_metadata_changes"].get("root_task_id")
+        if (record["operation_type"] != _core.OperationType.RUN_CREATE.value
+                or record["canonical_aggregate_identity"]["run_id"] != run_id
+                or not isinstance(root, str) or not root.strip() or root != root.strip()):
+            raise RedisAuthorityCorruptionError("canonical RUN_CREATE root binding is invalid")
+        identity = _core.CanonicalAggregateIdentity(
+            aggregate_type=_core.AggregateType.TASK, run_id=run_id, task_id=root,
+        )
+        keys, guard = await self._authority_head_guard(identity)
+        return keys, guard, creation
+
     async def _commit_impl(
         self, plan: _core.AuthorityCommitPlan, *, require_task_admit_root_binding: bool = False,
     ) -> RedisAuthorityCommitResult:
@@ -672,6 +695,11 @@ class RedisCanonicalAuthorityStore:
             if (record.operation_type == _core.OperationType.TASK_ADMIT.value
                     and operation_prevalidation.status == "ABSENT"):
                 parent_keys, parent_args, root_proof = await self._task_admit_parent_guard(
+                    record.aggregate_identity.run_id,
+                )
+            if (record.operation_type == _core.OperationType.RUN_TERMINATE.value
+                    and operation_prevalidation.status == "ABSENT"):
+                parent_keys, parent_args, root_proof = await self.run_terminate_task_guard(
                     record.aggregate_identity.run_id,
                 )
             if record.operation_type in {

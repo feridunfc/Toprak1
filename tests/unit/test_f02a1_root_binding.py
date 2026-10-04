@@ -211,8 +211,12 @@ async def test_parent_change_after_witness_cannot_commit(alpha, root_redis, monk
             assert witness[1][10] == 'pending'
             observed.append(True)
             if race == 'terminalize':
-                assert (await store.commit(plan(run, OperationType.RUN_TERMINATE,
-                    'pending', 'done', 1, ['RUN_RESULT_PROJECTION']))).committed
+                # Inject durable historical state as the race. F02B now denies
+                # a new RUN termination before the root TASK has been admitted.
+                from tests.canonical_history import install_historical_run_termination
+                await install_historical_run_termination(root_redis, store, plan(
+                    run, OperationType.RUN_TERMINATE,
+                    'pending', 'done', 1, ['RUN_RESULT_PROJECTION']))
             else:
                 keys = store.keyspace(run.sha256)
                 await root_redis.hdel(keys.receipts, keys.operation_field(run_create_operation_id(req.run_id)))

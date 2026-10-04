@@ -1,10 +1,8 @@
 """Canonical RUN_TERMINATE authority binding for Sprint 84.5.
 
-The binding freezes terminal aggregate TASK truth in Redis before constructing a
-canonical RUN_TERMINATE command.  Canonical authority is committed before the
-legacy RUN state/result/meta/event projection.  Exact retries replay from the
-immutable proof plus canonical receipt and never reinterpret mutable TASK state
-once the canonical transition is durable.
+New decisions use the immutable RUN_CREATE root and its exact canonical TASK
+head. The canonical commit revalidates that witness atomically. Durable retries
+recover from RUN record/receipt evidence without reinterpreting TASK state.
 """
 from __future__ import annotations
 
@@ -165,6 +163,7 @@ class TerminalAggregateProof:
     trigger_terminal_state: str
     canonical_expected_revision: int
     canonical_previous_state: str
+    canonical_task: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -306,6 +305,8 @@ class TerminalAggregateProofManager:
             "skipped_count",
             "final_state",
         }
+        if isinstance(payload, dict) and "canonical_task" in payload:
+            expected_payload_fields.add("canonical_task")
         if not isinstance(payload, dict) or set(payload) != expected_payload_fields:
             raise RunTerminateAuthorityError(
                 "terminal_proof_receipt_corrupt",
@@ -415,6 +416,7 @@ class TerminalAggregateProofManager:
             ),
             canonical_expected_revision=expected_revision,
             canonical_previous_state=previous_state,
+            canonical_task=payload.get("canonical_task"),
         )
 
     async def load_existing(self, run_id: str) -> TerminalAggregateProof | None:
@@ -692,6 +694,8 @@ def build_run_terminate_command(proof: TerminalAggregateProof) -> AuthorityComma
         "final_state": proof.final_state,
         "tasks": task_states,
     }
+    if proof.canonical_task is not None:
+        terminal_evidence["canonical_task"] = dict(proof.canonical_task)
     metadata = {
         "run_id": proof.run_id,
         "tenant_id": proof.tenant_id,
@@ -774,6 +778,71 @@ class RunTerminateAuthorityBinding:
                 record.durable_projection_intents
             ),
             expected_updated_at_ms=record.committed_at_ms,
+        )
+
+    @staticmethod
+    def _proof_from_record(record: Any) -> TerminalAggregateProof:
+        """Rehydrate durable proof, including historical v1, without TASK reads."""
+        metadata = record.authoritative_metadata_changes
+        evidence = metadata["terminal_evidence"]
+        payload = {key: evidence[key] for key in (
+            "schema_version", "tasks", "task_count", "done_count", "failed_count",
+            "skipped_count", "final_state",
+        )}
+        payload.update(run_id=metadata["run_id"], tenant_id=metadata["tenant_id"])
+        if "canonical_task" in evidence:
+            payload["canonical_task"] = evidence["canonical_task"]
+        return RunTerminateAuthorityBinding._proof_from_payload(
+            payload,
+            proof_sha256=evidence["terminal_proof_sha256"],
+            finalized_at_ms=metadata["finalized_at_ms"],
+            worker_instance_id=metadata["worker_instance_id"],
+            trigger_task_id=metadata["trigger_task_id"],
+            trigger_terminal_state=metadata["trigger_terminal_state"],
+            canonical_expected_revision=record.from_revision,
+            canonical_previous_state=record.previous_state,
+        )
+
+    @staticmethod
+    def _proof_from_payload(payload: Mapping[str, Any], **fields: Any) -> TerminalAggregateProof:
+        raw = {key: value for key, value in payload.items() if key not in {"tasks", "canonical_task"}}
+        raw["proof_payload_json"] = canonical_json_bytes(payload).decode("utf-8")
+        raw["proof_sha256"] = hashlib.sha256(raw["proof_payload_json"].encode("utf-8")).hexdigest()
+        raw.update(fields)
+        return TerminalAggregateProofManager._proof_from_mapping(raw)
+
+    async def _capture_canonical_proof(
+        self, *, snapshot: Any, run_id: str, tenant_id: str, **fields: Any,
+    ) -> TerminalAggregateProof | None:
+        _, guard, creation = await self.store.run_terminate_task_guard(run_id)
+        origin = json.loads(creation[1])
+        metadata = origin["authoritative_metadata_changes"]
+        root = metadata["root_task_id"]
+        if metadata["tenant_id"] != tenant_id:
+            raise RunTerminateAuthorityError("canonical_run_tenant_mismatch")
+        trigger = fields["trigger_task_id"]
+        if trigger and trigger != root:
+            raise RunTerminateAuthorityError("canonical_root_task_mismatch")
+        state = guard[10]
+        if state not in {"done", "failed"}:
+            return None
+        payload = {
+            "schema_version": PROOF_SCHEMA_VERSION, "run_id": run_id, "tenant_id": tenant_id,
+            "tasks": [{"task_id": root, "state": state}], "task_count": 1,
+            "done_count": int(state == "done"), "failed_count": int(state == "failed"),
+            "skipped_count": 0, "final_state": state,
+            "canonical_task": {
+                "identity_sha256": guard[0], "operation_id": guard[1],
+                "transition_id": guard[3], "revision": int(guard[4]),
+                "canonical_command_hash": guard[5], "canonical_record_hash": guard[6],
+                "state": state,
+            },
+        }
+        # Notifications cannot choose the authoritative terminal outcome.
+        fields.update(trigger_task_id=root, trigger_terminal_state=state)
+        return self._proof_from_payload(
+            payload, canonical_expected_revision=snapshot.revision,
+            canonical_previous_state=snapshot.state, **fields,
         )
 
     async def _resolve_exact_durable_commit(self, command: AuthorityCommand) -> tuple[Any, Any] | tuple[None, None]:
@@ -925,89 +994,43 @@ class RunTerminateAuthorityBinding:
         identity = run_terminate_identity(run_id)
 
         try:
-            existing_proof = await self.proof_manager.load_existing(run_id)
             snapshot = await self.store.get_aggregate_snapshot(identity)
+            if snapshot is None:
+                raise RunTerminateAuthorityError("canonical_run_missing")
+            head = await self.store.load_receipt_probe(identity, snapshot.operation_id)
+            if head is None or head.canonical_store_record is None:
+                raise RunTerminateAuthorityError("canonical_run_proof_missing")
+            await self._validate_exact_head(head.canonical_store_record, head.receipt)
+            if head.canonical_store_record.operation_type == OperationType.RUN_TERMINATE.value:
+                # Receipt-first restart: neither runtime nor canonical TASK is recaptured.
+                proof = self._proof_from_record(head.canonical_store_record)
+                if proof.tenant_id != tenant_id:
+                    raise RunTerminateAuthorityError("terminal_proof_identity_conflict")
+                command = build_run_terminate_command(proof)
+                probe = head
+            else:
+                if snapshot.state not in {"pending", "running"}:
+                    raise RunTerminateAuthorityError("canonical_run_not_nonterminal")
+                proof = await self._capture_canonical_proof(
+                    snapshot=snapshot, run_id=run_id, tenant_id=tenant_id,
+                    finalized_at_ms=finalized_at_ms, worker_instance_id=worker_instance_id,
+                    trigger_task_id=trigger_task_id, trigger_terminal_state=trigger_terminal_state,
+                )
+                if proof is None:
+                    return RunTerminateBindingResult(
+                        finalized=False, status=NOT_READY_STATUS, run_id=run_id,
+                        task_count=1, ack_allowed=False,
+                    )
+                command = build_run_terminate_command(proof)
+                probe = await self.store.load_receipt_probe(identity, command.operation_id)
         except (RedisAuthorityCorruptionError, RedisAuthorityPersistenceError) as exc:
             raise RunTerminateAuthorityError(
-                "canonical_run_terminate_evidence_unavailable",
-                str(exc),
+                "canonical_run_terminate_evidence_unavailable", str(exc),
             ) from exc
-        if snapshot is None:
+        except (KeyError, TypeError, ValueError) as exc:
             raise RunTerminateAuthorityError(
-                "canonical_run_missing",
-                "RUN_TERMINATE requires an existing canonical RUN aggregate",
-            )
-
-        proof = existing_proof
-        probe = None
-        command = None
-        if proof is not None:
-            if proof.tenant_id != tenant_id:
-                raise RunTerminateAuthorityError(
-                    "terminal_proof_identity_conflict",
-                    "terminal proof tenant does not match caller",
-                )
-            command = build_run_terminate_command(proof)
-            try:
-                probe = await self.store.load_receipt_probe(identity, command.operation_id)
-            except (RedisAuthorityCorruptionError, RedisAuthorityPersistenceError) as exc:
-                raise RunTerminateAuthorityError(
-                    "canonical_run_terminate_evidence_unavailable",
-                    str(exc),
-                ) from exc
-            if probe is None:
-                # Before canonical durability, a retry must prove the live TASK
-                # aggregate still equals the frozen proof. Once canonical receipt
-                # exists, recovery deliberately skips mutable TASK reinterpretation.
-                captured = await self.proof_manager.capture(
-                    run_id=run_id,
-                    tenant_id=tenant_id,
-                    finalized_at_ms=finalized_at_ms,
-                    worker_instance_id=worker_instance_id,
-                    trigger_task_id=trigger_task_id,
-                    trigger_terminal_state=trigger_terminal_state,
-                    canonical_expected_revision=proof.canonical_expected_revision,
-                    canonical_previous_state=proof.canonical_previous_state,
-                )
-                if captured.proof is None:
-                    raise RunTerminateAuthorityError("terminal_proof_changed_after_capture")
-                proof = captured.proof
-                command = build_run_terminate_command(proof)
-        else:
-            if snapshot.state not in {"pending", "running"}:
-                raise RunTerminateAuthorityError(
-                    "canonical_run_already_terminal_without_matching_proof",
-                    f"canonical RUN state is {snapshot.state!r}",
-                )
-            captured = await self.proof_manager.capture(
-                run_id=run_id,
-                tenant_id=tenant_id,
-                finalized_at_ms=finalized_at_ms,
-                worker_instance_id=worker_instance_id,
-                trigger_task_id=trigger_task_id,
-                trigger_terminal_state=trigger_terminal_state,
-                canonical_expected_revision=snapshot.revision,
-                canonical_previous_state=snapshot.state,
-            )
-            if captured.status == NOT_READY_STATUS:
-                return RunTerminateBindingResult(
-                    finalized=False,
-                    status=NOT_READY_STATUS,
-                    run_id=run_id,
-                    task_count=captured.task_count,
-                    done_count=captured.done_count,
-                    failed_count=captured.failed_count,
-                    skipped_count=captured.skipped_count,
-                    ack_allowed=True,
-                )
-            if captured.proof is None:
-                raise RunTerminateAuthorityError(
-                    "terminal_proof_capture_failed",
-                    "terminal proof capture returned no proof",
-                )
-            proof = captured.proof
-            command = build_run_terminate_command(proof)
-            probe = await self.store.load_receipt_probe(identity, command.operation_id)
+                "canonical_run_terminate_evidence_invalid", str(exc),
+            ) from exc
 
         assert proof is not None
         assert command is not None

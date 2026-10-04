@@ -13,6 +13,8 @@
 -- TASK_ADMIT / TASK_COMPLETE / TASK_FAIL; ARGV[28] exact head-validation args.
 -- TASK_ADMIT: ARGV[29] requires a bound root (alpha); ARGV[30] exact existing
 -- RUN_CREATE operation digest/record/receipt/index. No additional Redis keys.
+-- RUN_TERMINATE uses KEYS[9..14]/ARGV[28] for the bound canonical root TASK,
+-- and ARGV[30] for the immutable RUN_CREATE proof in this RUN's existing keys.
 -- Cross-aggregate terminal ordering uses standalone Redis, without rekeying.
 -- All data-dependent validation
 -- precedes an accepted lifecycle write. Conflict outcomes append their durable,
@@ -588,6 +590,74 @@ if operation_type == "TASK_ADMIT" then
         elseif ARGV[29] == "1" then
             return result("ILLEGAL_STATE_TRANSITION", nil, nil, "parent_run_root_binding_required")
         end
+    end
+end
+
+-- F02B: only the exact canonical root TASK can authorize a new RUN terminal
+-- decision. Durable duplicates already returned above without TASK reads.
+if operation_type == "RUN_TERMINATE" then
+    local guard = decode_object(ARGV[28])
+    local creation = decode_object(ARGV[30])
+    if #KEYS ~= 14 or not guard or #guard ~= 14 or not creation or #creation ~= 4 then
+        return result("INVALID_COMMIT_PLAN", nil, nil, "root_task_guard_missing")
+    end
+    local expected_creation = decode_object(creation[2])
+    if not expected_creation or not validate_record_structure(expected_creation) then
+        return result("INVALID_COMMIT_PLAN", nil, nil, "run_create_guard_invalid")
+    end
+    local created = validate_proof(
+        redis.call("HGET", KEYS[4], creation[1]),
+        redis.call("HGET", KEYS[3], creation[1]),
+        redis.call("HGET", KEYS[2], expected_creation.transition_id),
+        identity_sha, expected_creation.operation_id
+    )
+    if not created or created.record_payload ~= creation[2]
+        or created.receipt_payload ~= creation[3] or created.index_payload ~= creation[4] then
+        return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "run_create_proof_changed")
+    end
+    local origin = created.record
+    local root = origin.authoritative_metadata_changes.root_task_id
+    if origin.operation_type ~= "RUN_CREATE" or origin.aggregate_type ~= "run"
+        or origin.from_revision ~= 0 or origin.to_revision ~= 1
+        or origin.canonical_aggregate_identity.run_id ~= incoming_record.canonical_aggregate_identity.run_id
+        or type(root) ~= "string" or root == "" then
+        return result("ILLEGAL_STATE_TRANSITION", nil, nil, "run_root_binding_required")
+    end
+    local checked = validate_parent_run_head(
+        {KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14]}, guard
+    )
+    if checked[1] ~= "VALID" then
+        return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil,
+            "root_task_" .. (checked[2] or "invalid"))
+    end
+    local task = decode_object(guard[8])
+    local metadata = incoming_record.authoritative_metadata_changes
+    local evidence = metadata.terminal_evidence
+    local bound = type(evidence) == "table" and evidence.canonical_task or nil
+    local rows = type(evidence) == "table" and evidence.tasks or nil
+    if not task or task.aggregate_type ~= "task"
+        or task.canonical_aggregate_identity.run_id ~= origin.canonical_aggregate_identity.run_id
+        or task.canonical_aggregate_identity.task_id ~= root
+        or type(bound) ~= "table" or type(rows) ~= "table" or #rows ~= 1
+        or type(rows[1]) ~= "table" or rows[1].task_id ~= root
+        or metadata.tenant_id ~= origin.authoritative_metadata_changes.tenant_id
+        or metadata.run_id ~= origin.canonical_aggregate_identity.run_id then
+        return result("ILLEGAL_STATE_TRANSITION", nil, nil, "canonical_root_task_mismatch")
+    end
+    if (guard[11] ~= "done" and guard[11] ~= "failed")
+        or (guard[11] == "done" and task.operation_type ~= "TASK_COMPLETE")
+        or (guard[11] == "failed" and task.operation_type ~= "TASK_FAIL") then
+        return result("ILLEGAL_STATE_TRANSITION", nil, nil, "canonical_root_task_not_terminal")
+    end
+    if bound.identity_sha256 ~= guard[1] or bound.operation_id ~= guard[2]
+        or bound.transition_id ~= guard[4] or bound.revision ~= tonumber(guard[5])
+        or bound.canonical_command_hash ~= guard[6] or bound.canonical_record_hash ~= guard[7]
+        or bound.state ~= guard[11] or rows[1].state ~= guard[11]
+        or next_state ~= guard[11] or evidence.final_state ~= guard[11]
+        or evidence.task_count ~= 1 or evidence.skipped_count ~= 0
+        or evidence.done_count ~= (guard[11] == "done" and 1 or 0)
+        or evidence.failed_count ~= (guard[11] == "failed" and 1 or 0) then
+        return result("ILLEGAL_STATE_TRANSITION", nil, nil, "canonical_root_task_evidence_mismatch")
     end
 end
 

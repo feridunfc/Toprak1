@@ -283,6 +283,15 @@ class _FakeAuthorityStore:
         self.snapshot_revision = 1
         self.snapshot_state = "pending"
         self.raise_after_commit_once = False
+        from hfa.authority import evaluate_authority_commit
+        from hfa_control.run_create_authority import build_run_create_command, build_run_create_context
+        from tests.unit.test_run_create_authority_contract import value
+        command = build_run_create_command(value(run_id="run-1"))
+        self.creation = evaluate_authority_commit(
+            context=build_run_create_context(command), command=command,
+            current_revision=0, current_state=None, receipt_probe=None,
+            committed_at_ms=100, correlation_id=None,
+        ).commit_plan
 
     async def initialise(self):
         return None
@@ -291,16 +300,18 @@ class _FakeAuthorityStore:
         return SimpleNamespace(
             revision=self.snapshot_revision,
             state=self.snapshot_state,
+            operation_id=(self.plan or self.creation).record.operation_id,
         )
 
     async def load_receipt_probe(self, _identity, operation_id):
-        if self.plan is None or self.plan.record.operation_id != operation_id:
+        selected = self.creation if operation_id == self.creation.record.operation_id else self.plan
+        if selected is None or selected.record.operation_id != operation_id:
             return None
         from hfa.authority import ReceiptProbe
 
         return ReceiptProbe(
-            receipt=self.plan.receipt,
-            canonical_store_record=self.plan.record,
+            receipt=selected.receipt,
+            canonical_store_record=selected.record,
         )
 
     async def commit(self, plan):
@@ -326,6 +337,16 @@ class _FakeAuthorityStore:
         return "[]"
 
 
+def _protocol_binding(*args, **kwargs):
+    """Mock witness preparation for ordering tests; real guards have F02B tests."""
+    from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding
+    binding = RunTerminateAuthorityBinding(*args, **kwargs)
+    async def capture(**fields):
+        return (await binding.proof_manager.capture(**fields)).proof
+    binding._capture_canonical_proof = capture
+    return binding
+
+
 @pytest.mark.asyncio
 async def test_binding_commits_canonical_authority_before_projection():
     from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding
@@ -334,7 +355,7 @@ async def test_binding_commits_canonical_authority_before_projection():
     store = _FakeAuthorityStore(events)
     proof_manager = _FakeProofManager(proof())
     projection = _FakeProjection(events)
-    binding = RunTerminateAuthorityBinding(
+    binding = _protocol_binding(
         SimpleNamespace(),
         store=store,
         proof_manager=proof_manager,
@@ -361,7 +382,7 @@ async def test_durable_receipt_retry_does_not_recapture_mutable_tasks():
     store = _FakeAuthorityStore(events)
     proof_manager = _FakeProofManager(proof())
     projection = _FakeProjection(events)
-    binding = RunTerminateAuthorityBinding(
+    binding = _protocol_binding(
         SimpleNamespace(),
         store=store,
         proof_manager=proof_manager,
@@ -395,7 +416,7 @@ async def test_ambiguous_commit_uses_exact_durable_receipt_before_projection():
     events = []
     store = _FakeAuthorityStore(events)
     store.raise_after_commit_once = True
-    binding = RunTerminateAuthorityBinding(
+    binding = _protocol_binding(
         SimpleNamespace(),
         store=store,
         proof_manager=_FakeProofManager(proof()),
