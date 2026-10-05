@@ -8,6 +8,7 @@ projections.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import time
@@ -401,6 +402,8 @@ class RunCreateProjectionInput:
     state_ttl_seconds: int
     control_stream: str
     event_fields: Mapping[str, str]
+    canonical_head_keys: tuple[str, ...] = ()
+    canonical_head_witness: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -426,7 +429,11 @@ class RunCreateProjectionManager:
         if self._initialised:
             return
         if self._loader is None:
-            self._loader = LuaScriptLoader(self._redis, _projection_lua_path())
+            path = _projection_lua_path()
+            self._loader = LuaScriptLoader(
+                self._redis, path,
+                helpers={"validate_authority_head": path.with_name("authority_head_validate.lua")},
+            )
         await self._loader.load()
         self._initialised = True
 
@@ -495,11 +502,12 @@ class RunCreateProjectionManager:
         await self.initialise()
         assert self._loader is not None
         raw = await self._loader.run(
-            num_keys=3,
+            num_keys=3 + len(value.canonical_head_keys),
             keys=[
                 self.receipt_key(operation_id),
                 RedisKey.run_state(run_id),
                 control_stream,
+                *value.canonical_head_keys,
             ],
             args=[
                 operation_id,
@@ -515,6 +523,7 @@ class RunCreateProjectionManager:
                 event_hash,
                 str(RedisTTL.STREAM_MAXLEN),
                 str(len(fields)),
+                json.dumps(value.canonical_head_witness, separators=(",", ":")),
                 *flattened,
             ],
         )
@@ -1183,6 +1192,9 @@ class RunCreateAuthorityBinding:
             )
 
         event_fields = _stable_event_fields(committed_value, record.operation_id)
+        # Keep the evaluated RUN_CREATE record, not a subsequently observed head.
+        # Lua revalidates this witness before the first projection effect.
+        own_keys, own_witness = self.store.authority_head_witness(record, canonical_receipt)
         projection = RunCreateProjectionInput(
             operation_id=record.operation_id,
             reservation_proof_sha256=reservation.proof_sha256,
@@ -1196,6 +1208,8 @@ class RunCreateAuthorityBinding:
             state_ttl_seconds=committed_value.run_state_ttl_seconds,
             control_stream=committed_value.control_stream,
             event_fields=event_fields,
+            canonical_head_keys=tuple(own_keys),
+            canonical_head_witness=tuple(own_witness),
         )
         assert self.projection_manager is not None
         try:

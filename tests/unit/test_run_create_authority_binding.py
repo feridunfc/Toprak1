@@ -11,6 +11,7 @@ from hfa.authority import (
     ReceiptProbe,
     RedisAuthorityCommitResult,
     RedisAuthorityCommitStatus,
+    RedisCanonicalAuthorityStore,
 )
 from hfa.governance.admission_resource_reservation import (
     AdmissionResourceReservationReceipt,
@@ -136,6 +137,10 @@ class Keyspace:
 
 
 class Store:
+    def authority_head_witness(self, record, receipt):
+        # Use the production serializer; this fixture does not execute Redis.
+        return RedisCanonicalAuthorityStore(None).authority_head_witness(record, receipt)
+
     def __init__(self, order):
         self.order = order
         self.record = None

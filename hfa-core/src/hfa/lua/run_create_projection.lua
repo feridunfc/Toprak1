@@ -3,8 +3,10 @@
 -- KEYS[1] projection receipt HASH
 -- KEYS[2] legacy RUN state STRING
 -- KEYS[3] control STREAM
+-- KEYS[4..9] existing own RUN head/index/receipt/record/log/outbox
 --
--- ARGV[1..13] immutable proof and projection parameters; remaining values are
+-- ARGV[1..13] immutable proof and projection parameters; ARGV[14] exact own
+-- head-validation witness; remaining values are
 -- event field-name/value pairs.
 
 local receipt_key = KEYS[1]
@@ -38,7 +40,7 @@ end
 if not field_count or field_count <= 0 then
     return conflict("invalid_event_field_count")
 end
-if #ARGV ~= 13 + (field_count * 2) then
+if #ARGV ~= 14 + (field_count * 2) then
     return conflict("event_field_arity_mismatch")
 end
 
@@ -73,6 +75,29 @@ if receipt_type == "hash" then
     return {"canonical_run_create_already_projected", stream_entry_id, ""}
 end
 
+-- Exact projection receipts above remain read-only duplicates. A mutation
+-- requires the evaluated canonical RUN_CREATE proof in this same invocation.
+local ok, own = pcall(cjson.decode, ARGV[14] or '')
+if #KEYS ~= 9 or not ok or type(own) ~= 'table' or #own ~= 14 then
+    return conflict('canonical_run_create_proof_missing')
+end
+for index=1,14 do
+    if type(own[index]) ~= 'string' then
+        return conflict('canonical_run_create_proof_invalid')
+    end
+end
+if own[2] ~= operation_id or own[4] ~= transition_id or own[5] ~= revision
+    or own[6] ~= command_hash or own[7] ~= record_hash
+    or own[11] ~= 'pending' or own[12] ~= '0' or revision ~= '1' then
+    return conflict('canonical_run_create_proof_mismatch')
+end
+local checked = validate_authority_head(
+    {KEYS[4], KEYS[5], KEYS[6], KEYS[7], KEYS[8], KEYS[9]}, own
+)
+if checked[1] ~= 'VALID' then
+    return conflict('canonical_run_create_proof_conflict')
+end
+
 local state_type = redis.call("TYPE", state_key)["ok"]
 if state_type ~= "none" then
     return conflict("legacy_run_state_exists_without_projection_receipt")
@@ -104,7 +129,7 @@ end
 
 local event_args = {}
 for index = 1, field_count * 2 do
-    event_args[index] = ARGV[13 + index]
+    event_args[index] = ARGV[14 + index]
 end
 
 -- All Redis key types and argument shapes were validated before the first write.
