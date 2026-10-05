@@ -13,6 +13,7 @@
 --  5 RUN result HASH
 --  6 cp_running ZSET
 --  7 results STREAM
+--  8..13 existing own RUN head/index/receipt/record/log/outbox
 --
 -- ARGV
 --  1 operation_id
@@ -38,6 +39,7 @@
 -- 21 results_stream_maxlen
 -- 22 result_payload_json
 -- 23 result_payload_sha256
+-- 24 exact own RUN head-validation witness
 --
 -- Return: [status, stream_entry_id, detail]
 
@@ -313,6 +315,30 @@ if receipt_type == "hash" then
         -- co-evicted durable evidence index remain the replay authority proof.
     end
     return result("canonical_run_terminate_already_projected", stream_entry_id, "")
+end
+
+-- Exact already-projected receipts above are read-only. Before any mutation,
+-- prove the accepted RUN_TERMINATE decision still matches its immutable witness.
+-- This is not F02B TASK authorization and never reads TASK keys.
+local ok, own = pcall(cjson.decode, ARGV[24] or '')
+if #KEYS ~= 13 or not ok or type(own) ~= 'table' or #own ~= 14 then
+    return conflict('canonical_run_terminate_proof_missing')
+end
+for index=1,14 do
+    if type(own[index]) ~= 'string' then
+        return conflict('canonical_run_terminate_proof_invalid')
+    end
+end
+if own[2] ~= operation_id or own[4] ~= transition_id or own[5] ~= revision
+    or own[6] ~= command_hash or own[7] ~= record_hash
+    or own[11] ~= final_state or own[12] ~= '0' then
+    return conflict('canonical_run_terminate_proof_mismatch')
+end
+local checked = validate_authority_head(
+    {KEYS[8], KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13]}, own
+)
+if checked[1] ~= 'VALID' then
+    return conflict('canonical_run_terminate_proof_conflict')
 end
 
 local contract_ok, contract_detail = validate_index_contract()

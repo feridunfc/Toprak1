@@ -546,6 +546,8 @@ class RunTerminateProjectionInput:
     canonical_command_hash: str
     canonical_revision: int
     proof: TerminalAggregateProof
+    canonical_head_keys: tuple[str, ...] = ()
+    canonical_head_witness: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -571,6 +573,7 @@ class RunTerminateProjectionManager:
             self._loader = LuaScriptLoader(
                 self._redis,
                 _lua_path("run_terminate_projection.lua"),
+                helpers={"validate_authority_head": _lua_path("authority_head_validate.lua")},
             )
         await self._loader.load()
 
@@ -600,7 +603,7 @@ class RunTerminateProjectionManager:
         payload_json = canonical_json_bytes(payload).decode("utf-8")
         payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         raw = await self._loader.run(
-            num_keys=7,
+            num_keys=7 + len(value.canonical_head_keys),
             keys=[
                 self.receipt_key(operation_id),
                 RedisKey.run_terminal_event_index(),
@@ -609,6 +612,7 @@ class RunTerminateProjectionManager:
                 RedisKey.run_result(proof.run_id),
                 RedisKey.cp_running(),
                 RedisKey.stream_results(),
+                *value.canonical_head_keys,
             ],
             args=[
                 operation_id,
@@ -634,6 +638,7 @@ class RunTerminateProjectionManager:
                 str(int(getattr(RedisTTL, "STREAM_MAXLEN", 100000))),
                 payload_json,
                 payload_hash,
+                json.dumps(value.canonical_head_witness, separators=(",", ":")),
             ],
         )
         if not isinstance(raw, (list, tuple)) or len(raw) < 3:
@@ -1113,6 +1118,9 @@ class RunTerminateAuthorityBinding:
         )
 
         try:
+            # F04.3 validates only the already-accepted RUN decision at effect
+            # time. Do not recapture TASK authority or change settlement order.
+            own_keys, own_witness = self.store.authority_head_witness(record, canonical_receipt)
             projected = await self.projection_manager.project(
                 RunTerminateProjectionInput(
                     operation_id=record.operation_id,
@@ -1122,6 +1130,8 @@ class RunTerminateAuthorityBinding:
                     canonical_command_hash=record.canonical_command_hash,
                     canonical_revision=record.to_revision,
                     proof=proof,
+                    canonical_head_keys=tuple(own_keys),
+                    canonical_head_witness=tuple(own_witness),
                 )
             )
         except RunTerminateAuthorityError as exc:

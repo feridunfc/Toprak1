@@ -277,6 +277,10 @@ class _FakeKeyspace:
 
 
 class _FakeAuthorityStore:
+    def authority_head_witness(self, record, receipt):
+        from hfa.authority import RedisCanonicalAuthorityStore
+        return RedisCanonicalAuthorityStore(None).authority_head_witness(record, receipt)
+
     def __init__(self, events):
         self.events = events
         self.plan = None

@@ -54,15 +54,43 @@ def _proof(run_id: str, *, tenant_id: str = "tenant-a", final_state: str = "done
     )
 
 
-def _input(proof: TerminalAggregateProof):
+async def _input(redis, proof: TerminalAggregateProof):
+    # These event-hardening tests exercise already-durable historical decisions.
+    # F04.3 requires their exact own RUN proof; never fake a production admission.
+    from hfa.authority import RedisCanonicalAuthorityStore, OperationType, evaluate_authority_commit
+    from hfa_control.run_terminate_authority import build_run_terminate_command, build_run_terminate_context
+    from tests.unit.test_f03_terminal_ordering import plan
+    from tests.canonical_history import install_historical_run_termination
+
+    store = RedisCanonicalAuthorityStore(redis)
+    await store.initialise()
+    command = build_run_terminate_command(proof)
+    identity = command.aggregate_identity
+    head = await store.get_aggregate_snapshot(identity)
+    if head is None:
+        assert (await store.commit(plan(identity, OperationType.RUN_CREATE, None, 'pending', 0,
+                                        ['RUN_STATUS_PROJECTION']))).committed
+        head = await store.get_aggregate_snapshot(identity)
+    evaluated = evaluate_authority_commit(
+        context=build_run_terminate_context(command), command=command,
+        current_revision=1, current_state='pending', receipt_probe=None,
+        committed_at_ms=proof.finalized_at_ms, correlation_id=None,
+    )
+    assert evaluated.commit_plan is not None
+    if head.state == 'pending':
+        await install_historical_run_termination(redis, store, evaluated.commit_plan)
+    record, receipt = evaluated.commit_plan.record, evaluated.commit_plan.receipt
+    keys, witness = store.authority_head_witness(record, receipt)
     return RunTerminateProjectionInput(
         operation_id=run_terminate_operation_id(proof.run_id, proof.proof_sha256),
         terminal_proof_sha256=proof.proof_sha256,
-        canonical_transition_id="transition-1",
-        canonical_record_hash="b" * 64,
-        canonical_command_hash="c" * 64,
+        canonical_transition_id=record.transition_id,
+        canonical_record_hash=record.canonical_record_hash,
+        canonical_command_hash=record.canonical_command_hash,
         canonical_revision=2,
         proof=proof,
+        canonical_head_keys=tuple(keys),
+        canonical_head_witness=tuple(witness),
     )
 
 
@@ -104,7 +132,7 @@ async def test_migration_not_ready_is_zero_mutation(real_redis):
     manager = RunTerminateProjectionManager(real_redis)
     await manager.initialise()
     with pytest.raises(RunTerminateAuthorityError, match="terminal_event_migration_not_ready"):
-        await manager.project(_input(proof))
+        await manager.project((await _input(real_redis, proof)))
     assert await real_redis.get(RedisKey.run_state(proof.run_id)) == "running"
     assert await real_redis.exists(RedisKey.run_result(proof.run_id)) == 0
     assert await real_redis.hget(RedisKey.run_terminal_event_index(), _evidence_field(proof.run_id)) is None
@@ -116,13 +144,13 @@ async def test_first_projection_writes_event_evidence_and_receipt_atomically(rea
     await _seed_projection_footprint(real_redis, proof.run_id)
     await _ready(real_redis)
     manager = RunTerminateProjectionManager(real_redis)
-    result = await manager.project(_input(proof))
+    result = await manager.project((await _input(real_redis, proof)))
     assert result.status == PROJECTED_STATUS
     evidence = await _evidence(real_redis, proof.run_id)
     assert evidence["source"] == "canonical_run_terminate"
     assert evidence["stream_entry_id"] == result.stream_entry_id
     assert await real_redis.ttl(RedisKey.run_terminal_event_index()) == -1
-    receipt = await real_redis.hgetall(manager.receipt_key(_input(proof).operation_id))
+    receipt = await real_redis.hgetall(manager.receipt_key((await _input(real_redis, proof)).operation_id))
     assert receipt["stream_entry_id"] == result.stream_entry_id
     assert await real_redis.xlen(RedisKey.stream_results()) == 1
 
@@ -132,9 +160,9 @@ async def test_exact_retry_survives_stream_trimming(real_redis):
     await _seed_projection_footprint(real_redis, proof.run_id)
     await _ready(real_redis)
     manager = RunTerminateProjectionManager(real_redis)
-    first = await manager.project(_input(proof))
+    first = await manager.project((await _input(real_redis, proof)))
     assert await real_redis.xdel(RedisKey.stream_results(), first.stream_entry_id) == 1
-    retry = await RunTerminateProjectionManager(real_redis).project(_input(proof))
+    retry = await RunTerminateProjectionManager(real_redis).project((await _input(real_redis, proof)))
     assert retry.status == ALREADY_PROJECTED_STATUS
     assert retry.stream_entry_id == first.stream_entry_id
     assert (await _evidence(real_redis, proof.run_id))["event_id"]
@@ -145,10 +173,10 @@ async def test_receipt_without_durable_evidence_fails_closed(real_redis):
     await _seed_projection_footprint(real_redis, proof.run_id)
     await _ready(real_redis)
     manager = RunTerminateProjectionManager(real_redis)
-    await manager.project(_input(proof))
+    await manager.project((await _input(real_redis, proof)))
     await real_redis.hdel(RedisKey.run_terminal_event_index(), _evidence_field(proof.run_id))
     with pytest.raises(RunTerminateAuthorityError, match="terminal_event_evidence_missing"):
-        await manager.project(_input(proof))
+        await manager.project((await _input(real_redis, proof)))
     assert await real_redis.xlen(RedisKey.stream_results()) == 1
 
 
@@ -157,10 +185,10 @@ async def test_index_eviction_removes_readiness_and_receipt_retry_fails_closed(r
     await _seed_projection_footprint(real_redis, proof.run_id)
     await _ready(real_redis)
     manager = RunTerminateProjectionManager(real_redis)
-    await manager.project(_input(proof))
+    await manager.project((await _input(real_redis, proof)))
     await real_redis.delete(RedisKey.run_terminal_event_index())
     with pytest.raises(RunTerminateAuthorityError, match="terminal_event_index_missing_or_wrong_type"):
-        await manager.project(_input(proof))
+        await manager.project((await _input(real_redis, proof)))
     assert await real_redis.xlen(RedisKey.stream_results()) == 1
 
 
@@ -185,7 +213,7 @@ async def test_preexisting_historical_evidence_blocks_second_terminal_event(real
     )
     manager = RunTerminateProjectionManager(real_redis)
     with pytest.raises(RunTerminateAuthorityError, match="preexisting_terminal_event_evidence"):
-        await manager.project(_input(proof))
+        await manager.project((await _input(real_redis, proof)))
     assert await real_redis.xlen(RedisKey.stream_results()) == 0
     assert await real_redis.get(RedisKey.run_state(proof.run_id)) == "running"
 
@@ -195,10 +223,10 @@ async def test_changed_proof_after_projection_fails_without_second_event(real_re
     await _seed_projection_footprint(real_redis, first_proof.run_id)
     await _ready(real_redis)
     manager = RunTerminateProjectionManager(real_redis)
-    await manager.project(_input(first_proof))
+    await manager.project((await _input(real_redis, first_proof)))
     changed = _proof(first_proof.run_id, proof_hash="d" * 64)
     with pytest.raises(RunTerminateAuthorityError):
-        await manager.project(_input(changed))
+        await manager.project((await _input(real_redis, changed)))
     assert await real_redis.xlen(RedisKey.stream_results()) == 1
 
 
@@ -269,7 +297,7 @@ async def test_large_results_stream_contract_has_no_online_full_scan(real_redis)
     assert migration.scanned_entries == 50_000
     proof = _proof("run-large-stream")
     await _seed_projection_footprint(real_redis, proof.run_id)
-    projected = await RunTerminateProjectionManager(real_redis).project(_input(proof))
+    projected = await RunTerminateProjectionManager(real_redis).project((await _input(real_redis, proof)))
     assert projected.status == PROJECTED_STATUS
 
 
@@ -325,7 +353,7 @@ async def test_legacy_run_terminate_writer_creates_evidence_and_blocks_canonical
     )
     proof = _proof(run_id)
     with pytest.raises(RunTerminateAuthorityError, match="preexisting_terminal_event_evidence"):
-        await RunTerminateProjectionManager(real_redis).project(_input(proof))
+        await RunTerminateProjectionManager(real_redis).project((await _input(real_redis, proof)))
     assert await real_redis.xlen(RedisKey.stream_results()) == 1
 
 
@@ -369,7 +397,7 @@ async def test_wrong_index_key_type_blocks_canonical_projection_with_zero_mutati
     await real_redis.set(RedisKey.run_terminal_event_index(), "corrupt")
     manager = RunTerminateProjectionManager(real_redis)
     with pytest.raises(RunTerminateAuthorityError, match="terminal_event_index_missing_or_wrong_type"):
-        await manager.project(_input(proof))
+        await manager.project((await _input(real_redis, proof)))
     assert await real_redis.get(RedisKey.run_state(proof.run_id)) == "running"
     assert await real_redis.exists(RedisKey.run_result(proof.run_id)) == 0
     assert await real_redis.xlen(RedisKey.stream_results()) == 0
@@ -380,7 +408,7 @@ async def test_receipt_evidence_mismatch_blocks_retry_without_second_event(real_
     await _seed_projection_footprint(real_redis, proof.run_id)
     await _ready(real_redis)
     manager = RunTerminateProjectionManager(real_redis)
-    first = await manager.project(_input(proof))
+    first = await manager.project((await _input(real_redis, proof)))
     assert first.status == PROJECTED_STATUS
     evidence = await _evidence(real_redis, proof.run_id)
     evidence["canonical_record_hash"] = "d" * 64
@@ -390,6 +418,6 @@ async def test_receipt_evidence_mismatch_blocks_retry_without_second_event(real_
         json.dumps(evidence, sort_keys=True, separators=(",", ":")),
     )
     with pytest.raises(RunTerminateAuthorityError, match="terminal_event_evidence_mismatch"):
-        await RunTerminateProjectionManager(real_redis).project(_input(proof))
+        await RunTerminateProjectionManager(real_redis).project((await _input(real_redis, proof)))
     assert await real_redis.xlen(RedisKey.stream_results()) == 1
     assert await real_redis.get(RedisKey.run_state(proof.run_id)) == "done"
