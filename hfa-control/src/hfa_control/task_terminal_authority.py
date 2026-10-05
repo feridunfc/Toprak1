@@ -535,7 +535,7 @@ class TaskTerminalProjectionManager:
     async def _validate_durable_authority(
         self,
         projection: TaskTerminalCanonicalProjectionInput,
-    ) -> None:
+    ) -> tuple[list[str], list[str], list[str]]:
         identity = CanonicalAggregateIdentity(
             aggregate_type=AggregateType.TASK,
             run_id=projection.run_id,
@@ -559,7 +559,7 @@ class TaskTerminalProjectionManager:
         terminal_record, terminal_receipt = self._require_probe_record(
             identity, terminal_probe, role="terminal"
         )
-        claim_record, _claim_receipt = self._require_probe_record(
+        claim_record, claim_receipt = self._require_probe_record(
             identity, claim_probe, role="TASK_CLAIM"
         )
 
@@ -718,6 +718,10 @@ class TaskTerminalProjectionManager:
                 detail=str(exc),
             ) from exc
 
+        own_keys, own_args = self._store.authority_head_witness(terminal_record, terminal_receipt)
+        _, claim_args = self._store.authority_head_witness(claim_record, claim_receipt)
+        return own_keys, own_args, claim_args
+
     async def project(
         self,
         value: TaskTerminalCanonicalProjectionInput,
@@ -726,17 +730,16 @@ class TaskTerminalProjectionManager:
         await self.initialise()
         assert self._loader is not None
 
-        # R2 authority-proof closure: no Lua mutation is reachable until both
-        # predecessor TASK_CLAIM evidence and the exact terminal record+receipt
-        # are proven durable in the canonical store and equal the current head.
-        await self._validate_durable_authority(projection)
+        # Python prepares the exact evaluated witness. F04 revalidates it inside
+        # projection Lua before any mutation; this observation is not authority.
+        own_keys, own_args, claim_args = await self._validate_durable_authority(projection)
         parent_keys, parent_args = await self._store.parent_run_guard(projection.run_id)
 
         child_state_pfx = DagRedisKey.task_state_prefix()
         child_remaining_pfx = DagRedisKey.task_remaining_deps_prefix()
         child_emitted_pfx = DagRedisKey.task_ready_emitted_prefix()
         raw = await self._loader.run(
-            num_keys=15,
+            num_keys=21,
             keys=[
                 DagRedisKey.task_state(projection.task_id),
                 DagRedisKey.task_meta(projection.task_id),
@@ -748,6 +751,7 @@ class TaskTerminalProjectionManager:
                 RedisKey.runtime_truth_conflict_index(),
                 RedisKey.runtime_truth_conflict_stream(),
                 *parent_keys,
+                *own_keys,
             ],
             args=[
                 projection.task_id,
@@ -785,6 +789,8 @@ class TaskTerminalProjectionManager:
                 str(projection.claim_epoch),
                 projection.output_sha256,
                 json.dumps(parent_args, separators=(",", ":")),
+                json.dumps(own_args, separators=(",", ":")),
+                json.dumps(claim_args, separators=(",", ":")),
             ],
         )
         if not isinstance(raw, (list, tuple)) or len(raw) < 4:

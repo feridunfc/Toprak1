@@ -628,6 +628,26 @@ class RedisCanonicalAuthorityStore:
             snapshot.projection_intents_json, str(snapshot.updated_at_ms),
         ]
 
+    def authority_head_witness(
+        self, record: _core.CanonicalTransitionRecord, receipt: _core.OperationReceipt,
+    ) -> tuple[list[str], list[str]]:
+        """Serialize the evaluated immutable proof, without rereading a newer head.
+
+        This is only a witness: the consuming Lua must validate it before writes.
+        The argument layout is the existing authority_head_validate.lua contract.
+        """
+        keyspace = self.keyspace(record.aggregate_identity_sha256)
+        return keyspace.commit_keys()[:6], [
+            record.aggregate_identity_sha256, record.operation_id,
+            keyspace.operation_field(record.operation_id), record.transition_id,
+            str(record.to_revision), record.canonical_command_hash,
+            record.canonical_record_hash, _canonical_text(_record_payload(record)),
+            _canonical_text(_receipt_payload(receipt)),
+            _canonical_text(_transition_index_payload(record)),
+            record.next_state or "", "1" if record.next_state is None else "0",
+            _canonical_text(record.durable_projection_intents), str(record.committed_at_ms),
+        ]
+
     async def _task_admit_parent_guard(self, run_id: str) -> tuple[list[str], list[str], list[str]]:
         keys, guard = await self.parent_run_guard(run_id, allow_absent=True)
         if not guard:

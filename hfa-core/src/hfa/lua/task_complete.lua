@@ -49,7 +49,10 @@
 -- 33  canonical_claim_epoch
 -- 34  output_sha256
 -- 35  parent RUN exact head-validation arguments (canonical path only)
+-- 36  own TASK terminal exact head-validation arguments
+-- 37  existing predecessor TASK_CLAIM witness (same argument layout)
 -- Canonical KEYS[10..15]: existing RUN head/index/receipt/record/log/outbox.
+-- Canonical KEYS[16..21]: existing TASK head/index/receipt/record/log/outbox.
 --
 -- RETURN
 -- { committed_flag, status_string, unlocked_count, already_terminal_flag, blocked_count }
@@ -444,8 +447,50 @@ if is_terminal(current_state) then
 end
 local canonical_run_terminal = false
 if canonical_projection then
+    -- F04: validate the evaluated own proof in this invocation, before even
+    -- conflict-event writes. Exact C above remains entirely read-only.
+    local own_ok, own = pcall(cjson.decode, ARGV[36] or '')
+    local claim_ok, claim = pcall(cjson.decode, ARGV[37] or '')
+    if #KEYS ~= 21 or not own_ok or type(own) ~= 'table' or #own ~= 14
+        or not claim_ok or type(claim) ~= 'table' or #claim ~= 14 then
+        return {0, 'canonical_task_proof_conflict', 0, 0, 0}
+    end
+    for i=1,14 do
+        if type(own[i]) ~= 'string' or type(claim[i]) ~= 'string' then
+            return {0, 'canonical_task_proof_conflict', 0, 0, 0}
+        end
+    end
+    if own[2] ~= canonical_operation_id or own[4] ~= canonical_transition_id
+        or own[5] ~= canonical_revision or own[6] ~= canonical_command_hash
+        or own[7] ~= canonical_record_hash or own[11] ~= terminal_state
+        or own[12] ~= '0' or claim[1] ~= own[1]
+        or claim[2] ~= claim_operation_id or claim[4] ~= claim_transition_id
+        or claim[5] ~= claim_revision or claim[6] ~= claim_command_hash
+        or claim[7] ~= claim_record_hash or claim[11] ~= 'running' then
+        return {0, 'canonical_task_proof_conflict', 0, 0, 0}
+    end
+    local checked = validate_parent_run_head(
+        {KEYS[16], KEYS[17], KEYS[18], KEYS[19], KEYS[20], KEYS[21]}, own
+    )
+    if checked[1] ~= 'VALID' then
+        return {0, 'canonical_task_proof_conflict', 0, 0, 0}
+    end
+    -- The predecessor is historical, not the current head. Compare its exact
+    -- record/receipt/index in the same TASK keyspace, without a lifecycle decision.
+    local function exact_envelope(key, field, expected)
+        local raw = redis.call('HGET', key, field)
+        if not raw then return false end
+        local ok, env = pcall(cjson.decode, raw)
+        return ok and type(env) == 'table' and type(env.payload) == 'string'
+            and env.payload == expected and redis.sha1hex(env.payload) == env.storage_sha1
+    end
+    if not exact_envelope(KEYS[19], claim[3], claim[8])
+        or not exact_envelope(KEYS[18], claim[3], claim[9])
+        or not exact_envelope(KEYS[17], claim[4], claim[10]) then
+        return {0, 'canonical_task_proof_conflict', 0, 0, 0}
+    end
     local ok, guard = pcall(cjson.decode, ARGV[35] or '')
-    if #KEYS ~= 15 or not ok or type(guard) ~= 'table' or #guard ~= 14 then
+    if not ok or type(guard) ~= 'table' or #guard ~= 14 then
         return {0, 'canonical_run_guard_missing', 0, 0, 0}
     end
     local checked = validate_parent_run_head(
