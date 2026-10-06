@@ -263,12 +263,12 @@ async def test_projection_failure_keeps_commit_and_retry_projects(
     original = binding.legacy_dispatch
     calls = 0
 
-    async def flaky(value):
+    async def flaky(value, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("projection unavailable")
-        return await original(value)
+        return await original(value, **kwargs)
 
     monkeypatch.setattr(
         binding,

@@ -12,6 +12,7 @@
 -- 8  run_state_key
 -- 9  global_runtime_truth_conflict_index
 -- 10 global_runtime_truth_conflict_stream
+-- 11..16 own TASK canonical head/index/receipt/record/log/outbox
 --
 -- ARGV 1..19 preserve the pre-Sprint-84.1 contract.
 -- 20 dispatch_attempt
@@ -21,6 +22,8 @@
 -- 24 canonical_command_hash
 -- 25 canonical_revision
 -- 26 canonical_operation_id
+-- 27 canonical_projection: 1 or 0
+-- 28 exact canonical own-head witness JSON
 
 local task_state_key        = KEYS[1]
 local task_meta_key         = KEYS[2]
@@ -62,7 +65,68 @@ local canonical_operation_id = ARGV[26] or ''
 
 local OPERATION = 'TASK_DISPATCH'
 local TRUTH_COUNT_FIELD = '__runtime_truth_conflict_count'
-local canonical_projection = canonical_transition_id ~= ''
+local canonical_projection = ARGV[27] == '1'
+
+-- F04.4B: proof and effects share this Lua invocation. Run this before
+-- runtime duplicate checks AND truth-conflict events (which also mutate).
+-- Projection metadata is bound to the accepted record, never runtime authority.
+if canonical_projection then
+    local function conflict() return {'canonical_task_dispatch_proof_conflict'} end
+    local ok, own = pcall(cjson.decode, ARGV[28] or '')
+    if #KEYS ~= 16 or #ARGV ~= 28 or not ok or type(own) ~= 'table' or #own ~= 14 then
+        return conflict()
+    end
+    for i=1,14 do
+        if type(own[i]) ~= 'string' then return conflict() end
+    end
+    local decoded, record = pcall(cjson.decode, own[8])
+    if not decoded or type(record) ~= 'table' then return conflict() end
+    local identity = record.canonical_aggregate_identity
+    local meta = record.authoritative_metadata_changes
+    local effects = record.child_effects
+    if type(identity) ~= 'table' or identity.aggregate_type ~= 'task'
+        or identity.run_id ~= run_id or identity.task_id ~= task_id
+        or record.operation_type ~= 'TASK_DISPATCH'
+        or own[2] ~= 'task-dispatch:v1:' .. own[1] .. ':attempt:' .. dispatch_attempt
+        or own[2] ~= canonical_operation_id or own[4] ~= canonical_transition_id
+        or own[5] ~= canonical_revision or own[6] ~= canonical_command_hash
+        or own[7] ~= canonical_record_hash or own[11] ~= 'scheduled' or own[12] ~= '0'
+        or type(meta) ~= 'table' or type(effects) ~= 'table' then
+        return conflict()
+    end
+    if meta.task_id ~= task_id or meta.run_id ~= run_id or meta.tenant_id ~= tenant_id
+        or meta.worker_id ~= worker_id or meta.worker_group ~= worker_group
+        or meta.scheduler_epoch ~= scheduler_epoch or meta.dispatch_attempt ~= tonumber(dispatch_attempt)
+        or meta.agent_type ~= agent_type or meta.shard ~= tonumber(shard)
+        or meta.priority ~= tonumber(priority) or meta.admitted_at_ms ~= tonumber(admitted_at)
+        or meta.scheduled_at_ms ~= tonumber(scheduled_at) or meta.policy ~= policy
+        or meta.region ~= region or meta.payload_json ~= payload_json
+        or meta.trace_parent ~= trace_parent or meta.trace_state ~= trace_state
+        or meta.scheduled_zset ~= task_scheduled_zset or meta.running_zset ~= task_running_zset
+        or meta.ready_queue ~= tenant_ready_queue or meta.control_stream ~= control_stream
+        or meta.shard_stream ~= shard_stream then
+        return conflict()
+    end
+    local reservation = effects.worker_reservation
+    local intents = record.durable_projection_intents
+    if type(reservation) ~= 'table' or reservation.worker_id ~= worker_id
+        or reservation.task_id ~= task_id or reservation.scheduler_epoch ~= scheduler_epoch
+        or type(intents) ~= 'table' or #intents ~= 2
+        or type(intents[1]) ~= 'table' or intents[1].kind ~= 'CONTROL_NOTIFICATION'
+        or intents[1].stream ~= control_stream
+        or type(intents[2]) ~= 'table' or intents[2].kind ~= 'TASK_REQUEST_MESSAGE'
+        or intents[2].stream ~= shard_stream then
+        return conflict()
+    end
+    local checked = validate_authority_head(
+        {KEYS[11], KEYS[12], KEYS[13], KEYS[14], KEYS[15], KEYS[16]}, own
+    )
+    if checked[1] ~= 'VALID' then return conflict() end
+elseif (ARGV[27] ~= nil and ARGV[27] ~= '0') or #KEYS ~= 10
+    or canonical_transition_id ~= '' or canonical_operation_id ~= ''
+    or canonical_command_hash ~= '' or canonical_record_hash ~= '' then
+    return {'canonical_task_dispatch_proof_conflict'}
+end
 
 local function redis_type(key)
     local reply = redis.call('TYPE', key)

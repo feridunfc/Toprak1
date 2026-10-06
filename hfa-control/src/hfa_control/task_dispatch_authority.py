@@ -341,7 +341,7 @@ def build_task_dispatch_context(
 @dataclass
 class TaskDispatchAuthorityBinding:
     redis: Any
-    legacy_dispatch: Callable[[Any], Awaitable[Any]]
+    legacy_dispatch: Callable[..., Awaitable[Any]]
     store: RedisCanonicalAuthorityStore | None = None
 
     def __post_init__(self) -> None:
@@ -823,8 +823,13 @@ class TaskDispatchAuthorityBinding:
             projection_record,
         )
         try:
+            keys, witness = self.store.authority_head_witness(
+                projection_record, projection_receipt,
+            )
             result = await self.legacy_dispatch(
-                projected_input
+                projected_input,
+                canonical_head_keys=keys,
+                canonical_head_witness=witness,
             )
         except Exception as exc:
             raise TaskDispatchProjectionPendingError(

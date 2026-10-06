@@ -252,7 +252,7 @@ class DagLua:
         for filename, attr in scripts.items():
             helpers = (
                 {"validate_authority_head": _lua_path("authority_head_validate.lua")}
-                if filename == "task_admit.lua" else None
+                if filename in {"task_admit.lua", "task_dispatch_commit.lua"} else None
             )
             loader = LuaScriptLoader(self._redis, _lua_path(filename), helpers=helpers)
             await loader.load()
@@ -389,12 +389,23 @@ class DagLua:
     async def _task_dispatch_canonical_projection(
         self,
         dispatch,
+        *,
+        canonical_head_keys: tuple[str, ...],
+        canonical_head_witness: tuple[str, ...],
     ) -> TaskDispatchCommitResult:
-        return await self._task_dispatch_project(dispatch)
+        return await self._task_dispatch_project(
+            dispatch, canonical_projection=True,
+            canonical_head_keys=canonical_head_keys,
+            canonical_head_witness=canonical_head_witness,
+        )
 
     async def _task_dispatch_project(
         self,
         dispatch,
+        *,
+        canonical_projection: bool = False,
+        canonical_head_keys: tuple[str, ...] = (),
+        canonical_head_witness: tuple[str, ...] = (),
     ) -> TaskDispatchCommitResult:
         await self._ensure_initialised()
         assert self._dispatch_loader is not None
@@ -406,8 +417,8 @@ class DagLua:
         ).strip()
         shard = getattr(dispatch, "shard", 0)
         scheduled_at = (
-            getattr(dispatch, "scheduled_at", None)
-            or int(time.time() * 1000)
+            dispatch.scheduled_at if canonical_projection else
+            (getattr(dispatch, "scheduled_at", None) or int(time.time() * 1000))
         )
         scheduler_epoch = str(
             getattr(dispatch, "scheduler_epoch", "")
@@ -447,6 +458,7 @@ class DagLua:
             RedisKey.runtime_truth_conflict_index(),
             RedisKey.runtime_truth_conflict_stream(),
         ]
+        keys.extend(canonical_head_keys)
         args = [
             task_id,
             run_id,
@@ -535,6 +547,10 @@ class DagLua:
                 or ""
             ),
         ]
+        args.extend([
+            "1" if canonical_projection else "0",
+            json.dumps(canonical_head_witness, separators=(",", ":")),
+        ])
         raw = await self._dispatch_loader.run(
             num_keys=len(keys),
             keys=keys,
