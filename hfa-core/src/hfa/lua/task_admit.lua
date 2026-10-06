@@ -14,6 +14,7 @@
 -- 6  tenant_ready_queue_key   hfa:dag:tenant:<tid>:ready
 -- 7  run_tasks_key            hfa:dag:run:<rid>:tasks
 -- 8  tenant_active_set_key    hfa:dag:tenants:active
+-- 9..14 canonical own TASK head/index/receipt/record/log/outbox (canonical mode)
 --
 -- ─── ARGV ──────────────────────────────────────────────────────────────────
 -- 1   task_id
@@ -31,7 +32,9 @@
 -- 13  ready_ttl
 -- 14  region
 -- 15  policy
--- 16.. child_task_ids          variadic tail
+-- 16  canonical_projection   1 or 0
+-- 17  canonical_head_witness exact accepted TASK_ADMIT witness JSON
+-- 18.. child_task_ids         variadic tail
 --
 -- ─── RETURN ────────────────────────────────────────────────────────────────
 -- { status }   where status ∈ { already_exists, seeded_root, seeded_waiting }
@@ -60,6 +63,57 @@ local task_meta_ttl         = tonumber(ARGV[12]) or 86400
 local ready_ttl             = tonumber(ARGV[13]) or 86400
 local region                = ARGV[14] or ''
 local policy                = ARGV[15] or 'LEAST_LOADED'
+
+-- F04.4A: existing runtime state cannot replace canonical evidence, even on
+-- duplicates. Revalidate the accepted own proof in this invocation before
+-- EXISTS or the first projection write. Legacy mode retains its semantics.
+if ARGV[16] == '1' then
+    local function conflict() return {'canonical_task_admit_proof_conflict'} end
+    local ok, own = pcall(cjson.decode, ARGV[17] or '')
+    if #KEYS ~= 14 or not ok or type(own) ~= 'table' or #own ~= 14 then
+        return conflict()
+    end
+    for i=1,14 do
+        if type(own[i]) ~= 'string' then return conflict() end
+    end
+    local decoded, record = pcall(cjson.decode, own[8])
+    if not decoded or type(record) ~= 'table' then return conflict() end
+    local identity = record.canonical_aggregate_identity
+    local meta = record.authoritative_metadata_changes
+    local effects = record.child_effects
+    local expected_state = dependency_count <= 0 and 'ready' or 'pending'
+    if type(identity) ~= 'table' or identity.aggregate_type ~= 'task'
+        or identity.run_id ~= run_id or identity.task_id ~= task_id
+        or record.operation_type ~= 'TASK_ADMIT'
+        or own[2] ~= 'task-admit:v1:' .. own[1]
+        or own[5] ~= '1' or own[11] ~= expected_state or own[12] ~= '0'
+        or type(meta) ~= 'table' or type(effects) ~= 'table' then
+        return conflict()
+    end
+    -- Bind the contested runtime arguments to this exact accepted record.
+    if meta.task_id ~= task_id or meta.run_id ~= run_id or meta.tenant_id ~= tenant_id
+        or meta.agent_type ~= agent_type or meta.priority ~= tonumber(priority)
+        or meta.admitted_at_ms ~= tonumber(admitted_at) or meta.payload_json ~= payload_json
+        or meta.trace_parent ~= trace_parent or meta.trace_state ~= trace_state
+        or meta.dependency_count ~= dependency_count or meta.region ~= region
+        or meta.policy ~= policy then
+        return conflict()
+    end
+    local children = effects.child_task_ids
+    local membership = effects.run_tasks_membership
+    if type(children) ~= 'table' or #children ~= #ARGV - 17
+        or type(membership) ~= 'table' or membership.run_id ~= run_id
+        or membership.task_id ~= task_id then return conflict() end
+    for i=1,#children do
+        if children[i] ~= ARGV[17+i] then return conflict() end
+    end
+    local checked = validate_authority_head(
+        {KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14]}, own
+    )
+    if checked[1] ~= 'VALID' then return conflict() end
+elseif ARGV[16] ~= '0' or #KEYS ~= 8 then
+    return {'canonical_task_admit_proof_conflict'}
+end
 
 -- Idempotency guard.
 if redis.call('EXISTS', task_state_key) == 1 then
@@ -90,10 +144,10 @@ redis.call('EXPIRE', task_meta_key, task_meta_ttl)
 redis.call('SET', task_remaining_key, tostring(dependency_count), 'EX', task_state_ttl)
 
 -- Register child task ids.
-for i = 16, #ARGV do
+for i = 18, #ARGV do
     redis.call('SADD', task_children_key, ARGV[i])
 end
-if #ARGV >= 16 then
+if #ARGV >= 18 then
     redis.call('EXPIRE', task_children_key, task_meta_ttl)
 end
 

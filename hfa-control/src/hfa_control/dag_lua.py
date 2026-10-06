@@ -5,6 +5,7 @@ Lua CAS gateway with epoch fencing and Sprint 82 runtime-truth guards.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -249,7 +250,11 @@ class DagLua:
             "task_requeue.lua": "_requeue_loader",
         }
         for filename, attr in scripts.items():
-            loader = LuaScriptLoader(self._redis, _lua_path(filename))
+            helpers = (
+                {"validate_authority_head": _lua_path("authority_head_validate.lua")}
+                if filename == "task_admit.lua" else None
+            )
+            loader = LuaScriptLoader(self._redis, _lua_path(filename), helpers=helpers)
             await loader.load()
             setattr(self, attr, loader)
             sha_preview = loader.sha[:8] if loader.sha else "fallback"
@@ -280,13 +285,24 @@ class DagLua:
             dependency_count_text=str(getattr(seed, "dependency_count", 0)),
         )
 
-    async def _task_admit_canonical_projection(self, seed) -> TaskAdmitResult:
-        return await self._task_admit_project(
+    async def _task_admit_canonical_projection(
+        self, seed, *, canonical_head_keys: tuple[str, ...],
+        canonical_head_witness: tuple[str, ...],
+    ) -> TaskAdmitResult:
+        result = await self._task_admit_project(
             seed,
             priority_text=str(seed.priority),
             admitted_at_text=str(seed.admitted_at),
             dependency_count_text=str(seed.dependency_count),
+            canonical_projection=True,
+            canonical_head_keys=canonical_head_keys,
+            canonical_head_witness=canonical_head_witness,
         )
+        if not result.admitted:
+            from hfa_control.task_admit_authority import TaskAdmitProjectionPendingError
+
+            raise TaskAdmitProjectionPendingError(result.status)
+        return result
 
     async def _task_admit_project(
         self,
@@ -295,6 +311,9 @@ class DagLua:
         priority_text: str,
         admitted_at_text: str,
         dependency_count_text: str,
+        canonical_projection: bool = False,
+        canonical_head_keys: tuple[str, ...] = (),
+        canonical_head_witness: tuple[str, ...] = (),
     ) -> TaskAdmitResult:
         await self._ensure_initialised()
         assert self._admit_loader is not None
@@ -313,6 +332,7 @@ class DagLua:
             DagRedisKey.run_tasks(run_id),
             DagRedisKey.tenant_active_set(),
         ]
+        keys.extend(canonical_head_keys)
         args: list[str] = [
             task_id,
             run_id,
@@ -329,6 +349,8 @@ class DagLua:
             str(int(getattr(RedisTTL, "RUN_META", 86400))),
             getattr(seed, "region", "") or "",
             getattr(seed, "policy", "") or "",
+            "1" if canonical_projection else "0",
+            json.dumps(canonical_head_witness, separators=(",", ":")),
         ] + child_ids
         raw = await self._admit_loader.run(num_keys=len(keys), keys=keys, args=args)
         status = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])

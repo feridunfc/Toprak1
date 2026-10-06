@@ -172,10 +172,14 @@ async def test_canonical_projection_uses_exact_normalized_values():
     dag._admit_loader = loader
     dag._initialised = True
     normalized = normalize_task_admit_seed(seed(priority=5.0, admitted_at=1000.0, dependency_count=2.0))
-    await dag._task_admit_canonical_projection(normalized)
+    await dag._task_admit_canonical_projection(
+        normalized, canonical_head_keys=("key",) * 6,
+        canonical_head_witness=("witness",) * 14,
+    )
     assert loader.args[4] == "5"
     assert loader.args[5] == "1000"
     assert loader.args[9] == "2"
+    assert loader.args[15] == "1"
 
 @pytest.mark.asyncio
 async def test_store_commit_returns_already_applied_then_exact_head_validation_runs(monkeypatch):
@@ -224,9 +228,14 @@ async def test_store_commit_returns_already_applied_then_exact_head_validation_r
         async def validate_authority_head(self, identity, **expected):
             self.validations.append((identity, expected))
             return object()
+        def authority_head_witness(self, record, receipt):
+            from hfa.authority import RedisCanonicalAuthorityStore
+            return RedisCanonicalAuthorityStore(object()).authority_head_witness(record, receipt)
 
     projected = []
-    async def legacy(value):
+    async def legacy(value, *, canonical_head_keys, canonical_head_witness):
+        assert len(canonical_head_keys) == 6
+        assert canonical_head_witness[1] == command.operation_id
         projected.append(value)
         return "legacy"
 

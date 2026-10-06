@@ -139,12 +139,12 @@ async def test_projection_failure_leaves_commit_and_retry_repairs_projection(red
     original = binding.legacy_admit
     calls = 0
 
-    async def flaky(value):
+    async def flaky(value, **proof):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("projection failed")
-        return await original(value)
+        return await original(value, **proof)
 
     monkeypatch.setattr(binding, "legacy_admit", flaky)
     with pytest.raises(TaskAdmitProjectionPendingError):

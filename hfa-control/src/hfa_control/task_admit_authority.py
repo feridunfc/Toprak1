@@ -144,7 +144,7 @@ def build_task_admit_context(command: AuthorityCommand) -> AuthorityEntryContext
 @dataclass
 class TaskAdmitAuthorityBinding:
     redis: Any
-    legacy_admit: Callable[[Any], Awaitable[Any]]
+    legacy_admit: Callable[..., Awaitable[Any]]
     store: RedisCanonicalAuthorityStore | None = None
     require_root_task_binding: bool = False
 
@@ -350,8 +350,18 @@ class TaskAdmitAuthorityBinding:
         if duplicate_record is not None:
             assert duplicate_receipt is not None
             await self._validate_exact_head(duplicate_record, duplicate_receipt)
+            record, receipt = duplicate_record, duplicate_receipt
+        else:
+            assert evaluation.commit_plan is not None
+            record, receipt = evaluation.commit_plan.record, evaluation.commit_plan.receipt
 
         try:
-            return await self.legacy_admit(normalized)
+            # Serialize the accepted decision, never a subsequently observed head.
+            # The projector validates this witness atomically, including duplicates.
+            keys, witness = self.store.authority_head_witness(record, receipt)
+            return await self.legacy_admit(
+                normalized, canonical_head_keys=tuple(keys),
+                canonical_head_witness=tuple(witness),
+            )
         except Exception as exc:
             raise TaskAdmitProjectionPendingError() from exc
