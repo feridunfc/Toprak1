@@ -15,6 +15,7 @@
 -- 7  run_tasks_set
 -- 8  global_runtime_truth_conflict_index
 -- 9  global_runtime_truth_conflict_stream
+-- 10..15 canonical_project only: own head/index/receipt/record/log/outbox
 --
 -- ARGV
 -- 1  task_id
@@ -40,6 +41,7 @@
 -- 21 claim_operation_id
 -- 22 claim_epoch
 -- 23 retry_attempt
+-- 24..26 canonical_project only: own witness JSON, worker_instance_id, scheduler_epoch
 --
 -- RETURN
 -- { status, value }
@@ -234,6 +236,60 @@ if projection_mode == 'canonical_project' or projection_mode == 'canonical_deliv
     end
 end
 
+-- F04.4D: own-proof validation precedes duplicates and ALL effect writers,
+-- including truth-conflict evidence. Delivery is a separate, unchanged mode.
+if projection_mode == 'canonical_project' then
+    local function conflict() return failure('canonical_requeue_proof_invalid') end
+    local ok, own = pcall(cjson.decode, ARGV[24] or '')
+    if #KEYS ~= 15 or #ARGV ~= 26 or not ok or type(own) ~= 'table' or #own ~= 14 then
+        return conflict()
+    end
+    for i=1,14 do if type(own[i]) ~= 'string' then return conflict() end end
+    local decoded, record = pcall(cjson.decode, own[8])
+    if not decoded or type(record) ~= 'table' then return conflict() end
+    local identity = record.canonical_aggregate_identity
+    local meta = record.authoritative_metadata_changes
+    if type(identity) ~= 'table' or identity.aggregate_type ~= 'task'
+        or identity.run_id ~= run_id or identity.task_id ~= task_id
+        or record.operation_type ~= 'TASK_REQUEUE'
+        or own[2] ~= 'task-requeue:v1:' .. own[1] .. ':claim:' .. ARGV[22]
+        or own[2] ~= canonical_operation_id or own[4] ~= canonical_transition_id
+        or tonumber(own[5]) ~= canonical_revision or own[6] ~= canonical_command_hash
+        or own[7] ~= canonical_record_hash or own[11] ~= 'ready' or own[12] ~= '0'
+        or record.previous_state ~= 'running' or record.next_state ~= 'ready'
+        or record.from_revision ~= claim_revision or record.to_revision ~= canonical_revision
+        or record.causation_id ~= claim_transition_id or type(meta) ~= 'table' then return conflict() end
+    if meta.task_id ~= task_id or meta.run_id ~= run_id or meta.tenant_id ~= tenant_id
+        or meta.reason_code ~= reason_code or meta.max_requeue_count ~= max_requeue_count
+        or meta.worker_instance_id ~= ARGV[25] or meta.scheduler_epoch ~= ARGV[26]
+        or meta.claim_epoch ~= claim_epoch or meta.dispatch_attempt ~= retry_attempt
+        or meta.retry_attempt ~= retry_attempt or meta.claim_transition_id ~= claim_transition_id
+        or meta.claim_record_hash ~= claim_record_hash or meta.claim_command_hash ~= claim_command_hash
+        or meta.claim_revision ~= claim_revision or meta.claim_operation_id ~= claim_operation_id
+        or record.committed_at_ms ~= now_ms_number or record.committed_at_ms ~= ready_score_number then
+        return conflict()
+    end
+    local intents = record.durable_projection_intents
+    if type(intents) ~= 'table' or type(intents[1]) ~= 'table'
+        or intents[1].kind ~= 'READY_QUEUE' or intents[1].tenant_id ~= tenant_id
+        or intents[1].task_id ~= task_id or intents[1].retry_attempt ~= retry_attempt then return conflict() end
+    -- Existing projection destinations must belong to this exact record.
+    -- stream_maxlen is runtime policy, not canonical admission/retry authority.
+    if task_state_key ~= 'hfa:dag:task:' .. task_id .. ':state'
+        or task_meta_key ~= 'hfa:dag:task:' .. task_id .. ':meta'
+        or tenant_ready_queue ~= 'hfa:dag:tenant:' .. tenant_id .. ':ready'
+        or task_running_zset ~= 'hfa:dag:tenant:' .. tenant_id .. ':running'
+        or completion_stream ~= 'hfa:dag:tenant:' .. tenant_id .. ':completion_stream'
+        or run_state_key ~= 'hfa:run:state:' .. run_id
+        or run_tasks_set ~= 'hfa:dag:run:' .. run_id .. ':tasks'
+        or truth_conflict_index ~= 'hfa:runtime-truth:v1:conflicts:index'
+        or truth_conflict_stream ~= 'hfa:runtime-truth:v1:conflicts:stream' then return conflict() end
+    local checked = validate_authority_head(
+        {KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14], KEYS[15]}, own
+    )
+    if checked[1] ~= 'VALID' then return conflict() end
+end
+
 -- Resolve a trustworthy task/run binding before RUN truth or conflict evidence.
 local meta_kind = redis_type(task_meta_key)
 local binding_from_membership = false
@@ -425,8 +481,8 @@ if projection_mode == 'canonical_project' then
         'claim_canonical_revision',
         'claim_canonical_operation_id',
         'requeue_count')
-    if not proof[1] or proof[1] == ''
-        or not proof[2] or proof[2] == ''
+    if proof[1] ~= ARGV[25]
+        or proof[2] ~= ARGV[26]
         or tonumber(proof[3] or '') ~= claim_epoch
         or proof[4] ~= claim_transition_id
         or proof[5] ~= claim_record_hash

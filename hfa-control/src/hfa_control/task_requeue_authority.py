@@ -364,7 +364,10 @@ class TaskRequeueProjectionManager:
             return
         assert self.store is not None
         await self.store.initialise()
-        self._loader = LuaScriptLoader(self.redis, _lua_path())
+        self._loader = LuaScriptLoader(
+            self.redis, _lua_path(),
+            helpers={"validate_authority_head": _lua_path().with_name("authority_head_validate.lua")},
+        )
         await self._loader.load()
         self._initialised = True
 
@@ -400,7 +403,7 @@ class TaskRequeueProjectionManager:
         projection: TaskRequeueCanonicalProjectionInput,
         *,
         require_exact_head: bool,
-    ) -> None:
+    ) -> tuple[list[str], list[str]]:
         assert self.store is not None
         identity = CanonicalAggregateIdentity(
             aggregate_type=AggregateType.TASK,
@@ -538,6 +541,8 @@ class TaskRequeueProjectionManager:
                     canonical_commit_durable=True,
                 ) from exc
 
+        return self.store.authority_head_witness(record, receipt)
+
     async def _run_lua(
         self,
         projection: TaskRequeueCanonicalProjectionInput,
@@ -546,12 +551,14 @@ class TaskRequeueProjectionManager:
         require_exact_head: bool,
     ) -> tuple[str, int]:
         await self.initialise()
-        await self._validate_durable_authority(
+        proof_keys, witness = await self._validate_durable_authority(
             projection, require_exact_head=require_exact_head
         )
+        # Delivery remains a separate invocation with its existing contract.
+        projecting = mode == "canonical_project"
         assert self._loader is not None
         raw = await self._loader.run(
-            num_keys=9,
+            num_keys=15 if projecting else 9,
             keys=[
                 DagRedisKey.task_state(projection.task_id),
                 DagRedisKey.task_meta(projection.task_id),
@@ -562,7 +569,7 @@ class TaskRequeueProjectionManager:
                 DagRedisKey.run_tasks(projection.run_id),
                 RedisKey.runtime_truth_conflict_index(),
                 RedisKey.runtime_truth_conflict_stream(),
-            ],
+            ] + (proof_keys if projecting else []),
             args=[
                 projection.task_id,
                 projection.run_id,
@@ -587,7 +594,11 @@ class TaskRequeueProjectionManager:
                 projection.claim_operation_id,
                 str(projection.claim_epoch),
                 str(projection.retry_attempt),
-            ],
+            ] + ([
+                canonical_json_bytes(witness).decode("utf-8"),
+                projection.worker_instance_id,
+                projection.scheduler_epoch,
+            ] if projecting else []),
         )
         if not isinstance(raw, (list, tuple)) or not raw:
             raise TaskRequeueAuthorityError(
