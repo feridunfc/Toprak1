@@ -12,6 +12,9 @@
 -- 8  global_runtime_truth_conflict_index
 -- 9  global_runtime_truth_conflict_stream
 --
+-- 10..15 own TASK canonical head/index/receipt/record/log/outbox
+-- 16 existing claim event list (canonical mode)
+--
 -- ARGV
 -- 1  task_id
 -- 2  worker_instance_id
@@ -51,6 +54,7 @@ local run_state_key         = KEYS[7]
 local truth_conflict_index  = KEYS[8]
 local truth_conflict_stream = KEYS[9]
 
+-- ARGV 25: own witness JSON; 26: emit compatibility claim event; 27: event time policy
 local task_id                   = ARGV[1]
 local worker_instance_id        = ARGV[2]
 local claimed_at_ms             = ARGV[3]
@@ -301,6 +305,73 @@ local function emit_truth_conflict(status, detail_code, observed_run_state)
     return claim_failure(status)
 end
 
+-- F04.4C: validate own canonical evidence before ALL runtime writes,
+-- including truth-conflict evidence and the compatibility claim event.
+if canonical_projection then
+    local function conflict() return claim_failure('canonical_projection_conflict') end
+    local ok, own = pcall(cjson.decode, ARGV[25] or '')
+    if #KEYS ~= 16 or #ARGV ~= 27 or not ok or type(own) ~= 'table' or #own ~= 14
+        or not canonical_projection_input_valid() then return conflict() end
+    for i=1,14 do
+        if type(own[i]) ~= 'string' then return conflict() end
+    end
+    local decoded, record = pcall(cjson.decode, own[8])
+    if not decoded or type(record) ~= 'table' then return conflict() end
+    local identity = record.canonical_aggregate_identity
+    local meta = record.authoritative_metadata_changes
+    local effects = record.child_effects
+    if type(identity) ~= 'table' or identity.aggregate_type ~= 'task'
+        or identity.run_id ~= run_id or identity.task_id ~= task_id
+        or record.operation_type ~= 'TASK_CLAIM'
+        or own[2] ~= 'task-claim:v1:' .. own[1] .. ':attempt:' .. dispatch_attempt
+        or own[2] ~= canonical_operation_id or own[4] ~= canonical_transition_id
+        or own[5] ~= canonical_revision or own[6] ~= canonical_command_hash
+        or own[7] ~= canonical_record_hash or own[11] ~= 'running' or own[12] ~= '0'
+        or type(meta) ~= 'table' or type(effects) ~= 'table' then return conflict() end
+    if meta.task_id ~= task_id or meta.run_id ~= run_id or meta.tenant_id ~= canonical_tenant_id
+        or meta.worker_instance_id ~= worker_instance_id or meta.scheduler_epoch ~= expected_scheduler_epoch
+        or meta.claimed_at_ms ~= tonumber(claimed_at_ms) or heartbeat_score ~= meta.claimed_at_ms
+        or meta.dispatch_attempt ~= tonumber(dispatch_attempt)
+        or meta.previous_claim_epoch ~= tonumber(canonical_previous_epoch)
+        or meta.claim_epoch ~= tonumber(canonical_claim_epoch)
+        or meta.dispatch_transition_id ~= dispatch_transition_id
+        or meta.dispatch_record_hash ~= dispatch_record_hash
+        or meta.dispatch_command_hash ~= dispatch_command_hash
+        or meta.dispatch_operation_id ~= dispatch_operation_id
+        or meta.dispatch_revision ~= tonumber(dispatch_revision)
+        or allow_legacy_direct_claim ~= '0' then return conflict() end
+    local reservation = effects.worker_reservation
+    local intents = record.durable_projection_intents
+    if type(reservation) ~= 'table' or reservation.action ~= 'CONSUME'
+        or reservation.worker_id ~= worker_instance_id or reservation.task_id ~= task_id
+        or reservation.scheduler_epoch ~= expected_scheduler_epoch
+        or type(intents) ~= 'table' or #intents ~= 1 or type(intents[1]) ~= 'table'
+        or intents[1].kind ~= 'RUNNING_SET' or intents[1].tenant_id ~= canonical_tenant_id
+        or intents[1].task_id ~= task_id then return conflict() end
+    -- Existing DagRedisKey/EventStore destinations, derived from this record.
+    -- TTLs and compatibility-event time/enabling remain runtime policy.
+    if task_state_key ~= 'hfa:dag:task:' .. task_id .. ':state'
+        or task_meta_key ~= 'hfa:dag:task:' .. task_id .. ':meta'
+        or task_scheduled_zset ~= 'hfa:dag:tenant:' .. canonical_tenant_id .. ':scheduled'
+        or task_running_zset ~= 'hfa:dag:tenant:' .. canonical_tenant_id .. ':running'
+        or reservation_key ~= 'hfa:dag:worker:' .. worker_instance_id .. ':reservation'
+        or task_owner_key ~= 'hfa:dag:task:' .. task_id .. ':reservation_owner'
+        or run_state_key ~= 'hfa:run:state:' .. run_id
+        or truth_conflict_index ~= 'hfa:runtime-truth:v1:conflicts:index'
+        or truth_conflict_stream ~= 'hfa:runtime-truth:v1:conflicts:stream'
+        or KEYS[16] ~= 'hfa:events:' .. run_id
+        or (ARGV[26] ~= '0' and ARGV[26] ~= '1') or not tonumber(ARGV[27]) then
+        return conflict()
+    end
+    local checked = validate_authority_head(
+        {KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14], KEYS[15]}, own
+    )
+    if checked[1] ~= 'VALID' then return conflict() end
+elseif #KEYS ~= 9 or (ARGV[10] ~= nil and ARGV[10] ~= '0')
+    or canonical_transition_id ~= '' or canonical_operation_id ~= '' then
+    return claim_failure('canonical_projection_conflict')
+end
+
 local current_state = redis.call('GET', task_state_key)
 if not current_state then
     return claim_failure('task_missing')
@@ -505,6 +576,16 @@ if not legacy_direct_claim then
     if task_owner_key ~= '' then
         redis.call('DEL', task_owner_key)
     end
+end
+
+-- Preserve the existing best-effort compatibility event, but append within
+-- the same proof/effect invocation. Exact duplicates return before this point.
+if canonical_projection and ARGV[26] == '1' then
+    redis.pcall('RPUSH', KEYS[16], cjson.encode({
+        event_type='TASK_CLAIMED', timestamp_ms=tonumber(ARGV[27]),
+        worker_id=worker_instance_id,
+        details={tenant_id=canonical_tenant_id, claim_epoch=canonical_claim_epoch}
+    }))
 end
 
 return {

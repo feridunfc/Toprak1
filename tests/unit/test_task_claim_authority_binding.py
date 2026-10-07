@@ -115,6 +115,10 @@ class FakeStore:
         self.validate_calls = 0
         self.order = order if order is not None else []
 
+    def authority_head_witness(self, record, receipt):
+        from hfa.authority import RedisCanonicalAuthorityStore
+        return RedisCanonicalAuthorityStore(None).authority_head_witness(record, receipt)
+
     async def initialise(self):
         self.initialise_calls += 1
 
@@ -290,7 +294,7 @@ async def test_first_claim_commits_before_projection(monkeypatch):
     order = []
     projection = AsyncMock()
 
-    async def projected(_value):
+    async def projected(_value, **kwargs):
         order.append("projection")
         return TaskClaimResult(
             ok=True,
@@ -319,7 +323,8 @@ async def test_first_claim_commits_before_projection(monkeypatch):
     assert result.ok is True
     assert order == ["commit", "projection"]
     assert store.commit_calls == 1
-    event.assert_called_once()
+    event.assert_not_called()
+    assert dag.task_claim_canonical_projection.await_args.kwargs["emit_claim_event"] is True
 
 
 @pytest.mark.asyncio
@@ -480,7 +485,7 @@ async def test_exact_retry_reuses_timestamp_and_does_not_recommit(monkeypatch):
     assert second.status == TASK_CLAIM_DUPLICATE_STATUS
     assert retry_projection.claimed_at_ms == first_projection.claimed_at_ms == 300
     assert store.commit_calls == 1
-    assert event.call_count == 1
+    assert event.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -518,7 +523,8 @@ async def test_retry_after_projection_failure_can_allow_execution_once(monkeypat
     )
     assert completed.ok is True
     assert store.commit_calls == 1
-    event.assert_called_once()
+    event.assert_not_called()
+    assert dag.task_claim_canonical_projection.await_args.kwargs["emit_claim_event"] is True
 
 
 @pytest.mark.asyncio

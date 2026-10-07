@@ -17,6 +17,7 @@ from hfa.config.keys import RedisKey, RedisTTL
 from hfa.dag.schema import DagRedisKey
 from hfa.dag.states import DagTaskState
 from hfa.lua.loader import LuaScriptLoader
+from hfa_control.event_store import EventStore
 from hfa_control.task_claim_authority import (
     TaskClaimCanonicalProjectionInput,
     normalize_task_claim_canonical_projection_input,
@@ -252,7 +253,7 @@ class DagLua:
         for filename, attr in scripts.items():
             helpers = (
                 {"validate_authority_head": _lua_path("authority_head_validate.lua")}
-                if filename in {"task_admit.lua", "task_dispatch_commit.lua"} else None
+                if filename in {"task_admit.lua", "task_dispatch_commit.lua", "task_claim_start.lua"} else None
             )
             loader = LuaScriptLoader(self._redis, _lua_path(filename), helpers=helpers)
             await loader.load()
@@ -607,6 +608,8 @@ class DagLua:
     async def task_claim_canonical_projection(
         self,
         projection: TaskClaimCanonicalProjectionInput,
+        *,
+        emit_claim_event: bool = False,
     ) -> TaskClaimResult:
         normalized = normalize_task_claim_canonical_projection_input(
             projection
@@ -620,6 +623,7 @@ class DagLua:
             run_id=normalized.run_id,
             allow_legacy_direct_claim=False,
             canonical_projection=normalized,
+            emit_claim_event=emit_claim_event,
         )
 
     async def _task_claim_project(
@@ -635,6 +639,7 @@ class DagLua:
         canonical_projection: (
             TaskClaimCanonicalProjectionInput | None
         ),
+        emit_claim_event: bool = False,
     ) -> TaskClaimResult:
         await self._ensure_initialised()
         assert self._claim_loader is not None
@@ -707,6 +712,15 @@ class DagLua:
                     str(canonical_projection.dispatch_attempt),
                 ]
             )
+
+        if canonical_projection is not None:
+            keys.extend(canonical_projection.canonical_head_keys)
+            keys.append(EventStore.event_key(resolved_run_id))
+            args.extend([
+                json.dumps(canonical_projection.canonical_head_witness, separators=(",", ":")),
+                "1" if emit_claim_event else "0",
+                str(int(time.time() * 1000)),
+            ])
 
         raw = await self._claim_loader.run(
             num_keys=len(keys),

@@ -5,14 +5,13 @@ from dataclasses import replace
 
 import pytest
 
-from hfa.authority import AggregateType, CanonicalAggregateIdentity
 from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
 from hfa_control.task_claim_authority import (
-    TaskClaimCanonicalProjectionInput,
+    TaskClaimCanonicalProjectionInput, TaskClaimAuthorityBinding,
 )
-from hfa_control.worker_reservation import WorkerReservationManager
+from tests.integration.test_task_claim_authority_binding_integration import _seed_dispatch
 
 pytestmark = pytest.mark.asyncio
 
@@ -21,117 +20,20 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _operation_ids(
-    *,
-    task_id: str,
-    run_id: str,
-    attempt: int,
-) -> tuple[str, str]:
-    identity = CanonicalAggregateIdentity(
-        aggregate_type=AggregateType.TASK,
-        run_id=run_id,
-        task_id=task_id,
-    )
-    dispatch = (
-        f"task-dispatch:v1:{identity.sha256}:attempt:{attempt}"
-    )
-    claim = (
-        f"task-claim:v1:{identity.sha256}:attempt:{attempt}"
-    )
-    return dispatch, claim
-
-
 async def _seed_canonical_dispatch(
-    redis_client,
-    *,
-    task_id: str,
-    run_id: str,
-    tenant_id: str,
-    worker_id: str,
-    scheduler_epoch: str,
-    attempt: int = 2,
-    dispatch_revision: int = 4,
+    redis_client, *, task_id: str, run_id: str, tenant_id: str,
+    worker_id: str, scheduler_epoch: str,
 ) -> TaskClaimCanonicalProjectionInput:
-    dispatch_operation_id, claim_operation_id = _operation_ids(
-        task_id=task_id,
-        run_id=run_id,
-        attempt=attempt,
+    # Real accepted record/receipt evidence replaces the old synthetic hashes.
+    store, _dag, _identity = await _seed_dispatch(
+        redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
+        worker_id=worker_id, scheduler_epoch=scheduler_epoch,
     )
-    dispatch_transition_id = f"dispatch-transition:{task_id}"
-    dispatch_record_hash = _sha256(
-        f"dispatch-record:{task_id}"
+    prepared = await TaskClaimAuthorityBinding(redis_client, store=store).prepare_claim(
+        task_id=task_id, run_id=run_id, tenant_id=tenant_id,
+        worker_instance_id=worker_id, scheduler_epoch=scheduler_epoch, claimed_at_ms=300,
     )
-    dispatch_command_hash = _sha256(
-        f"dispatch-command:{task_id}"
-    )
-
-    await redis_client.set(
-        DagRedisKey.task_state(task_id),
-        "scheduled",
-    )
-    await redis_client.hset(
-        DagRedisKey.task_meta(task_id),
-        mapping={
-            "task_id": task_id,
-            "run_id": run_id,
-            "tenant_id": tenant_id,
-            "scheduler_epoch": scheduler_epoch,
-            "dispatch_attempt": str(attempt),
-            "dispatch_worker_id": worker_id,
-            "claim_epoch": "0",
-            "canonical_transition_id": dispatch_transition_id,
-            "canonical_record_hash": dispatch_record_hash,
-            "canonical_command_hash": dispatch_command_hash,
-            "canonical_revision": str(dispatch_revision),
-            "canonical_operation_id": dispatch_operation_id,
-        },
-    )
-    await redis_client.set(
-        RedisKey.run_state(run_id),
-        "running",
-    )
-    await redis_client.zadd(
-        DagRedisKey.task_scheduled_zset(tenant_id),
-        {task_id: 100.0},
-    )
-
-    reservation = WorkerReservationManager(
-        redis_client,
-        reservation_ttl_seconds=30,
-    )
-    reserved = await reservation.reserve(
-        worker_id=worker_id,
-        task_id=task_id,
-        scheduler_epoch=scheduler_epoch,
-        reserved_at_ms=90,
-    )
-    assert reserved.ok is True
-
-    return TaskClaimCanonicalProjectionInput(
-        task_id=task_id,
-        run_id=run_id,
-        tenant_id=tenant_id,
-        worker_instance_id=worker_id,
-        scheduler_epoch=scheduler_epoch,
-        claimed_at_ms=100,
-        dispatch_attempt=attempt,
-        dispatch_revision=dispatch_revision,
-        previous_claim_epoch=0,
-        dispatch_transition_id=dispatch_transition_id,
-        dispatch_record_hash=dispatch_record_hash,
-        dispatch_command_hash=dispatch_command_hash,
-        dispatch_operation_id=dispatch_operation_id,
-        canonical_transition_id=f"claim-transition:{task_id}",
-        canonical_record_hash=_sha256(
-            f"claim-record:{task_id}"
-        ),
-        canonical_command_hash=_sha256(
-            f"claim-command:{task_id}"
-        ),
-        canonical_revision=dispatch_revision + 1,
-        canonical_operation_id=claim_operation_id,
-        claim_epoch=1,
-    )
+    return prepared.projection
 
 
 @pytest.mark.integration

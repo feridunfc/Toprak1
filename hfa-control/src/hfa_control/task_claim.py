@@ -294,7 +294,8 @@ class TaskClaimManager(TaskClaimService):
 
         try:
             result = await self._dag_lua.task_claim_canonical_projection(
-                prepared.projection
+                prepared.projection,
+                emit_claim_event=self._event_store is not None,
             )
         except Exception:
             return self._failed_result(
@@ -304,17 +305,7 @@ class TaskClaimManager(TaskClaimService):
                 scheduler_epoch=scheduler_epoch,
             )
 
-        if task_claim_status_allows_execution(result.status):
-            emit_event_background(
-                self._event_store,
-                run_id=run_id,
-                event_type=EventStore.EVENT_TASK_CLAIMED,
-                worker_id=worker_instance_id,
-                details={
-                    "tenant_id": tenant_id,
-                    "claim_epoch": result.claim_epoch,
-                },
-            )
+        # Canonical claim event is emitted by the guarded projector invocation.
         return result
 
     async def claim_start(

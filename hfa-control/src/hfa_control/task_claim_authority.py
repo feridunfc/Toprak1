@@ -356,6 +356,8 @@ class TaskClaimCanonicalProjectionInput:
     canonical_revision: int
     canonical_operation_id: str
     claim_epoch: int
+    canonical_head_keys: tuple[str, ...] = ()
+    canonical_head_witness: tuple[str, ...] = ()
 
 
 def normalize_task_claim_canonical_projection_input(
@@ -759,11 +761,13 @@ class TaskClaimAuthorityBinding:
             aggregate_revision=persisted.aggregate_revision,
         )
 
-    @staticmethod
     def _projection_from_claim_record(
+        self,
         claim: TaskClaimAuthorityInput,
         record: Any,
+        receipt: Any,
     ) -> TaskClaimCanonicalProjectionInput:
+        keys, witness = self.store.authority_head_witness(record, receipt)
         return normalize_task_claim_canonical_projection_input(
             TaskClaimCanonicalProjectionInput(
                 task_id=claim.task_id,
@@ -785,6 +789,8 @@ class TaskClaimAuthorityBinding:
                 canonical_revision=record.to_revision,
                 canonical_operation_id=record.operation_id,
                 claim_epoch=claim.intended_claim_epoch,
+                canonical_head_keys=tuple(keys),
+                canonical_head_witness=tuple(witness),
             )
         )
 
@@ -902,7 +908,7 @@ class TaskClaimAuthorityBinding:
                     "canonical claim head does not match stored receipt"
                 )
             await self._validate_exact_head(record, receipt)
-        projection = self._projection_from_claim_record(claim, record)
+        projection = self._projection_from_claim_record(claim, record, receipt)
         return TaskClaimPreparedProjection(
             projection=projection,
             exact_retry=True,
@@ -1210,7 +1216,9 @@ class TaskClaimAuthorityBinding:
 
         if persisted.status is RedisAuthorityCommitStatus.COMMITTED:
             record = evaluation.commit_plan.record
-            projection = self._projection_from_claim_record(claim, record)
+            projection = self._projection_from_claim_record(
+                claim, record, evaluation.commit_plan.receipt,
+            )
             return TaskClaimPreparedProjection(
                 projection=projection,
                 exact_retry=False,

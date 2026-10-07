@@ -247,7 +247,8 @@ async def test_first_claim_and_exact_duplicate_are_canonical_and_event_safe(
     assert await redis_client.hget(
         DagRedisKey.task_meta(task_id), "claim_epoch"
     ) == "1"
-    event.assert_called_once()
+    event.assert_not_called()
+    assert await redis_client.llen(f"hfa:events:{run_id}") == 1
 
     duplicate = await manager.claim_start(
         task_id=task_id,
@@ -265,7 +266,8 @@ async def test_first_claim_and_exact_duplicate_are_canonical_and_event_safe(
     assert await redis_client.hget(
         DagRedisKey.task_meta(task_id), "claim_epoch"
     ) == "1"
-    event.assert_called_once()
+    event.assert_not_called()
+    assert await redis_client.llen(f"hfa:events:{run_id}") == 1
 
 
 @pytest.mark.integration
@@ -331,7 +333,8 @@ async def test_projection_failure_preserves_reservation_and_retry_projects_once(
     after = await store.get_aggregate_snapshot(identity)
     assert after is not None
     assert after.revision == 3
-    event.assert_called_once()
+    event.assert_not_called()
+    assert await redis_client.llen(f"hfa:events:{run_id}") == 1
 
 
 @pytest.mark.integration
@@ -373,7 +376,7 @@ async def test_conflicting_reservation_fails_before_claim_commit(
 
 
 @pytest.mark.integration
-async def test_terminal_head_allows_exact_claim_replay_but_not_execution(
+async def test_terminal_head_rejects_stale_claim_replay(
     redis_client,
     monkeypatch,
 ):
@@ -382,6 +385,15 @@ async def test_terminal_head_allows_exact_claim_replay_but_not_execution(
     tenant_id = "tenant-a"
     worker_id = "worker-a"
     scheduler_epoch = "epoch-a"
+    from hfa.governance.admission_resource_reservation import AdmissionResourceReservationManager
+    from hfa_control.run_create_authority import RunCreateAuthorityBinding
+    from tests.unit.test_f02a1_root_binding import request
+    # The existing F03 terminal guard requires real canonical parent evidence.
+    req = request()
+    req.run_id, req.tenant_id, req.root_task_id = run_id, tenant_id, task_id
+    parent = RunCreateAuthorityBinding(redis_client,
+        AdmissionResourceReservationManager(redis_client), RedisKey.stream_control())
+    await parent.admit(req, tenant_inflight_limit=10)
     store, dag, identity = await _seed_dispatch(
         redis_client,
         task_id=task_id,
@@ -437,12 +449,13 @@ async def test_terminal_head_allows_exact_claim_replay_but_not_execution(
         scheduler_epoch=scheduler_epoch,
     )
     assert duplicate.ok is False
-    assert duplicate.status == TASK_CLAIM_DUPLICATE_STATUS
+    assert duplicate.status == "canonical_projection_conflict"
     snapshot = await store.get_aggregate_snapshot(identity)
     assert snapshot is not None
     assert snapshot.revision == 4
     assert snapshot.state == "done"
-    event.assert_called_once()
+    event.assert_not_called()
+    assert await redis_client.llen(f"hfa:events:{run_id}") == 1
 
 
 @pytest.mark.integration
@@ -558,4 +571,5 @@ async def test_changed_projected_claim_proof_fails_closed_without_execution(
     assert snapshot is not None
     assert snapshot.revision == 3
     assert snapshot.state == "running"
-    event.assert_called_once()
+    event.assert_not_called()
+    assert await redis_client.llen(f"hfa:events:{run_id}") == 1
