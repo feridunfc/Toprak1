@@ -1176,8 +1176,15 @@ class RunCreateAuthorityBinding:
                 f"canonical RUN_CREATE record cannot drive projection: {exc}"
             ) from exc
 
+        # Pin the accepted RUN_CREATE proof for the resource effect itself.
+        # The earlier Python validation cannot authorize a later Lua write.
+        own_keys, own_witness = self.store.authority_head_witness(record, canonical_receipt)
         try:
-            finalized = await self.resource_manager.finalize_once(reservation)
+            finalized = await self.resource_manager.finalize_once(
+                reservation,
+                canonical_head_keys=tuple(own_keys),
+                canonical_head_witness=tuple(own_witness),
+            )
         except Exception as exc:
             raise RunCreateProjectionPendingError(
                 f"resource finalization failed after canonical commit: {exc}"
@@ -1194,7 +1201,6 @@ class RunCreateAuthorityBinding:
         event_fields = _stable_event_fields(committed_value, record.operation_id)
         # Keep the evaluated RUN_CREATE record, not a subsequently observed head.
         # Lua revalidates this witness before the first projection effect.
-        own_keys, own_witness = self.store.authority_head_witness(record, canonical_receipt)
         projection = RunCreateProjectionInput(
             operation_id=record.operation_id,
             reservation_proof_sha256=reservation.proof_sha256,

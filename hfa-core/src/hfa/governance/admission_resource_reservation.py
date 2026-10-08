@@ -7,6 +7,7 @@ legacy ``QuotaManager`` import surface and is not wired into AdmissionController
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 import unicodedata
@@ -417,7 +418,10 @@ class AdmissionResourceReservationManager:
         if self._initialised:
             return
         if self._loader is None:
-            self._loader = LuaScriptLoader(self._redis, _lua_path())
+            path = _lua_path()
+            self._loader = LuaScriptLoader(self._redis, path, helpers={
+                "validate_authority_head": path.with_name("authority_head_validate.lua"),
+            })
         await self._loader.load()
         self._initialised = True
 
@@ -448,6 +452,8 @@ class AdmissionResourceReservationManager:
         reservation: AdmissionResourceReservationInput,
         *,
         now_ms: int | None = None,
+        canonical_head_keys: tuple[str, ...] = (),
+        canonical_head_witness: tuple[str, ...] = (),
     ) -> AdmissionResourceReservationResult:
         return await self._execute(
             "finalize",
@@ -456,6 +462,8 @@ class AdmissionResourceReservationManager:
             concurrent_run_limit=None,
             budget_limit_cents=None,
             tenant_inflight_limit=None,
+            canonical_head_keys=canonical_head_keys,
+            canonical_head_witness=canonical_head_witness,
         )
 
     async def release_once(
@@ -534,6 +542,8 @@ class AdmissionResourceReservationManager:
         concurrent_run_limit: int | None,
         budget_limit_cents: int | None,
         tenant_inflight_limit: int | None,
+        canonical_head_keys: tuple[str, ...] = (),
+        canonical_head_witness: tuple[str, ...] = (),
     ) -> AdmissionResourceReservationResult:
         if not isinstance(reservation, AdmissionResourceReservationInput):
             raise TypeError(
@@ -542,13 +552,13 @@ class AdmissionResourceReservationManager:
         await self.initialise()
         assert self._loader is not None
         raw = await self._loader.run(
-            num_keys=4,
+            num_keys=4 + len(canonical_head_keys),
             keys=[
                 self.reservation_receipt_key(reservation.operation_id),
                 self.concurrent_run_key(reservation.tenant_id),
                 self.budget_reserved_key(reservation.tenant_id),
                 RedisKey.tenant_inflight(reservation.tenant_id),
-            ],
+            ] + list(canonical_head_keys),
             args=[
                 action,
                 reservation.operation_id,
@@ -562,7 +572,7 @@ class AdmissionResourceReservationManager:
                 str(_optional_limit(budget_limit_cents, "budget_limit_cents")),
                 str(_optional_limit(tenant_inflight_limit, "tenant_inflight_limit")),
                 str(self._released_receipt_ttl_seconds),
-            ],
+            ] + ([json.dumps(canonical_head_witness)] if action == "finalize" else []),
         )
         if not isinstance(raw, (list, tuple)) or len(raw) < 3:
             raise AdmissionResourceReservationError(

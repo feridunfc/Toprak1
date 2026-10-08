@@ -133,7 +133,12 @@ async def manually_commit(redis, resource, store, request, *, finalize=False):
     persisted = await store.commit(evaluation.commit_plan)
     assert persisted.status.value == "COMMITTED"
     if finalize:
-        finalized = await resource.finalize_once(reservation)
+        keys, witness = store.authority_head_witness(
+            evaluation.commit_plan.record, evaluation.commit_plan.receipt,
+        )
+        finalized = await resource.finalize_once(
+            reservation, canonical_head_keys=tuple(keys), canonical_head_witness=tuple(witness),
+        )
         assert finalized.state == RESERVATION_STATE_FINALIZED
     return reservation, evaluation.commit_plan
 

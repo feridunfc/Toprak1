@@ -134,17 +134,22 @@ async def test_first_reserve_and_active_lifetime_invariants(real_redis):
 
 @pytest.mark.asyncio
 async def test_exact_retry_finalize_and_released_ttl(real_redis):
+    from hfa.authority import RedisCanonicalAuthorityStore
+    from tests.integration.test_run_create_authority_binding_integration import Request, manually_commit
+
     manager = AdmissionResourceReservationManager(real_redis)
-    value = item(suffix="b" * 64)
-    assert (await reserve(manager, value)).status == RESERVATION_STATUS_RESERVED
+    store = RedisCanonicalAuthorityStore(real_redis)
+    value, plan = await manually_commit(real_redis, manager, store, Request('run-tenant-1', 'tenant-1'))
+    keys, witness = store.authority_head_witness(plan.record, plan.receipt)
+    proof = dict(canonical_head_keys=tuple(keys), canonical_head_witness=tuple(witness))
     before = await manager.get_resource_snapshot(value.tenant_id)
     assert (await reserve(manager, value, now_ms=1001)).status == RESERVATION_STATUS_ALREADY_RESERVED
     assert await manager.get_resource_snapshot(value.tenant_id) == before
 
-    assert (await manager.finalize_once(value, now_ms=1002)).status == RESERVATION_STATUS_FINALIZED
+    assert (await manager.finalize_once(value, now_ms=1002, **proof)).status == RESERVATION_STATUS_FINALIZED
     receipt_key = manager.reservation_receipt_key(value.operation_id)
     assert await real_redis.ttl(receipt_key) == -1
-    assert (await manager.finalize_once(value, now_ms=1003)).status == RESERVATION_STATUS_ALREADY_FINALIZED
+    assert (await manager.finalize_once(value, now_ms=1003, **proof)).status == RESERVATION_STATUS_ALREADY_FINALIZED
     assert (await manager.release_once(value, now_ms=1004)).status == RESERVATION_STATUS_STATE_CONFLICT
 
     releasable = item(suffix="c" * 64, tenant="tenant-2", run_id="run-tenant-2")

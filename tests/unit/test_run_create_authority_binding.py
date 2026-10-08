@@ -99,7 +99,8 @@ class ResourceManager:
             released_at_ms=None,
         )
 
-    async def finalize_once(self, value):
+    async def finalize_once(self, value, *, canonical_head_keys, canonical_head_witness):
+        assert len(canonical_head_keys) == 6 and len(canonical_head_witness) == 14
         self.order.append("finalize")
         if self.finalize_error:
             raise self.finalize_error

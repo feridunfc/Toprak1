@@ -205,7 +205,12 @@ async def _seed_run(redis_client, suffix: str, *, resource_state: str | None = N
         assert result.state == RESERVATION_STATE_RESERVED
     create = await _commit(store, create_command, revision=0, state=None, at_ms=1000)
     if resources is not None and resource_state in {RESERVATION_STATE_FINALIZED, RESERVATION_STATE_SETTLED}:
-        result = await resources.finalize_once(reservation, now_ms=1100)
+        probe = await store.load_receipt_probe(create.aggregate_identity, create.operation_id)
+        keys, witness = store.authority_head_witness(create, probe.receipt)
+        result = await resources.finalize_once(
+            reservation, now_ms=1100,
+            canonical_head_keys=tuple(keys), canonical_head_witness=tuple(witness),
+        )
         assert result.state == RESERVATION_STATE_FINALIZED
     elif resources is not None and resource_state == "RELEASED":
         result = await resources.release_once(reservation, now_ms=1100)

@@ -4,6 +4,7 @@
 -- KEYS[2] concurrent-run counter STRING
 -- KEYS[3] budget-reserved-cents counter STRING
 -- KEYS[4] tenant inflight counter STRING
+-- KEYS[5..10] exact own RUN authority head/index/receipt/record/log/outbox (finalize only)
 --
 -- ARGV[1]  action: reserve | finalize | release | settle
 -- ARGV[2]  operation_id
@@ -18,6 +19,7 @@
 -- ARGV[11] tenant_inflight_limit (-1 = unbounded)
 -- ARGV[12] released_receipt_ttl_seconds
 -- ARGV[13] run_terminate_operation_id (settle only)
+-- ARGV[13] exact RUN_CREATE authority-head witness JSON (finalize only)
 -- ARGV[14] terminal_proof_sha256 (settle only)
 -- ARGV[15] canonical_transition_id (settle only)
 -- ARGV[16] canonical_record_hash (settle only)
@@ -177,6 +179,45 @@ if concurrent_limit == nil or budget_limit == nil or inflight_limit == nil then
 end
 if released_receipt_ttl == nil or not valid_sha256(proof_sha256) then
     return {'invalid_input', '', '0'}
+end
+
+-- F04.4F: only finalization consumes RUN_CREATE authority. Reserve/release and
+-- terminal settlement retain their existing contracts. No receipt, including
+-- a FINALIZED runtime receipt, substitutes for the exact canonical own-proof.
+if action == 'finalize' then
+    local function conflict() return {'canonical_run_create_proof_conflict', '', '0'} end
+    local ok, own = pcall(cjson.decode, ARGV[13] or '')
+    if #KEYS ~= 10 or #ARGV ~= 13 or not ok or type(own) ~= 'table' or #own ~= 14 then
+        return conflict()
+    end
+    for i=1,14 do if type(own[i]) ~= 'string' then return conflict() end end
+    local decoded, record = pcall(cjson.decode, own[8])
+    if not decoded or type(record) ~= 'table' then return conflict() end
+    local identity = record.canonical_aggregate_identity
+    local meta = record.authoritative_metadata_changes
+    if type(identity) ~= 'table' or identity.aggregate_type ~= 'run'
+        or identity.run_id ~= run_id or identity.task_id ~= cjson.null
+        or record.operation_type ~= 'RUN_CREATE'
+        or own[2] ~= operation_id or operation_id ~= 'run-create:v1:' .. own[1]
+        or own[5] ~= '1' or own[11] ~= 'pending' or own[12] ~= '0'
+        or record.from_revision ~= 0 or record.to_revision ~= 1
+        or record.previous_state ~= cjson.null or record.next_state ~= 'pending'
+        or type(meta) ~= 'table' or meta.run_id ~= run_id
+        or meta.tenant_id ~= tenant_id or meta.estimated_cost_cents ~= cost then
+        return conflict()
+    end
+    -- Bind proof and counter destinations. The reservation receipt's immutable
+    -- operation/run/tenant/cost/version/proof tuple is checked below.
+    local prefix = 'hfa:authority:v1:{' .. own[1] .. '}:'
+    local suffixes = {'aggregate', 'transition-indexes', 'receipts', 'operation-records', 'log', 'outbox'}
+    for i=1,6 do if KEYS[4+i] ~= prefix .. suffixes[i] then return conflict() end end
+    if concurrent_key ~= 'hfa:quota:' .. tenant_id .. ':concurrent_runs'
+        or budget_key ~= 'hfa:quota:' .. tenant_id .. ':budget_reserved_cents'
+        or inflight_key ~= 'hfa:tenant:' .. tenant_id .. ':inflight' then return conflict() end
+    local checked = validate_authority_head(
+        {KEYS[5], KEYS[6], KEYS[7], KEYS[8], KEYS[9], KEYS[10]}, own
+    )
+    if checked[1] ~= 'VALID' then return conflict() end
 end
 
 local canonical_revision = nil
