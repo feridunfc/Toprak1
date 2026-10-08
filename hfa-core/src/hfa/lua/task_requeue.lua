@@ -15,7 +15,7 @@
 -- 7  run_tasks_set
 -- 8  global_runtime_truth_conflict_index
 -- 9  global_runtime_truth_conflict_stream
--- 10..15 canonical_project only: own head/index/receipt/record/log/outbox
+-- 10..15 canonical modes: TASK head/index/receipt/record/log/outbox
 --
 -- ARGV
 -- 1  task_id
@@ -41,7 +41,8 @@
 -- 21 claim_operation_id
 -- 22 claim_epoch
 -- 23 retry_attempt
--- 24..26 canonical_project only: own witness JSON, worker_instance_id, scheduler_epoch
+-- 24..26 canonical modes: own witness JSON, worker_instance_id, scheduler_epoch
+-- 27 canonical_deliver only: exact current TASK head witness JSON
 --
 -- RETURN
 -- { status, value }
@@ -236,12 +237,14 @@ if projection_mode == 'canonical_project' or projection_mode == 'canonical_deliv
     end
 end
 
--- F04.4D: own-proof validation precedes duplicates and ALL effect writers,
--- including truth-conflict evidence. Delivery is a separate, unchanged mode.
-if projection_mode == 'canonical_project' then
+-- Own-proof validation precedes duplicates and ALL effect writers, including
+-- truth-conflict evidence. F04.4D projection keeps its exact-own-head contract;
+-- F04.4E delivery also accepts exact historical proof under a pinned later head.
+if projection_mode == 'canonical_project' or projection_mode == 'canonical_deliver' then
     local function conflict() return failure('canonical_requeue_proof_invalid') end
     local ok, own = pcall(cjson.decode, ARGV[24] or '')
-    if #KEYS ~= 15 or #ARGV ~= 26 or not ok or type(own) ~= 'table' or #own ~= 14 then
+    local argc = projection_mode == 'canonical_project' and 26 or 27
+    if #KEYS ~= 15 or #ARGV ~= argc or not ok or type(own) ~= 'table' or #own ~= 14 then
         return conflict()
     end
     for i=1,14 do if type(own[i]) ~= 'string' then return conflict() end end
@@ -284,10 +287,50 @@ if projection_mode == 'canonical_project' then
         or run_tasks_set ~= 'hfa:dag:run:' .. run_id .. ':tasks'
         or truth_conflict_index ~= 'hfa:runtime-truth:v1:conflicts:index'
         or truth_conflict_stream ~= 'hfa:runtime-truth:v1:conflicts:stream' then return conflict() end
+    local current = own
+    if projection_mode == 'canonical_deliver' then
+        local head_ok, head = pcall(cjson.decode, ARGV[27] or '')
+        if not head_ok or type(head) ~= 'table' or #head ~= 14 then return conflict() end
+        for i=1,14 do if type(head[i]) ~= 'string' then return conflict() end end
+        if head[1] ~= own[1] or not tonumber(head[5])
+            or tonumber(head[5]) < canonical_revision then return conflict() end
+        local notification = intents[2]
+        if type(notification) ~= 'table' or notification.kind ~= 'REQUEUE_NOTIFICATION'
+            or notification.tenant_id ~= tenant_id or notification.task_id ~= task_id
+            or notification.reason_code ~= reason_code
+            or notification.retry_attempt ~= retry_attempt then return conflict() end
+        local receipt_ok, receipt = pcall(cjson.decode, own[9])
+        local index_ok, index = pcall(cjson.decode, own[10])
+        if not receipt_ok or type(receipt) ~= 'table'
+            or not index_ok or type(index) ~= 'table'
+            or record.operation_id ~= own[2] or receipt.operation_id ~= own[2]
+            or record.transition_id ~= own[4] or receipt.transition_id ~= own[4]
+            or index.transition_id ~= own[4]
+            or receipt.operation_type ~= 'TASK_REQUEUE'
+            or receipt.aggregate_revision ~= canonical_revision or index.aggregate_revision ~= canonical_revision
+            or record.canonical_command_hash ~= own[6] or receipt.canonical_command_hash ~= own[6]
+            or record.canonical_record_hash ~= own[7] or receipt.canonical_record_hash ~= own[7]
+            or index.canonical_record_hash ~= own[7] then return conflict() end
+        current = head
+    end
     local checked = validate_authority_head(
-        {KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14], KEYS[15]}, own
+        {KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14], KEYS[15]}, current
     )
     if checked[1] ~= 'VALID' then return conflict() end
+    if projection_mode == 'canonical_deliver' then
+        -- Same historical-envelope pattern as task_complete.lua: the delivery
+        -- record is immutable evidence, not a new lifecycle/head decision.
+        local function exact_envelope(key, field, expected)
+            local raw = redis.call('HGET', key, field)
+            if not raw then return false end
+            local ok, env = pcall(cjson.decode, raw)
+            return ok and type(env) == 'table' and type(env.payload) == 'string'
+                and env.payload == expected and redis.sha1hex(env.payload) == env.storage_sha1
+        end
+        if not exact_envelope(KEYS[13], own[3], own[8])
+            or not exact_envelope(KEYS[12], own[3], own[9])
+            or not exact_envelope(KEYS[11], own[4], own[10]) then return conflict() end
+    end
 end
 
 -- Resolve a trustworthy task/run binding before RUN truth or conflict evidence.

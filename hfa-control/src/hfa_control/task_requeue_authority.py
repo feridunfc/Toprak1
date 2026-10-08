@@ -554,11 +554,29 @@ class TaskRequeueProjectionManager:
         proof_keys, witness = await self._validate_durable_authority(
             projection, require_exact_head=require_exact_head
         )
-        # Delivery remains a separate invocation with its existing contract.
         projecting = mode == "canonical_project"
+        delivery_head: list[str] = []
+        if not projecting:
+            # A durable delivery may be completed after later TASK progress.
+            # Pin that current head as well as the historical requeue record;
+            # both are only witnesses until the delivery Lua revalidates them.
+            assert self.store is not None
+            identity = CanonicalAggregateIdentity(
+                AggregateType.TASK, projection.run_id, projection.task_id
+            )
+            try:
+                head_keys, delivery_head = await self.store._authority_head_guard(identity)
+                if head_keys != proof_keys:
+                    raise RedisAuthorityCorruptionError("delivery head keyspace mismatch")
+            except Exception as exc:
+                raise TaskRequeueAuthorityError(
+                    status=TASK_REQUEUE_EVIDENCE_CONFLICT_STATUS,
+                    detail=str(exc),
+                    canonical_commit_durable=True,
+                ) from exc
         assert self._loader is not None
         raw = await self._loader.run(
-            num_keys=15 if projecting else 9,
+            num_keys=15,
             keys=[
                 DagRedisKey.task_state(projection.task_id),
                 DagRedisKey.task_meta(projection.task_id),
@@ -569,7 +587,7 @@ class TaskRequeueProjectionManager:
                 DagRedisKey.run_tasks(projection.run_id),
                 RedisKey.runtime_truth_conflict_index(),
                 RedisKey.runtime_truth_conflict_stream(),
-            ] + (proof_keys if projecting else []),
+            ] + proof_keys,
             args=[
                 projection.task_id,
                 projection.run_id,
@@ -594,11 +612,10 @@ class TaskRequeueProjectionManager:
                 projection.claim_operation_id,
                 str(projection.claim_epoch),
                 str(projection.retry_attempt),
-            ] + ([
                 canonical_json_bytes(witness).decode("utf-8"),
                 projection.worker_instance_id,
                 projection.scheduler_epoch,
-            ] if projecting else []),
+            ] + ([] if projecting else [canonical_json_bytes(delivery_head).decode("utf-8")]),
         )
         if not isinstance(raw, (list, tuple)) or not raw:
             raise TaskRequeueAuthorityError(
