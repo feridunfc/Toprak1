@@ -486,6 +486,9 @@ class AdmissionResourceReservationManager:
         settlement: AdmissionResourceSettlementInput,
         *,
         now_ms: int | None = None,
+        canonical_head_keys: tuple[str, ...] = (),
+        canonical_head_witness: tuple[str, ...] = (),
+        run_create_witness: tuple[str, ...] = (),
     ) -> AdmissionResourceSettlementResult:
         if not isinstance(settlement, AdmissionResourceSettlementInput):
             raise TypeError("settlement must be AdmissionResourceSettlementInput")
@@ -493,13 +496,13 @@ class AdmissionResourceReservationManager:
         assert self._loader is not None
         actual_now_ms = self._now_ms(now_ms)
         raw = await self._loader.run(
-            num_keys=4,
+            num_keys=4 + len(canonical_head_keys),
             keys=[
                 self.reservation_receipt_key(settlement.run_create_operation_id),
                 self.concurrent_run_key(settlement.tenant_id),
                 self.budget_reserved_key(settlement.tenant_id),
                 RedisKey.tenant_inflight(settlement.tenant_id),
-            ],
+            ] + list(canonical_head_keys),
             args=[
                 "settle",
                 settlement.run_create_operation_id,
@@ -519,6 +522,8 @@ class AdmissionResourceReservationManager:
                 str(settlement.canonical_revision),
                 settlement.final_state,
                 settlement.proof_sha256,
+                json.dumps(canonical_head_witness),
+                json.dumps(run_create_witness),
             ],
         )
         if not isinstance(raw, (list, tuple)) or len(raw) < 3:

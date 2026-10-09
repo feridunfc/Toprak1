@@ -930,18 +930,20 @@ class RunTerminateAuthorityBinding:
                 "RUN_CREATE settlement identity does not match terminal proof",
                 canonical_commit_durable=True,
             )
-        return reservation
+        _, creation_witness = self.store.authority_head_witness(record, receipt)
+        return reservation, tuple(creation_witness)
 
     async def _settle_resources(
         self,
         *,
         terminal_record: Any,
+        terminal_receipt: Any,
         proof: TerminalAggregateProof,
     ) -> None:
         manager = self.resource_manager
         if manager is None:
             return
-        reservation = await self._resource_reservation_for_terminal_record(
+        reservation, creation_witness = await self._resource_reservation_for_terminal_record(
             terminal_record=terminal_record,
             proof=proof,
         )
@@ -959,10 +961,14 @@ class RunTerminateAuthorityBinding:
             canonical_revision=terminal_record.to_revision,
             final_state=proof.final_state,
         )
+        own_keys, own_witness = self.store.authority_head_witness(terminal_record, terminal_receipt)
         try:
             settled = await manager.settle_once(
                 settlement,
                 now_ms=proof.finalized_at_ms,
+                canonical_head_keys=tuple(own_keys),
+                canonical_head_witness=tuple(own_witness),
+                run_create_witness=creation_witness,
             )
         except Exception as exc:
             raise RunTerminateAuthorityError(
@@ -1114,6 +1120,7 @@ class RunTerminateAuthorityBinding:
 
         await self._settle_resources(
             terminal_record=record,
+            terminal_receipt=canonical_receipt,
             proof=proof,
         )
 

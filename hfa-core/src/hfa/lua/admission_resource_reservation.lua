@@ -27,6 +27,9 @@
 -- ARGV[18] canonical_revision (settle only)
 -- ARGV[19] final_state (settle only)
 -- ARGV[20] settlement_proof_sha256 (settle only)
+-- KEYS[5..10] own RUN authority keyset also used by settle
+-- ARGV[21] exact RUN_TERMINATE own-head witness (settle only)
+-- ARGV[22] exact historical RUN_CREATE witness in that same keyset (settle only)
 
 local receipt_key = KEYS[1]
 local concurrent_key = KEYS[2]
@@ -235,6 +238,81 @@ if action == 'settle' then
     then
         return {'invalid_input', '', '0'}
     end
+end
+
+-- F04.4G: accepted RUN_TERMINATE evidence authorizes settlement, not TASK
+-- projection or a SETTLED-looking runtime receipt. Python only prepares proofs.
+-- Revalidate both own head and the existing RUN_CREATE cost/tenant predecessor
+-- before any duplicate classification or resource effect in this invocation.
+if action == 'settle' then
+    local function conflict() return {'canonical_run_terminate_proof_conflict', '', '0'} end
+    local function decode(raw)
+        local ok, value = pcall(cjson.decode, raw or '')
+        if not ok or type(value) ~= 'table' then return nil end
+        return value
+    end
+    local function witness(raw)
+        local value = decode(raw)
+        if not value or #value ~= 14 then return nil end
+        for i=1,14 do if type(value[i]) ~= 'string' then return nil end end
+        return value
+    end
+    local own, creation = witness(ARGV[21]), witness(ARGV[22])
+    if #KEYS ~= 10 or #ARGV ~= 22 or not own or not creation then return conflict() end
+    local record, origin = decode(own[8]), decode(creation[8])
+    if not record or not origin then return conflict() end
+    local identity, meta = record.canonical_aggregate_identity, record.authoritative_metadata_changes
+    if type(identity) ~= 'table' or identity.aggregate_type ~= 'run'
+        or identity.run_id ~= run_id or identity.task_id ~= cjson.null
+        or record.operation_type ~= 'RUN_TERMINATE' or own[2] ~= run_terminate_operation_id
+        or own[4] ~= canonical_transition_id or own[5] ~= canonical_revision_raw
+        or own[6] ~= canonical_command_hash or own[7] ~= canonical_record_hash
+        or own[11] ~= final_state or own[12] ~= '0'
+        or type(meta) ~= 'table' or meta.run_id ~= run_id or meta.tenant_id ~= tenant_id
+        or type(meta.terminal_evidence) ~= 'table'
+        or meta.terminal_evidence.terminal_proof_sha256 ~= terminal_proof_sha256
+        or meta.terminal_evidence.final_state ~= final_state then return conflict() end
+    local origin_id, origin_meta = origin.canonical_aggregate_identity, origin.authoritative_metadata_changes
+    local origin_receipt, origin_index = decode(creation[9]), decode(creation[10])
+    if creation[1] ~= own[1] or creation[2] ~= operation_id
+        or operation_id ~= 'run-create:v1:' .. own[1]
+        or creation[5] ~= '1' or creation[11] ~= 'pending' or creation[12] ~= '0'
+        or type(origin_id) ~= 'table' or origin_id.aggregate_type ~= 'run'
+        or origin_id.run_id ~= run_id or origin_id.task_id ~= cjson.null
+        or origin.operation_type ~= 'RUN_CREATE' or origin.operation_id ~= operation_id
+        or origin.from_revision ~= 0 or origin.to_revision ~= 1
+        or origin.previous_state ~= cjson.null or origin.next_state ~= 'pending'
+        or record.from_revision ~= origin.to_revision or record.to_revision ~= origin.to_revision + 1
+        or record.previous_state ~= origin.next_state
+        or type(origin_meta) ~= 'table' or origin_meta.run_id ~= run_id
+        or origin_meta.tenant_id ~= tenant_id or origin_meta.estimated_cost_cents ~= cost
+        or not origin_receipt or not origin_index
+        or origin_receipt.operation_type ~= 'RUN_CREATE' or origin_receipt.operation_id ~= operation_id
+        or origin.transition_id ~= creation[4] or origin_receipt.transition_id ~= creation[4]
+        or origin_index.transition_id ~= creation[4]
+        or origin_receipt.aggregate_revision ~= 1 or origin_index.aggregate_revision ~= 1
+        or origin.canonical_command_hash ~= creation[6] or origin_receipt.canonical_command_hash ~= creation[6]
+        or origin.canonical_record_hash ~= creation[7] or origin_receipt.canonical_record_hash ~= creation[7]
+        or origin_index.canonical_record_hash ~= creation[7] then return conflict() end
+    local prefix = 'hfa:authority:v1:{' .. own[1] .. '}:'
+    local suffixes = {'aggregate', 'transition-indexes', 'receipts', 'operation-records', 'log', 'outbox'}
+    for i=1,6 do if KEYS[4+i] ~= prefix .. suffixes[i] then return conflict() end end
+    if concurrent_key ~= 'hfa:quota:' .. tenant_id .. ':concurrent_runs'
+        or budget_key ~= 'hfa:quota:' .. tenant_id .. ':budget_reserved_cents'
+        or inflight_key ~= 'hfa:tenant:' .. tenant_id .. ':inflight' then return conflict() end
+    local checked = validate_authority_head(
+        {KEYS[5], KEYS[6], KEYS[7], KEYS[8], KEYS[9], KEYS[10]}, own
+    )
+    if checked[1] ~= 'VALID' then return conflict() end
+    -- Existing fixed historical envelope lookups; no new authority/index/scan.
+    local function exact_envelope(key, field, expected)
+        local env = decode(redis.call('HGET', key, field))
+        return env and type(env.payload) == 'string' and env.payload == expected
+            and redis.sha1hex(env.payload) == env.storage_sha1
+    end
+    if not exact_envelope(KEYS[8], creation[3], creation[8])
+        or not exact_envelope(KEYS[7], creation[3], creation[9])
+        or not exact_envelope(KEYS[6], creation[4], creation[10]) then return conflict() end
 end
 
 local receipt_type = redis_type_name(receipt_key)
