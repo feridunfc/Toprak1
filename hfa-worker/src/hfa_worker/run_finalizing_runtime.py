@@ -11,7 +11,7 @@ from hfa_control.task_terminal_authority import (
     TaskTerminalAuthorityError,
 )
 from hfa_worker.consumer import CONSUMER_GROUP, WorkerConsumer
-from hfa_worker.redis_utils import ack_message
+from hfa_worker.recovery_ack import ack_message
 from hfa_worker.runtime.task_context_builder import build_task_context_from_run_requested
 from hfa_worker.runtime.terminal_duplicate_delivery import (
     TERMINAL_DUPLICATE_DELIVERY,
@@ -178,7 +178,15 @@ class RunFinalizingWorkerConsumer(WorkerConsumer):
             )
             return
 
-        await ack_message(self._redis, stream, CONSUMER_GROUP, msg_id)
+        # The finalization result is observational until its own RUN proof is
+        # revalidated in the same Redis invocation as the recovery XACK.
+        status = await ack_message(
+            self._redis, stream, CONSUMER_GROUP, msg_id,
+            ctx=ctx, run_termination=run_termination,
+        )
+        if status not in {"acked", "already_acked"}:
+            logger.warning("Recovery ACK failed closed run=%s task=%s status=%s",
+                           ctx.run_id, ctx.task_id, status)
 
     async def _process_message_via_task_consumer(
         self,

@@ -678,6 +678,8 @@ class RunTerminateBindingResult:
     canonical_command_hash: str = ""
     canonical_revision: int = 0
     terminal_proof_sha256: str = ""
+    canonical_head_keys: tuple[str, ...] = ()
+    canonical_head_witness: tuple[str, ...] = ()
 
 
 def build_run_terminate_command(proof: TerminalAggregateProof) -> AuthorityCommand:
@@ -1164,6 +1166,8 @@ class RunTerminateAuthorityBinding:
             canonical_command_hash=record.canonical_command_hash,
             canonical_revision=record.to_revision,
             terminal_proof_sha256=proof.proof_sha256,
+            canonical_head_keys=tuple(own_keys),
+            canonical_head_witness=tuple(own_witness),
         )
 
 
