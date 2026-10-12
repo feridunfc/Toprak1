@@ -44,6 +44,19 @@ class TaskAdmitProjectionPendingError(TaskAdmitAuthorityError):
         self.retry_safe = True
 
 
+class TaskAdmitProjectionConflictError(TaskAdmitAuthorityError):
+    """Durable decision has incompatible effects; bounded manual disposition."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+        self.canonical_commit_durable = True
+        self.legacy_projection_completed = False
+        self.retry_safe = False
+        self.recovery_owner = "operations/task-admission"
+        self.required_disposition = "quarantine/manual resolution; no automatic repair"
+
+
 class TaskAdmitAuthorityConflictError(TaskAdmitAuthorityError):
     def __init__(self, *, status: str, detail: str = "", transition_id: str | None = None,
                  aggregate_revision: int | None = None) -> None:
@@ -197,6 +210,19 @@ class TaskAdmitAuthorityBinding:
         receipt = probe.receipt
         if record is None:
             return "receipt_record_missing"
+        if snapshot.revision > record.to_revision and record.to_revision == 1:
+            # A historical admission receipt remains immutable after progress.
+            # The later exact head and this receipt are revalidated in Lua;
+            # progress permits only a read-only duplicate, never materialization.
+            checks = (
+                record.operation_type == receipt.operation_type == OperationType.TASK_ADMIT.value,
+                record.operation_id == receipt.operation_id,
+                record.transition_id == receipt.transition_id,
+                record.canonical_command_hash == receipt.canonical_command_hash,
+                record.canonical_record_hash == receipt.canonical_record_hash,
+                record.to_revision == receipt.aggregate_revision,
+            )
+            return None if all(checks) else "historical_admission_receipt_mismatch"
         checks = (
             snapshot.operation_id == receipt.operation_id == record.operation_id,
             snapshot.transition_id == receipt.transition_id == record.transition_id,
@@ -347,9 +373,19 @@ class TaskAdmitAuthorityBinding:
                 snapshot=snapshot, receipt_probe=receipt_probe,
             )
 
+        current_head_witness: tuple[str, ...] = ()
         if duplicate_record is not None:
             assert duplicate_receipt is not None
-            await self._validate_exact_head(duplicate_record, duplicate_receipt)
+            if snapshot is not None and snapshot.revision > duplicate_record.to_revision:
+                try:
+                    _, current = await self.store._authority_head_guard(command.aggregate_identity)
+                    current_head_witness = tuple(current)
+                except Exception as exc:
+                    raise TaskAdmitAuthorityConflictError(
+                        status=self._persistence_status(exc), detail=str(exc)
+                    ) from exc
+            else:
+                await self._validate_exact_head(duplicate_record, duplicate_receipt)
             record, receipt = duplicate_record, duplicate_receipt
         else:
             assert evaluation.commit_plan is not None
@@ -359,9 +395,17 @@ class TaskAdmitAuthorityBinding:
             # Serialize the accepted decision, never a subsequently observed head.
             # The projector validates this witness atomically, including duplicates.
             keys, witness = self.store.authority_head_witness(record, receipt)
+            if current_head_witness:
+                return await self.legacy_admit(
+                    normalized, canonical_head_keys=tuple(keys),
+                    canonical_head_witness=tuple(witness),
+                    current_head_witness=current_head_witness,
+                )
             return await self.legacy_admit(
                 normalized, canonical_head_keys=tuple(keys),
                 canonical_head_witness=tuple(witness),
             )
+        except TaskAdmitProjectionConflictError:
+            raise
         except Exception as exc:
             raise TaskAdmitProjectionPendingError() from exc

@@ -289,6 +289,7 @@ class DagLua:
     async def _task_admit_canonical_projection(
         self, seed, *, canonical_head_keys: tuple[str, ...],
         canonical_head_witness: tuple[str, ...],
+        current_head_witness: tuple[str, ...] = (),
     ) -> TaskAdmitResult:
         result = await self._task_admit_project(
             seed,
@@ -298,10 +299,18 @@ class DagLua:
             canonical_projection=True,
             canonical_head_keys=canonical_head_keys,
             canonical_head_witness=canonical_head_witness,
+            current_head_witness=current_head_witness,
         )
         if not result.admitted:
-            from hfa_control.task_admit_authority import TaskAdmitProjectionPendingError
+            from hfa_control.task_admit_authority import (
+                TaskAdmitProjectionPendingError, TaskAdmitProjectionConflictError,
+            )
 
+            if result.status in {
+                "task_admit_target_type_conflict", "task_admit_effect_conflict",
+                "task_admit_input_conflict",
+            }:
+                raise TaskAdmitProjectionConflictError(result.status)
             raise TaskAdmitProjectionPendingError(result.status)
         return result
 
@@ -315,6 +324,7 @@ class DagLua:
         canonical_projection: bool = False,
         canonical_head_keys: tuple[str, ...] = (),
         canonical_head_witness: tuple[str, ...] = (),
+        current_head_witness: tuple[str, ...] = (),
     ) -> TaskAdmitResult:
         await self._ensure_initialised()
         assert self._admit_loader is not None
@@ -352,6 +362,7 @@ class DagLua:
             getattr(seed, "policy", "") or "",
             "1" if canonical_projection else "0",
             json.dumps(canonical_head_witness, separators=(",", ":")),
+            json.dumps(current_head_witness, separators=(",", ":")),
         ] + child_ids
         raw = await self._admit_loader.run(num_keys=len(keys), keys=keys, args=args)
         status = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])

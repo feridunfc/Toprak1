@@ -731,6 +731,7 @@ class RunSubmissionCoordinator:
                     .TASK_ADMISSION_FAILED
                 ),
                 exc=exc,
+                task_admit_status=str(getattr(exc, "status", "") or ""),
             )
 
         task_status = str(

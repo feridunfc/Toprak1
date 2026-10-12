@@ -3,7 +3,8 @@
 --
 -- Seeds a task into Redis.  If dependency_count == 0 the task is immediately
 -- placed on the tenant ready queue.  Idempotent: re-admission of an existing
--- task_id returns 'already_exists' without mutation.
+-- exact compatible postimage returns 'already_exists' without mutation.
+-- Knowable command failures are prevalidated; Redis Lua rollback is not assumed.
 --
 -- ─── KEYS ──────────────────────────────────────────────────────────────────
 -- 1  task_state_key           hfa:dag:task:<id>:state
@@ -34,7 +35,8 @@
 -- 15  policy
 -- 16  canonical_projection   1 or 0
 -- 17  canonical_head_witness exact accepted TASK_ADMIT witness JSON
--- 18.. child_task_ids         variadic tail
+-- 18  current_head_witness    optional exact later TASK head (read-only retry)
+-- 19.. child_task_ids         variadic tail
 --
 -- ─── RETURN ────────────────────────────────────────────────────────────────
 -- { status }   where status ∈ { already_exists, seeded_root, seeded_waiting }
@@ -58,11 +60,13 @@ local payload_json          = ARGV[7]  or '{}'
 local trace_parent          = ARGV[8]  or ''
 local trace_state           = ARGV[9]  or ''
 local dependency_count      = tonumber(ARGV[10]) or 0
-local task_state_ttl        = tonumber(ARGV[11]) or 86400
-local task_meta_ttl         = tonumber(ARGV[12]) or 86400
-local ready_ttl             = tonumber(ARGV[13]) or 86400
+local task_state_ttl        = tonumber(ARGV[11])
+local task_meta_ttl         = tonumber(ARGV[12])
+local ready_ttl             = tonumber(ARGV[13])
 local region                = ARGV[14] or ''
 local policy                = ARGV[15] or 'LEAST_LOADED'
+
+local progressed_head = nil
 
 -- F04.4A: existing runtime state cannot replace canonical evidence, even on
 -- duplicates. Revalidate the accepted own proof in this invocation before
@@ -101,22 +105,134 @@ if ARGV[16] == '1' then
     end
     local children = effects.child_task_ids
     local membership = effects.run_tasks_membership
-    if type(children) ~= 'table' or #children ~= #ARGV - 17
+    if type(children) ~= 'table' or #children ~= #ARGV - 18
         or type(membership) ~= 'table' or membership.run_id ~= run_id
         or membership.task_id ~= task_id then return conflict() end
     for i=1,#children do
-        if children[i] ~= ARGV[17+i] then return conflict() end
+        if children[i] ~= ARGV[18+i] then return conflict() end
     end
-    local checked = validate_authority_head(
-        {KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14]}, own
-    )
-    if checked[1] ~= 'VALID' then return conflict() end
+    local head_ok, later = pcall(cjson.decode, ARGV[18] or '[]')
+    if not head_ok or type(later) ~= 'table' then return conflict() end
+    local proof_keys = {KEYS[9], KEYS[10], KEYS[11], KEYS[12], KEYS[13], KEYS[14]}
+    if #later == 0 then
+        local checked = validate_authority_head(proof_keys, own)
+        if checked[1] ~= 'VALID' then return conflict() end
+    else
+        -- Historical admission can only classify a read-only progressed retry.
+        -- Validate exact current head and fixed historical envelopes in this
+        -- same invocation; never materialize the old postimage after progress.
+        if #later ~= 14 then return conflict() end
+        for i=1,14 do if type(later[i]) ~= 'string' then return conflict() end end
+        if later[1] ~= own[1] or not tonumber(later[5]) or tonumber(later[5]) <= 1 then return conflict() end
+        local decoded_head, head_record = pcall(cjson.decode, later[8])
+        if not decoded_head or type(head_record) ~= 'table' then return conflict() end
+        local hi = head_record.canonical_aggregate_identity
+        if type(hi) ~= 'table' or hi.aggregate_type ~= 'task'
+            or hi.run_id ~= run_id or hi.task_id ~= task_id then return conflict() end
+        local checked = validate_authority_head(proof_keys, later)
+        if checked[1] ~= 'VALID' then return conflict() end
+        local function exact_envelope(key, field, payload)
+            local raw = redis.call('HGET', key, field)
+            if not raw then return false end
+            local good, env = pcall(cjson.decode, raw)
+            return good and type(env) == 'table' and env.payload == payload
+                and redis.sha1hex(payload) == env.storage_sha1
+        end
+        if not exact_envelope(KEYS[12], own[3], own[8])
+            or not exact_envelope(KEYS[11], own[3], own[9])
+            or not exact_envelope(KEYS[10], own[4], own[10]) then return conflict() end
+        progressed_head = head_record
+    end
 elseif ARGV[16] ~= '0' or #KEYS ~= 8 then
     return {'canonical_task_admit_proof_conflict'}
 end
 
--- Idempotency guard.
-if redis.call('EXISTS', task_state_key) == 1 then
+-- F06: every knowable target/argument error is rejected before the first write.
+local function reject(status) return {status or 'task_admit_effect_conflict'} end
+local function kind(key)
+    local value = redis.call('TYPE', key)
+    return type(value) == 'table' and value['ok'] or value
+end
+local function ttl_valid(value)
+    return value and value > 0 and value <= 2147483647 and value == math.floor(value)
+end
+local score = tonumber(admitted_at)
+if not task_id or task_id == '' or not run_id or run_id == '' or not tenant_id or tenant_id == ''
+    or not score or score ~= score or math.abs(score) > 9007199254740991
+    or not tonumber(ARGV[10]) or dependency_count < 0
+    or dependency_count > 9007199254740991 or dependency_count ~= math.floor(dependency_count)
+    or not ttl_valid(task_state_ttl) or not ttl_valid(task_meta_ttl) or not ttl_valid(ready_ttl) then
+    return reject('task_admit_input_conflict')
+end
+local destinations = {
+    'hfa:dag:task:' .. task_id .. ':state', 'hfa:dag:task:' .. task_id .. ':meta',
+    'hfa:dag:task:' .. task_id .. ':remaining_deps', 'hfa:dag:task:' .. task_id .. ':children',
+    'hfa:dag:task:' .. task_id .. ':ready_emitted', 'hfa:dag:tenant:' .. tenant_id .. ':ready',
+    'hfa:dag:run:' .. run_id .. ':tasks', 'hfa:dag:tenants:active',
+}
+local types = {'string', 'hash', 'string', 'set', 'string', 'zset', 'set', 'set'}
+local observed = {}
+for i=1,8 do
+    if KEYS[i] ~= destinations[i] then return reject() end
+    observed[i] = kind(KEYS[i])
+    if observed[i] ~= 'none' and observed[i] ~= types[i] then
+        return reject('task_admit_target_type_conflict')
+    end
+end
+local children, child_count = {}, 0
+for i=19,#ARGV do
+    if ARGV[i] == '' then return reject('task_admit_input_conflict') end
+    if not children[ARGV[i]] then children[ARGV[i]] = true; child_count = child_count + 1 end
+end
+local expected_meta = {
+    task_id=task_id, run_id=run_id, tenant_id=tenant_id, agent_type=agent_type,
+    priority=priority, admitted_at=admitted_at, payload_json=payload_json,
+    trace_parent=trace_parent, trace_state=trace_state, region=region, policy=policy,
+}
+local function meta_matches()
+    if observed[2] ~= 'hash' then return false end
+    for field,value in pairs(expected_meta) do
+        if redis.call('HGET', task_meta_key, field) ~= value then return false end
+    end
+    return true
+end
+local member = redis.call('SISMEMBER', run_tasks_key, task_id)
+local queued_score = redis.call('ZSCORE', tenant_ready_queue, task_id)
+local state = observed[1] == 'string' and redis.call('GET', task_state_key) or false
+if progressed_head then
+    -- Later durable lifecycle evidence proves admission was consumable. Only
+    -- compatible identity/state may be acknowledged; no queue/TTL reconstruction.
+    local states = {ready=true, pending=true, scheduled=true, running=true, done=true, failed=true, skipped=true}
+    if not states[state] or not meta_matches()
+        or (state ~= progressed_head.next_state and state ~= progressed_head.previous_state
+            and state ~= (dependency_count == 0 and 'ready' or 'pending')) then return reject() end
+    return {'already_exists'}
+end
+local footprint = member == 1 or queued_score ~= false
+for i=1,5 do if observed[i] ~= 'none' then footprint = true end end
+if footprint then
+    -- A partial postimage is an explicit operations-owned conflict, never an
+    -- automatic repair or admitted success. Complete original postimage is a
+    -- read-only duplicate; absolute expiries are preserved.
+    if state ~= (dependency_count == 0 and 'ready' or 'pending')
+        or not meta_matches() or redis.call('HLEN', task_meta_key) ~= 11
+        or member ~= 1 or observed[3] ~= 'string'
+        or redis.call('GET', task_remaining_key) ~= tostring(dependency_count)
+        or redis.call('SCARD', task_children_key) ~= child_count then return reject() end
+    for child,_ in pairs(children) do
+        if redis.call('SISMEMBER', task_children_key, child) ~= 1 then return reject() end
+    end
+    for _,i in ipairs({1,2,3,7}) do
+        if redis.call('PTTL', KEYS[i]) <= 0 then return reject() end
+    end
+    if child_count > 0 and redis.call('PTTL', task_children_key) <= 0 then return reject() end
+    if dependency_count == 0 then
+        if not queued_score or tonumber(queued_score) ~= score
+            or redis.call('GET', task_ready_emitted) ~= '1'
+            or redis.call('SISMEMBER', tenant_active_set, tenant_id) ~= 1
+            or redis.call('PTTL', task_ready_emitted) <= 0
+            or redis.call('PTTL', tenant_ready_queue) <= 0 then return reject() end
+    elseif observed[5] ~= 'none' or queued_score ~= false then return reject() end
     return {'already_exists'}
 end
 
@@ -144,10 +260,10 @@ redis.call('EXPIRE', task_meta_key, task_meta_ttl)
 redis.call('SET', task_remaining_key, tostring(dependency_count), 'EX', task_state_ttl)
 
 -- Register child task ids.
-for i = 18, #ARGV do
+for i = 19, #ARGV do
     redis.call('SADD', task_children_key, ARGV[i])
 end
-if #ARGV >= 18 then
+if #ARGV >= 19 then
     redis.call('EXPIRE', task_children_key, task_meta_ttl)
 end
 
