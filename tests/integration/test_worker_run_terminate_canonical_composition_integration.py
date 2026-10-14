@@ -47,7 +47,8 @@ async def _commit(store, command, revision, state, at):
     e=evaluate_authority_commit(context=_ctx(command), command=command, current_revision=revision,
         current_state=state, receipt_probe=None, committed_at_ms=at, correlation_id=None)
     assert e.decision.code is AuthorityDecisionCode.ACCEPTED and e.commit_plan is not None
-    r=await store.commit(e.commit_plan); assert r.status is RedisAuthorityCommitStatus.COMMITTED
+    # F07: TASK_ADMIT in an activated namespace must be owner-aware (legacy writers are fenced).
+    r=await store.commit(e.commit_plan, **({'require_task_owner_binding': True} if command.operation_type is OperationType.TASK_ADMIT else {})); assert r.status is RedisAuthorityCommitStatus.COMMITTED
     return e.commit_plan.record
 
 async def _seed_run(r, run_id, tenant_id):

@@ -16,6 +16,7 @@
 -- 7  run_tasks_key            hfa:dag:run:<rid>:tasks
 -- 8  tenant_active_set_key    hfa:dag:tenants:active
 -- 9..14 canonical own TASK head/index/receipt/record/log/outbox (canonical mode)
+-- 15  global task-owner HASH, 16 owner integrity header (only when ARGV[19] == '1')
 --
 -- ─── ARGV ──────────────────────────────────────────────────────────────────
 -- 1   task_id
@@ -36,7 +37,9 @@
 -- 16  canonical_projection   1 or 0
 -- 17  canonical_head_witness exact accepted TASK_ADMIT witness JSON
 -- 18  current_head_witness    optional exact later TASK head (read-only retry)
--- 19.. child_task_ids         variadic tail
+-- 19  owner_required         '1' = validate the global owner inventory before the first write
+-- 20  owner_expected         exact owner value derived from the stored canonical record
+-- 21.. child_task_ids         variadic tail
 --
 -- ─── RETURN ────────────────────────────────────────────────────────────────
 -- { status }   where status ∈ { already_exists, seeded_root, seeded_waiting }
@@ -74,7 +77,7 @@ local progressed_head = nil
 if ARGV[16] == '1' then
     local function conflict() return {'canonical_task_admit_proof_conflict'} end
     local ok, own = pcall(cjson.decode, ARGV[17] or '')
-    if #KEYS ~= 14 or not ok or type(own) ~= 'table' or #own ~= 14 then
+    if (#KEYS ~= 14 and #KEYS ~= 16) or not ok or type(own) ~= 'table' or #own ~= 14 then
         return conflict()
     end
     for i=1,14 do
@@ -105,11 +108,11 @@ if ARGV[16] == '1' then
     end
     local children = effects.child_task_ids
     local membership = effects.run_tasks_membership
-    if type(children) ~= 'table' or #children ~= #ARGV - 18
+    if type(children) ~= 'table' or #children ~= #ARGV - 20
         or type(membership) ~= 'table' or membership.run_id ~= run_id
         or membership.task_id ~= task_id then return conflict() end
     for i=1,#children do
-        if children[i] ~= ARGV[18+i] then return conflict() end
+        if children[i] ~= ARGV[20+i] then return conflict() end
     end
     local head_ok, later = pcall(cjson.decode, ARGV[18] or '[]')
     if not head_ok or type(later) ~= 'table' then return conflict() end
@@ -143,7 +146,35 @@ if ARGV[16] == '1' then
             or not exact_envelope(KEYS[10], own[4], own[10]) then return conflict() end
         progressed_head = head_record
     end
-elseif ARGV[16] ~= '0' or #KEYS ~= 8 then
+    -- F07 v2: the owner inventory is validated in THIS invocation, before EXISTS or any write,
+    -- for fresh materialization, exact duplicates and recover-only replays alike.
+    if ARGV[19] == '1' then
+        local function owner_conflict() return {'canonical_task_admit_owner_conflict'} end
+        local function rtype(key)
+            local reply = redis.call('TYPE', key)
+            if type(reply) == 'table' then return reply['ok'] end
+            return reply
+        end
+        if #KEYS ~= 16 or type(ARGV[20]) ~= 'string' or ARGV[20] == '' then return owner_conflict() end
+        if rtype(KEYS[15]) ~= 'hash' or rtype(KEYS[16]) ~= 'hash'
+            or redis.call('HLEN', KEYS[16]) ~= 7
+            or redis.call('PTTL', KEYS[15]) ~= -1 or redis.call('PTTL', KEYS[16]) ~= -1 then
+            return owner_conflict()
+        end
+        local flat = redis.call('HGETALL', KEYS[16])
+        local header = {}
+        for i=1,#flat,2 do header[flat[i]] = flat[i+1] end
+        local count = tonumber(header.owner_count)
+        if header.schema ~= 'task-owner-header:v1' or header.state ~= 'ACTIVE'
+            or not count or count < 1 or count ~= math.floor(count)
+            or redis.call('HLEN', KEYS[15]) ~= count
+            or redis.call('HGET', KEYS[15], task_id) ~= ARGV[20] then
+            return owner_conflict()
+        end
+    elseif ARGV[19] ~= '0' or #KEYS ~= 14 then
+        return {'canonical_task_admit_proof_conflict'}
+    end
+elseif ARGV[16] ~= '0' or #KEYS ~= 8 or ARGV[19] ~= '0' then
     return {'canonical_task_admit_proof_conflict'}
 end
 
@@ -180,7 +211,7 @@ for i=1,8 do
     end
 end
 local children, child_count = {}, 0
-for i=19,#ARGV do
+for i=21,#ARGV do
     if ARGV[i] == '' then return reject('task_admit_input_conflict') end
     if not children[ARGV[i]] then children[ARGV[i]] = true; child_count = child_count + 1 end
 end
@@ -260,10 +291,10 @@ redis.call('EXPIRE', task_meta_key, task_meta_ttl)
 redis.call('SET', task_remaining_key, tostring(dependency_count), 'EX', task_state_ttl)
 
 -- Register child task ids.
-for i = 19, #ARGV do
+for i = 21, #ARGV do
     redis.call('SADD', task_children_key, ARGV[i])
 end
-if #ARGV >= 19 then
+if #ARGV >= 21 then
     redis.call('EXPIRE', task_children_key, task_meta_ttl)
 end
 

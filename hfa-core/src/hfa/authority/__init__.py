@@ -37,6 +37,11 @@ from .redis_persistence import (
     RedisAuthorityCorruptionError,
     RedisAuthorityPersistenceError,
     RedisCanonicalAuthorityStore,
+    TaskOwnerActivationRefusedError,
+    TaskOwnerBinding,
+    TaskOwnerVerificationError,
+    task_owner_header_key,
+    task_owners_key,
 )
 
 __all__ = [
@@ -67,6 +72,11 @@ __all__ = [
     "RedisAuthorityCorruptionError",
     "RedisAuthorityPersistenceError",
     "RedisCanonicalAuthorityStore",
+    "TaskOwnerActivationRefusedError",
+    "TaskOwnerBinding",
+    "TaskOwnerVerificationError",
+    "task_owner_header_key",
+    "task_owners_key",
     "canonical_json_bytes",
     "canonical_json_sha256",
     "classify_canonical_store_write",

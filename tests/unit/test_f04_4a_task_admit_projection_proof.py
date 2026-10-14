@@ -50,7 +50,11 @@ async def test_proof_loss_or_corruption_rejected_at_actual_lua(alpha, root_redis
     async def interleave(**kwargs):
         own = json.loads(kwargs['args'][16])
         assert kwargs['args'][15] == '1'
-        assert kwargs['keys'][8:] == store.keyspace(task.sha256).commit_keys()[:6]
+        assert kwargs['keys'][8:14] == store.keyspace(task.sha256).commit_keys()[:6]
+        # F07 v2: the projector Lua also receives the owner inventory and the exact expected owner value.
+        from hfa.authority import task_owner_header_key, task_owners_key
+        assert kwargs['keys'][14:] == [task_owners_key(store._namespace), task_owner_header_key(store._namespace)]
+        assert kwargs['args'][18] == '1' and kwargs['args'][19]
         assert own[4] == '1' and own[10] == 'ready'
         await inject_fault(root_redis, store, task, own, fault)
         observed['before'] = await semantic_snapshot(root_redis)
@@ -132,7 +136,7 @@ async def test_proof_must_bind_exact_target_and_operation(alpha, root_redis, cha
         head = await store.get_aggregate_snapshot(task)
         probe = await store.load_receipt_probe(task, head.operation_id)
         keys, own = store.authority_head_witness(probe.canonical_store_record, probe.receipt)
-        captured['keys'][8:] = keys
+        captured['keys'][8:14] = keys
         captured['args'][16] = json.dumps(own)
     elif changed == 'child':
         captured['args'].append('unaccepted-child')

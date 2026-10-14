@@ -31,7 +31,7 @@ async def capture(alpha, redis, shape='root'):
         item = DagTaskSeed(task_id='f06-task-'+str(uuid4()), run_id='f06-run-'+str(uuid4()),
             tenant_id='f06', agent_type='default', priority=2, admitted_at=1000,
             dependency_count=2, child_task_ids=('child-one','child-two'), payload_json='{}')
-        dag = DagLua(redis, canonical_task_admit_binding=True)
+        dag = DagLua(redis, canonical_task_admit_binding=True, require_task_owner_binding=True)
         await dag.initialise()
         store = RedisCanonicalAuthorityStore(redis)
         await store.initialise()
@@ -78,7 +78,7 @@ async def test_first_exact_duplicate_lost_ack_and_restored_empty_retry(alpha, ro
     assert await root_redis.zscore(call['keys'][5], item.task_id) == (1000 if shape=='root' else None)
     assert await root_redis.get(call['keys'][4]) == ('1' if shape=='root' else None)
     before, counts = await snapshot(root_redis), await write_counts(root_redis)
-    restarted = DagLua(root_redis, canonical_task_admit_binding=True)
+    restarted = DagLua(root_redis, canonical_task_admit_binding=True, require_task_owner_binding=True)
     assert (await restarted.task_admit(item)).status == 'already_exists'
     assert await snapshot(root_redis) == before and await write_counts(root_redis) == counts
     # Known empty restore of effects, same durable decision; no new revision.
@@ -148,7 +148,7 @@ async def test_partial_footprint_is_visible_manual_conflict(alpha, root_redis, s
 @pytest.mark.parametrize('shape', ['root','waiting'])
 async def test_concurrent_duplicate_materializes_once(alpha, root_redis, shape):
     store, _, item, task, _ = await capture(alpha, root_redis, shape)
-    workers = [DagLua(root_redis,canonical_task_admit_binding=True) for _ in range(2)]
+    workers = [DagLua(root_redis,canonical_task_admit_binding=True,require_task_owner_binding=True) for _ in range(2)]
     counts = await write_counts(root_redis)
     results = await asyncio.gather(*(d.task_admit(item) for d in workers))
     assert sorted(r.status for r in results) == ['already_exists','seeded_root' if shape=='root' else 'seeded_waiting']
@@ -177,7 +177,7 @@ async def test_actual_lifecycle_progress_does_not_recreate_admission(alpha, root
             assert result.completed
     assert await root_redis.get(DagRedisKey.task_state(item.task_id))==state
     before,counts=await snapshot(root_redis),await write_counts(root_redis)
-    restarted=DagLua(root_redis,canonical_task_admit_binding=True,require_root_task_binding=True)
+    restarted=DagLua(root_redis,canonical_task_admit_binding=True,require_root_task_binding=True,require_task_owner_binding=True)
     assert (await restarted.task_admit(item)).status=='already_exists'
     assert await snapshot(root_redis)==before and await write_counts(root_redis)==counts
     assert await root_redis.zscore(DagRedisKey.tenant_ready_queue(item.tenant_id),item.task_id) is None
@@ -263,11 +263,15 @@ async def test_cross_run_task_id_explicit_f07_disposition(alpha,root_redis,runti
         assert await snapshot(root_redis)==before
         assert await store.get_aggregate_snapshot(build_task_admit_command(seed(other)).aggregate_identity) is None
     else:
-        # Existing task_id-only key lifetime gap is explicitly deferred to F07.
+        # F07 closes the formerly deferred gap: runtime expiry/deletion never authorizes reuse.
         await root_redis.delete(*(f'hfa:dag:task:{item.task_id}:{s}' for s in ('state','meta','remaining_deps','children','ready_emitted')))
         await root_redis.srem(DagRedisKey.run_tasks(item.run_id),item.task_id)
         await root_redis.zrem(DagRedisKey.tenant_ready_queue(item.tenant_id),item.task_id)
-        assert (await dag.task_admit(seed(other))).admitted
+        before=await snapshot(root_redis)
+        with pytest.raises(TaskAdmitAuthorityError) as error: await dag.task_admit(seed(other))
+        assert 'task_owner_conflict' in str(error.value)
+        assert await snapshot(root_redis)==before
+        assert await store.get_aggregate_snapshot(build_task_admit_command(seed(other)).aggregate_identity) is None
         assert (await store.get_aggregate_snapshot(task)).revision==1
 
 

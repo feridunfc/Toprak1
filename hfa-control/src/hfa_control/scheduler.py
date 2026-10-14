@@ -270,6 +270,11 @@ def build_production_scheduler(
             parse_product_mode(getattr(config, "product_mode", None))
             is ProductMode.SINGLE_TASK_ALPHA
         ),
+        require_task_owner_binding=(
+            parse_product_mode(getattr(config, "product_mode", None))
+            is ProductMode.SINGLE_TASK_ALPHA
+            and canonical_task_admit_binding
+        ),
         canonical_task_admit_binding=(
             canonical_task_admit_binding
         ),
