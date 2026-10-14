@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 from hfa_control.task_recovery import TaskHeartbeatManager, TaskRecoveryManager
 from hfa.dag.heartbeat import HeartbeatPolicy
+from hfa.dag.schema import TaskMetaField
 from hfa.dag.reasons import TASK_HEARTBEAT_RECORDED, TASK_HEARTBEAT_OWNER_MISMATCH
 
 
@@ -13,7 +14,11 @@ pytestmark = pytest.mark.asyncio
 async def test_record_heartbeat_accepts_running_owner():
     redis = AsyncMock()
     redis.get.return_value = "running"
-    redis.hget.return_value = "worker-1"
+    redis.hget.side_effect = lambda _key, field: {
+        "task_id": "t1",
+        "run_id": "run-1",
+        TaskMetaField.WORKER_INSTANCE_ID: "worker-1",
+    }.get(field)
 
     mgr = TaskHeartbeatManager(redis)
     result = await mgr.record_heartbeat(task_id="t1", tenant_id="tenant-a", worker_id="worker-1", now_ms=123)
@@ -25,7 +30,11 @@ async def test_record_heartbeat_accepts_running_owner():
 async def test_record_heartbeat_rejects_owner_mismatch():
     redis = AsyncMock()
     redis.get.return_value = "running"
-    redis.hget.return_value = "worker-2"
+    redis.hget.side_effect = lambda _key, field: {
+        "task_id": "t1",
+        "run_id": "run-1",
+        TaskMetaField.WORKER_INSTANCE_ID: "worker-2",
+    }.get(field)
 
     mgr = TaskHeartbeatManager(redis)
     result = await mgr.record_heartbeat(task_id="t1", tenant_id="tenant-a", worker_id="worker-1", now_ms=123)

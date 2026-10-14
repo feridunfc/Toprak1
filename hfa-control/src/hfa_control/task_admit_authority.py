@@ -13,6 +13,7 @@ from hfa.authority import (
     CanonicalAggregateIdentity,
     OperationType,
     RedisAuthorityCommitStatus,
+    TaskOwnerVerificationError,
     RedisAuthorityCorruptionError,
     RedisAuthorityPersistenceError,
     RedisCanonicalAuthorityStore,
@@ -160,10 +161,13 @@ class TaskAdmitAuthorityBinding:
     legacy_admit: Callable[..., Awaitable[Any]]
     store: RedisCanonicalAuthorityStore | None = None
     require_root_task_binding: bool = False
+    require_task_owner_binding: bool = False
 
     def __post_init__(self) -> None:
         if type(self.require_root_task_binding) is not bool:
             raise ValueError("require_root_task_binding must be a boolean")
+        if type(self.require_task_owner_binding) is not bool:
+            raise ValueError("require_task_owner_binding must be a boolean")
         if self.store is None:
             self.store = RedisCanonicalAuthorityStore(self.redis)
         self._initialised = False
@@ -339,12 +343,12 @@ class TaskAdmitAuthorityBinding:
                     detail="accepted authority evaluation did not provide a commit plan",
                 )
             try:
+                commit_kwargs: dict[str, bool] = {}
                 if self.require_root_task_binding:
-                    persisted = await self.store.commit(
-                        evaluation.commit_plan, require_task_admit_root_binding=True,
-                    )
-                else:
-                    persisted = await self.store.commit(evaluation.commit_plan)
+                    commit_kwargs["require_task_admit_root_binding"] = True
+                if self.require_task_owner_binding:
+                    commit_kwargs["require_task_owner_binding"] = True
+                persisted = await self.store.commit(evaluation.commit_plan, **commit_kwargs)
             except Exception as exc:
                 raise TaskAdmitAuthorityConflictError(
                     status=self._persistence_status(exc), detail=str(exc)
@@ -391,6 +395,24 @@ class TaskAdmitAuthorityBinding:
             assert evaluation.commit_plan is not None
             record, receipt = evaluation.commit_plan.record, evaluation.commit_plan.receipt
 
+        owner_kwargs: dict[str, Any] = {}
+        if self.require_task_owner_binding:
+            # F07 v2: exact duplicates (and recover-only replays) never bypass the owner proof.
+            # Python verifies the owner against the exact stored record/receipt here; the projector
+            # Lua re-validates the same inventory in its own invocation before the first write.
+            try:
+                await self.store.verify_task_owner(record)
+            except TaskOwnerVerificationError as exc:
+                raise TaskAdmitAuthorityConflictError(
+                    status="CANONICAL_RECORD_CORRUPTION_CONFLICT", detail=exc.detail,
+                ) from exc
+            except Exception as exc:
+                raise TaskAdmitAuthorityConflictError(
+                    status=self._persistence_status(exc), detail=str(exc)
+                ) from exc
+            owner_keys, owner_expected = self.store.task_owner_projection_inputs(record)
+            owner_kwargs = {"task_owner_keys": tuple(owner_keys), "task_owner_expected": owner_expected}
+
         try:
             # Serialize the accepted decision, never a subsequently observed head.
             # The projector validates this witness atomically, including duplicates.
@@ -399,11 +421,11 @@ class TaskAdmitAuthorityBinding:
                 return await self.legacy_admit(
                     normalized, canonical_head_keys=tuple(keys),
                     canonical_head_witness=tuple(witness),
-                    current_head_witness=current_head_witness,
+                    current_head_witness=current_head_witness, **owner_kwargs,
                 )
             return await self.legacy_admit(
                 normalized, canonical_head_keys=tuple(keys),
-                canonical_head_witness=tuple(witness),
+                canonical_head_witness=tuple(witness), **owner_kwargs,
             )
         except TaskAdmitProjectionConflictError:
             raise

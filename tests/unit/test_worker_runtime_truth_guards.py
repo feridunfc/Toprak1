@@ -10,6 +10,7 @@ from hfa.authority import AggregateType, CanonicalAggregateIdentity
 from hfa.config.keys import RedisKey
 from hfa.dag.schema import DagRedisKey
 from hfa_control.dag_lua import DagLua
+from hfa_control.event_store import EventStore
 from hfa_control.task_claim_authority import (
     TaskClaimCanonicalProjectionInput,
 )
@@ -162,9 +163,10 @@ async def test_dag_lua_passes_exact_canonical_claim_projection_proof() -> None:
     assert result.claim_epoch == "8"
     assert loader.call is not None
     num_keys, keys, args = loader.call
-    assert num_keys == 9
+    assert num_keys == 10
     assert keys[6] == RedisKey.run_state("run-1")
-    assert args[9:] == [
+    assert keys[9] == EventStore.event_key("run-1")
+    assert args[9:24] == [
         "1",
         "tenant-1",
         "claim-transition",
@@ -181,6 +183,10 @@ async def test_dag_lua_passes_exact_canonical_claim_projection_proof() -> None:
         dispatch_operation_id,
         "2",
     ]
+    assert len(args) == 27
+    assert args[24:26] == ["[]", "0"]
+    assert args[26].isdigit()
+    assert int(args[26]) > 0
 
     loader.call = None
     with pytest.raises(

@@ -139,6 +139,79 @@ class PersistedAggregateHistory:
         )
 
 
+TASK_OWNER_SCHEMA = "task-owner:v1"
+TASK_OWNER_HEADER_SCHEMA = "task-owner-header:v1"
+_TASK_OWNER_HEADER_FIELDS = (
+    "schema", "state", "namespace_id", "activated_at_ms", "inventory_sha256",
+    "attestation_sha256", "owner_count",
+)
+
+
+def task_owners_key(namespace: str) -> str:
+    """ONE persistent global owner HASH (field = task_id). Standalone Redis only."""
+    return f"{namespace}:task-owners"
+
+
+def task_owner_header_key(namespace: str) -> str:
+    """Integrity header: schema/state/attestation plus the monotonic owner_count."""
+    return f"{namespace}:task-owner-header"
+
+
+def _length_prefix(value: str) -> str:
+    return f"{len(value.encode('utf-8'))}:{value}"
+
+
+def task_owner_value(record: Any, *, operation_digest: str) -> str:
+    """Immutable owner encoding; byte-identical to canonical_authority_commit.lua owner_value_for()."""
+    meta = record.authoritative_metadata_changes
+    tenant_id = meta["tenant_id"] if hasattr(meta, "__getitem__") else None
+    identity = record.aggregate_identity
+    fields = (
+        TASK_OWNER_SCHEMA, identity.run_id, tenant_id, record.aggregate_identity_sha256,
+        record.operation_id, operation_digest, record.transition_id,
+        record.canonical_record_hash, record.canonical_command_hash, str(record.committed_at_ms),
+    )
+    if any(type(f) is not str or not f for f in fields):
+        raise ValueError("owner provenance fields must be non-empty strings")
+    return "".join(_length_prefix(f) for f in fields)
+
+
+def _decode_owner_value(value: str) -> list[str]:
+    raw = value.encode("utf-8")
+    out, pos = [], 0
+    while pos < len(raw):
+        colon = raw.index(b":", pos)
+        size = int(raw[pos:colon])
+        out.append(raw[colon + 1: colon + 1 + size].decode("utf-8"))
+        pos = colon + 1 + size
+    return out
+
+
+class TaskOwnerActivationRefusedError(RedisAuthorityPersistenceError):
+    """Namespace is not provably fresh; MIGRATION_ACCEPTANCE_REQUIRED. Nothing was written."""
+
+
+class TaskOwnerVerificationError(RedisAuthorityPersistenceError):
+    """Owner inventory/binding is missing, corrupt or mismatched. Fail closed; no auto-repair."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class TaskOwnerBinding:
+    run_id: str
+    tenant_id: str
+    canonical_task_identity_sha256: str
+    admit_operation_id: str
+    admit_operation_digest: str
+    admit_transition_id: str
+    admit_record_hash: str
+    admit_command_hash: str
+    bound_at_ms: str
+
+
 @dataclass(frozen=True)
 class RedisAuthorityKeyspace:
     """Cluster-slot-safe fixed Redis keys for one aggregate authority."""
@@ -578,12 +651,16 @@ class RedisCanonicalAuthorityStore:
 
     async def commit(
         self, plan: _core.AuthorityCommitPlan, *, require_task_admit_root_binding: bool = False,
+        require_task_owner_binding: bool = False,
     ) -> RedisAuthorityCommitResult:
         if type(require_task_admit_root_binding) is not bool:
             raise TypeError("require_task_admit_root_binding must be a boolean")
+        if type(require_task_owner_binding) is not bool:
+            raise TypeError("require_task_owner_binding must be a boolean")
         try:
             return await self._commit_impl(
                 plan, require_task_admit_root_binding=require_task_admit_root_binding,
+                require_task_owner_binding=require_task_owner_binding,
             )
         except RedisAuthorityPersistenceError:
             raise
@@ -689,6 +766,7 @@ class RedisCanonicalAuthorityStore:
 
     async def _commit_impl(
         self, plan: _core.AuthorityCommitPlan, *, require_task_admit_root_binding: bool = False,
+        require_task_owner_binding: bool = False,
     ) -> RedisAuthorityCommitResult:
         _validate_plan(plan)
         record = plan.record
@@ -727,9 +805,15 @@ class RedisCanonicalAuthorityStore:
                 _core.OperationType.TASK_FAIL.value,
             }:
                 parent_keys, parent_args = await self.parent_run_guard(record.aggregate_identity.run_id)
+            owner_keys: list[str] = []
+            if record.operation_type == _core.OperationType.TASK_ADMIT.value:
+                owner_keys = [
+                    task_owners_key(keyspace.namespace),
+                    task_owner_header_key(keyspace.namespace),
+                ]
             raw = await self._commit_loader.run(
-                num_keys=8 + len(parent_keys),
-                keys=keyspace.commit_keys() + parent_keys,
+                num_keys=8 + len(parent_keys) + len(owner_keys),
+                keys=keyspace.commit_keys() + parent_keys + owner_keys,
                 args=[
                     record.aggregate_identity_sha256,
                     str(record.from_revision),
@@ -761,6 +845,7 @@ class RedisCanonicalAuthorityStore:
                     _canonical_text(parent_args),
                     "1" if require_task_admit_root_binding else "0",
                     _canonical_text(root_proof),
+                    "1" if require_task_owner_binding else "0",
                 ],
             )
             result = self._parse_commit_result(raw)
@@ -769,6 +854,150 @@ class RedisCanonicalAuthorityStore:
         raise RedisAuthorityPersistenceError(
             "stored authority proof changed repeatedly during canonical commit"
         )
+
+    def task_owner_projection_inputs(self, record: Any) -> tuple[tuple[str, str], str]:
+        """(owner hash key, header key) and the exact expected owner value for a stored TASK_ADMIT record."""
+        digest = self.keyspace(record.aggregate_identity_sha256).operation_field(record.operation_id)
+        return (
+            (task_owners_key(self._namespace), task_owner_header_key(self._namespace)),
+            task_owner_value(record, operation_digest=digest),
+        )
+
+    async def _read_task_owner_header(self) -> dict[str, str] | None:
+        key = task_owner_header_key(self._namespace)
+        try:
+            kind = _as_text(await self._redis.type(key))
+            if kind == "none":
+                return None
+            if kind != "hash":
+                raise TaskOwnerVerificationError("task_owner_header_corrupt")
+            ttl = int(await self._redis.pttl(key))
+            fields = {_as_text(k): _as_text(v) for k, v in (await self._redis.hgetall(key)).items()}
+        except TaskOwnerVerificationError:
+            raise
+        except Exception as exc:
+            raise RedisAuthorityPersistenceError(f"task owner header read failed: {exc}") from exc
+        count = fields.get("owner_count", "")
+        if (ttl != -1 or set(fields) != set(_TASK_OWNER_HEADER_FIELDS)
+                or fields["schema"] != TASK_OWNER_HEADER_SCHEMA or fields["state"] != "ACTIVE"
+                or not count.isdigit() or any(not fields[f] for f in _TASK_OWNER_HEADER_FIELDS)):
+            raise TaskOwnerVerificationError("task_owner_header_corrupt")
+        return fields
+
+    async def verify_task_owner(self, record: Any) -> None:
+        """Fail-closed owner proof for an exact stored TASK_ADMIT record (read-only, no repair).
+
+        Raises TaskOwnerVerificationError unless: header valid and TTL-free, owner inventory
+        cardinality equals the monotonic header count (detects deletion of ANY prior binding),
+        and the owner entry equals the value derived from the exact stored record.
+        """
+        header = await self._read_task_owner_header()
+        if header is None:
+            raise TaskOwnerVerificationError("task_owner_namespace_not_activated")
+        (owners_key, _), expected = self.task_owner_projection_inputs(record)
+        try:
+            kind = _as_text(await self._redis.type(owners_key))
+            size = 0 if kind == "none" else int(await self._redis.hlen(owners_key))
+            if kind not in {"none", "hash"} or (kind == "hash" and int(await self._redis.pttl(owners_key)) != -1):
+                raise TaskOwnerVerificationError("task_owner_inventory_corrupt")
+            if size != int(header["owner_count"]):
+                raise TaskOwnerVerificationError("task_owner_inventory_loss_detected")
+            stored = await self._redis.hget(owners_key, record.aggregate_identity.task_id)
+        except TaskOwnerVerificationError:
+            raise
+        except Exception as exc:
+            raise RedisAuthorityPersistenceError(f"task owner read failed: {exc}") from exc
+        if stored is None:
+            raise TaskOwnerVerificationError("task_owner_binding_missing_for_canonical_task")
+        if _as_text(stored) != expected:
+            raise TaskOwnerVerificationError("task_owner_provenance_mismatch")
+
+    async def load_task_owner(self, task_id: str) -> TaskOwnerBinding | None:
+        """Read-only. None when absent; raises TaskOwnerVerificationError when malformed."""
+        task_id = _nonempty(task_id, "task_id")
+        try:
+            stored = await self._redis.hget(task_owners_key(self._namespace), task_id)
+        except Exception as exc:
+            raise RedisAuthorityPersistenceError(f"task owner read failed: {exc}") from exc
+        if stored is None:
+            return None
+        try:
+            f = _decode_owner_value(_as_text(stored))
+        except Exception as exc:
+            raise TaskOwnerVerificationError("task_owner_binding_corrupt") from exc
+        if len(f) != 10 or f[0] != TASK_OWNER_SCHEMA or any(not x for x in f):
+            raise TaskOwnerVerificationError("task_owner_binding_corrupt")
+        return TaskOwnerBinding(*f[1:])
+
+    async def task_owner_count(self) -> int:
+        header = await self._read_task_owner_header()
+        return -1 if header is None else int(header["owner_count"])
+
+    async def activate_task_owner_namespace(
+        self, *, namespace_id: str, activated_at_ms: int, isolation_attestation: Mapping[str, Any] | None,
+    ) -> dict:
+        """Explicit operator action (never called by constructors/startup).
+
+        Fail-closed (nothing written, MIGRATION_ACCEPTANCE_REQUIRED) unless ALL hold:
+          * an external isolation attestation names this fresh domain, asserts writers are
+            isolated, and carries attested_by + evidence_ref (recorded by hash; NOT verifiable
+            by this code - it is an operator/external prerequisite);
+          * the entire canonical namespace prefix holds no key at all (every evidence family:
+            aggregate/indexes/receipts/records/log/outbox/conflicts/audits/owners/header);
+          * no legacy DAG runtime task/run keys exist;
+          * the inventory scan completed without error.
+        A SCAN is not atomic and proves nothing about concurrent writers; the commit Lua
+        fences non-owner-aware TASK_ADMIT writers only AFTER activation. No backfill.
+        """
+        import hashlib
+        import json as _json
+
+        namespace_id = _nonempty(namespace_id, "namespace_id")
+        if type(activated_at_ms) is not int or activated_at_ms < 0:
+            raise ValueError("activated_at_ms must be a non-negative int")
+        att = isolation_attestation
+        if (not isinstance(att, Mapping) or att.get("fresh_domain_id") != namespace_id
+                or att.get("writers_isolated") is not True
+                or not str(att.get("attested_by") or "").strip() or not str(att.get("evidence_ref") or "").strip()):
+            raise TaskOwnerActivationRefusedError(
+                "MIGRATION_ACCEPTANCE_REQUIRED: external fresh-domain isolation attestation is missing or invalid"
+            )
+        header_key = task_owner_header_key(self._namespace)
+        try:
+            existing = await self._redis.exists(header_key)
+        except Exception as exc:
+            raise TaskOwnerActivationRefusedError(f"inventory incomplete: {exc}") from exc
+        if existing:
+            try:
+                await self._read_task_owner_header()
+            except TaskOwnerVerificationError as exc:
+                raise TaskOwnerActivationRefusedError(f"existing header corrupt; manual disposition: {exc.detail}") from exc
+            return {"status": "ALREADY_ACTIVE"}
+        found: list[str] = []
+        try:
+            for pattern in (f"{self._namespace}:*", "hfa:dag:task:*", "hfa:dag:run:*"):
+                async for raw_key in self._redis.scan_iter(match=pattern, count=500):
+                    found.append(_as_text(raw_key))
+        except Exception as exc:
+            raise TaskOwnerActivationRefusedError(f"inventory incomplete or unreadable: {exc}") from exc
+        if found:
+            raise TaskOwnerActivationRefusedError(
+                f"MIGRATION_ACCEPTANCE_REQUIRED: {len(found)} pre-existing key(s) in canonical namespace or DAG runtime"
+            )
+        inventory = hashlib.sha256(_json.dumps({"namespace": self._namespace, "keys": 0}, sort_keys=True).encode()).hexdigest()
+        attestation = hashlib.sha256(_json.dumps(dict(att), sort_keys=True, default=str).encode()).hexdigest()
+        script = (
+            "if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then return 'EXISTS' end "
+            "redis.call('HSET', KEYS[2], 'schema', ARGV[1], 'state', 'ACTIVE', 'namespace_id', ARGV[2], "
+            "'activated_at_ms', ARGV[3], 'inventory_sha256', ARGV[4], 'attestation_sha256', ARGV[5], 'owner_count', '0') "
+            "return 'ACTIVATED'"
+        )
+        out = _as_text(await self._redis.eval(
+            script, 2, task_owners_key(self._namespace), header_key,
+            TASK_OWNER_HEADER_SCHEMA, namespace_id, str(activated_at_ms), inventory, attestation,
+        ))
+        return {"status": "ALREADY_ACTIVE" if out == "EXISTS" else "ACTIVATED",
+                "inventory_sha256": inventory, "attestation_sha256": attestation}
 
     async def load_receipt_probe(
         self,

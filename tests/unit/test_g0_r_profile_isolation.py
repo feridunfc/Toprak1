@@ -298,7 +298,7 @@ def test_no_other_release_module_introduces_tasks_or_calls_direct_claim():
         for path in (root / package / "src").rglob("*.py"):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in calls:
-                    calls[node.func.attr].append(str(path.relative_to(root)))
+                    calls[node.func.attr].append(path.relative_to(root).as_posix())
     assert calls["task_admit"] == ["hfa-control/src/hfa_control/run_submission.py"]
     assert calls["claim_legacy_direct_for_compatibility"] == []
 
