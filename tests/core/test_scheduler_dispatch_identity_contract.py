@@ -170,6 +170,7 @@ async def test_equal_explicit_task_and_run_ids_are_permitted() -> None:
         worker_id="worker-77",
         scheduler_epoch="epoch-77",
         dispatch_payload=payload,
+        reserved_at_ms=123456,
     )
 
     assert result.ok is True
@@ -180,7 +181,11 @@ async def test_equal_explicit_task_and_run_ids_are_permitted() -> None:
         task_id="shared-explicit-77",
         worker_id="worker-77",
         scheduler_epoch="epoch-77",
-        dispatch_payload=payload,
+        dispatch_payload={
+            **payload,
+            "attempt": 1,
+            "scheduled_at": 123456,
+        },
     )
 
 
@@ -201,6 +206,7 @@ async def test_distinct_explicit_task_and_run_ids_are_permitted() -> None:
         worker_id="worker-77",
         scheduler_epoch="epoch-77",
         dispatch_payload=payload,
+        reserved_at_ms=123456,
     )
 
     assert result.ok is True
@@ -211,7 +217,11 @@ async def test_distinct_explicit_task_and_run_ids_are_permitted() -> None:
         task_id="task-distinct-77",
         worker_id="worker-77",
         scheduler_epoch="epoch-77",
-        dispatch_payload=payload,
+        dispatch_payload={
+            **payload,
+            "attempt": 1,
+            "scheduled_at": 123456,
+        },
     )
 
 
