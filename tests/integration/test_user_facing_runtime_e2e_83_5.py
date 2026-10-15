@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 import pytest
@@ -247,7 +248,7 @@ async def test_real_redis_task_collision_leaves_explicit_incomplete_run(
     await service._scheduler.close()
 
 
-async def test_user_facing_runtime_acceptance_report_83_5():
+async def test_user_facing_runtime_acceptance_report_83_5(redis_client):
     import os
 
     from scripts.runtime_alpha_acceptance_83_5 import (
@@ -314,6 +315,21 @@ async def test_user_facing_runtime_acceptance_report_83_5():
     assert scenario["pending_count"] == 0
     assert scenario["running_projection_cleared"] is True
     assert scenario["executor_call_count"] == 1
+
+    index = await redis_client.hgetall(RedisKey.run_terminal_event_index())
+    evidence_field = RedisKey.run_terminal_event_evidence_field(scenario["run_id"])
+    assert set(index) == {
+        "__contract__:schema_version", "__contract__:producer_contract_version",
+        evidence_field,
+    }
+    assert index["__contract__:schema_version"] == "1"
+    assert index["__contract__:producer_contract_version"] == "1"
+    assert await redis_client.ttl(RedisKey.run_terminal_event_index()) == -1
+    evidence = json.loads(index[evidence_field])
+    assert evidence["run_id"] == scenario["run_id"]
+    assert evidence["source"] == "legacy_run_terminate"
+    assert evidence["event_type"] == "RunCompleted"
+    assert evidence["final_state"] == "done"
 
 
 async def test_user_facing_runtime_acceptance_cli_83_5(
