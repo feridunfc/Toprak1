@@ -66,6 +66,10 @@ jobs:
               "hfa-control/src/hfa_control/task_claim.py",
               "tests/core/test_production_scheduler_composition_contract.py",
           }
+          regression_triggers = allowlist | {
+              "hfa-control/src/hfa_control/scheduler.py",
+              "tests/core/test_task_claim_service_legacy_quarantine_contract.py",
+          }
           changed = set(
               subprocess.check_output(
                   ["git", "diff", "--name-only", f"{os.environ['PR_BASE_SHA']}...HEAD"],
@@ -79,11 +83,11 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              touched = changed & allowlist
+              touched = changed & regression_triggers
               assert touched, {
                   "mode": "FUTURE_REGRESSION_TRIGGER",
                   "changed": sorted(changed),
-                  "required_intersection": sorted(allowlist),
+                  "required_intersection": sorted(regression_triggers),
               }
               mode = "REGRESSION_TRIGGER_INTERSECTION"
           forbidden = [
@@ -106,6 +110,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Historical CI scope contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_ci_historical_scope_contracts.py -q --tb=short | tee sprint84_7a_scope_contracts.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7a_scope_contracts.txt
 
       - name: Focused baseline truth closure
         shell: bash

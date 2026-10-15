@@ -178,6 +178,13 @@ jobs:
             httpx \
             uvicorn
 
+      - name: Historical CI scope contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_ci_historical_scope_contracts.py -q --tb=short | tee sprint84_1_scope_contracts.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_1_scope_contracts.txt
+
       - name: Dedicated unit and scheduler contracts
         shell: bash
         run: |
@@ -265,6 +272,8 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import ast
+          import os
+          import subprocess
           from pathlib import Path
 
           authority_core = [
@@ -278,19 +287,52 @@ jobs:
               ),
           ]
           changed = set(
-              __import__("subprocess").check_output(
+              subprocess.check_output(
                   [
                       "git",
                       "diff",
                       "--name-only",
-                      f"{__import__('os').environ['PR_BASE_SHA']}...HEAD",
+                      f"{os.environ['PR_BASE_SHA']}...HEAD",
                   ],
                   text=True,
               ).splitlines()
           )
-          assert not {
-              str(path) for path in authority_core
-          } & changed
+          if os.environ["PR_HEAD_BRANCH"] == "sprint/84-1-canonical-task-dispatch-binding":
+              # The original feature has no authority-core exception.
+              assert not {str(path) for path in authority_core} & changed
+              authority_policy = "FEATURE_NO_CORE_CHANGE"
+          else:
+              # Immutable review evidence, never a PR-supplied manifest or branch exemption.
+              reviewed_base = "b71deacf711b616443c4ca8ed9e93fdf104347d1"
+              reviewed_head = "6f9fd4bc02c8fc93faf3f2413903f7c6510f1057"
+              reviewed_blob = "9b9cbdf9dbce32ef69a3fd0f1dbf1cd2bf6cc7fe"
+              reviewed_tree = "080de232678d0a8670024b987e4fa9dad9563e38"
+              authority_dir = "hfa-core/src/hfa/authority"
+              persistence = authority_dir + "/redis_persistence.py"
+              reviewed_delta = {persistence, authority_dir + "/__init__.py"}
+              core_changes = {path for path in changed if path.startswith(authority_dir + "/")}
+
+              def git(*args):
+                  return subprocess.check_output(["git", *args], text=True).strip()
+
+              ancestry = subprocess.run(
+                  ["git", "merge-base", "--is-ancestor", reviewed_head, "HEAD"],
+                  capture_output=True,
+              ).returncode
+              assert core_changes <= reviewed_delta, sorted(core_changes - reviewed_delta)
+              assert ancestry == 0, "reviewed F07 commit is not an ancestor"
+              assert git("rev-parse", "HEAD") == os.environ["PR_HEAD_SHA"]
+              assert git("rev-parse", reviewed_head + "^{commit}") == reviewed_head
+              assert git("merge-base", reviewed_base, reviewed_head) == reviewed_base
+              assert git("merge-base", reviewed_base, os.environ["PR_BASE_SHA"]) == reviewed_base
+              assert git("rev-parse", reviewed_head + ":" + authority_dir) == reviewed_tree
+              assert git("rev-parse", "HEAD:" + authority_dir) == reviewed_tree
+              assert git("rev-parse", reviewed_head + ":" + persistence) == reviewed_blob
+              assert git("rev-parse", "HEAD:" + persistence) == reviewed_blob
+              assert not git("diff", "--name-only", "HEAD", "--", authority_dir)
+              assert not git("ls-files", "--others", "--exclude-standard", "--", authority_dir)
+              assert not git("log", "--full-history", "--format=%H", reviewed_head + "..HEAD", "--", authority_dir)
+              authority_policy = "REVIEWED_F07_SOURCE_AND_ANCESTRY"
 
           scheduler = Path(
               "hfa-control/src/hfa_control/scheduler.py"
@@ -329,7 +371,7 @@ jobs:
           assert "automatic_repair = True" not in binding
           print(
               "SPRINT84_1_AUTHORITY_SCAN_OK",
-              "authority_core_diff=0",
+              "authority_policy=" + authority_policy,
               "new_writer=0",
               "automatic_reassignment=0",
               "automatic_repair=0",
