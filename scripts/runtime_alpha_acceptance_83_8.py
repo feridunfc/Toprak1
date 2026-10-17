@@ -27,7 +27,6 @@ for relative in (
         sys.path.insert(0, str(candidate))
 
 import httpx
-import redis.asyncio as redis_async
 from fastapi import FastAPI
 
 from hfa.config.keys import RedisKey, RedisTTL
@@ -49,6 +48,10 @@ from scripts.runtime_alpha_acceptance import (
     _decode,
     _validate_acceptance_id,
     write_report,
+)
+
+from scripts.acceptance_prepared_domain import (
+    borrow_builder_lease, add_product_cli_arguments, dispatch_product_cli,
 )
 
 
@@ -698,13 +701,21 @@ async def _scenario(
 
 
 async def build_acceptance_report(
-    redis_url: str,
+    redis_url: str | None = None,
     *,
+    prepared_grant=None,
+    prepared_issuer=None,
     acceptance_id: str = "s83-8",
     reset_test_db: bool = False,
 ) -> dict[str, Any]:
     acceptance_id = _validate_acceptance_id(
         acceptance_id
+    )
+
+    lease = await borrow_builder_lease(
+        grant=prepared_grant, issuer=prepared_issuer, consumer=build_acceptance_report,
+        scenario="s83-8", acceptance_id=acceptance_id,
+        redis_url=redis_url, reset_test_db=reset_test_db,
     )
 
     env_names = (
@@ -732,15 +743,8 @@ async def build_acceptance_report(
     )
     os.environ["HFA_STRICT_CAS_MODE"] = "true"
 
-    redis_client = redis_async.from_url(
-        redis_url,
-        decode_responses=False,
-    )
     try:
-        await redis_client.ping()
-        if reset_test_db:
-            await redis_client.flushdb()
-
+        redis_client = lease.client
         scenario = await _scenario(
             redis_client,
             acceptance_id=acceptance_id,
@@ -822,7 +826,7 @@ async def build_acceptance_report(
             ],
         }
     finally:
-        await redis_client.aclose()
+        await lease.aclose()
         for name, old_value in old_env.items():
             if old_value is None:
                 os.environ.pop(name, None)
@@ -832,9 +836,13 @@ async def build_acceptance_report(
 
 async def _async_main(
     args: argparse.Namespace,
+    prepared_grant=None,
+    prepared_issuer=None,
 ) -> int:
     report = await build_acceptance_report(
         args.redis_url,
+        prepared_grant=prepared_grant,
+        prepared_issuer=prepared_issuer,
         acceptance_id=args.acceptance_id,
         reset_test_db=args.reset_test_db,
     )
@@ -872,10 +880,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--redis-url",
-        default=os.environ.get(
-            "REDIS_URL",
-            "redis://127.0.0.1:6389/0",
-        ),
+        default=None,
     )
     parser.add_argument(
         "--acceptance-id",
@@ -893,13 +898,14 @@ def _parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
     )
+    add_product_cli_arguments(parser)
     return parser
 
 
 def main() -> int:
-    return asyncio.run(
-        _async_main(_parser().parse_args())
-    )
+    return asyncio.run(dispatch_product_cli(_parser().parse_args(),
+        source=Path(__file__).resolve(), scenario="s83-8",
+        consumer=build_acceptance_report, execute=_async_main))
 
 
 if __name__ == "__main__":

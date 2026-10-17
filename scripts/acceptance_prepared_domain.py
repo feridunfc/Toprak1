@@ -2,8 +2,8 @@
 
 BOUNDED_TRUSTED_SCENARIO_CODE: the original launcher, its verified children
 and audited scenario code are trusted. Malicious same-principal code, hostile
-credential holders and compromised hosts are excluded. No product CLI cut-in,
-endpoint adoption, proxy, Lua dispatcher or new authority writer is provided.
+credential holders and compromised hosts are excluded. Product CLI handoff is explicit; no endpoint adoption, proxy, Lua dispatcher
+or new authority writer is provided.
 """
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ import asyncio
 import fcntl
 import hashlib
 import inspect
+import contextlib
+import io
+import logging
+import traceback
 import json
 import math
 import os
@@ -185,6 +189,7 @@ class PreparedDomainIssuer:
         self._child = None
         self._child_identity = None
         self._probe_ready = False
+        self._communication = None
         self._fds = {}
         self._lock = asyncio.Lock()
         self._closed = asyncio.Event()
@@ -325,20 +330,36 @@ class PreparedDomainIssuer:
         if process_identity(self._child.pid) != self._child_identity:
             raise Hold('registered probe process generation changed')
         expected = self._entry['consumer']
-        if source and (file_digest(_SOURCE) != expected['sha256'] or str(_SOURCE) != expected['source']
+        consumer_source = Path(expected['source'])
+        if source and (file_digest(consumer_source) != expected['sha256']
                 or self._child_identity['exe'] != expected['executable']
                 or file_digest(Path(expected['executable'])) != expected['executable_sha256']):
             raise Hold('probe source or executable identity changed')
 
     async def run_probe(self, grant, *, scenario: str, acceptance_id: str,
                         behavior: str = 'normal') -> dict:
-        """Exercise protocol only; never calls the original product CLI/builders."""
+        """The accepted protocol probe; never claims product CLI acceptance."""
         if behavior not in {'normal', 'exception', 'timeout', 'eof', 'replay'}:
             raise Hold('unknown audited probe behavior')
+        return await self._run_child(grant, scenario=scenario, acceptance_id=acceptance_id,
+                                     consumer=_SOURCE, behavior=behavior)
+
+    async def run_cli(self, grant, *, scenario: str, acceptance_id: str,
+                      consumer: Path, output: Path, json_output: bool = True):
+        """Execute the exact grant-bound trusted CLI source using private pipes.
+
+        The caller retains lifecycle ownership. This method never activates or
+        adopts a domain. Nonzero scenario exit is returned after verified abort.
+        """
+        return await self._run_child(grant, scenario=scenario, acceptance_id=acceptance_id,
+            consumer=consumer, behavior='product', output=output, json_output=json_output)
+
+    async def _run_child(self, grant, *, scenario, acceptance_id, consumer,
+                         behavior, output=None, json_output=True):
         try:
             async with self._lock:
                 e = await self._validate(grant, scenario=scenario,
-                                         acceptance_id=acceptance_id, consumer=_SOURCE)
+                                         acceptance_id=acceptance_id, consumer=consumer)
                 if self._child is not None:
                     raise Hold('probe already registered')
                 cr, pw = os.pipe2(os.O_CLOEXEC)
@@ -347,9 +368,12 @@ class PreparedDomainIssuer:
                                   for fd in (cr, pw, pr, cw)})
                 env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'PYTHONDONTWRITEBYTECODE': '1',
                        'PYTHONPATH': str(_SOURCE.parent.parent)}
-                self._child = subprocess.Popen([sys.executable, str(_SOURCE), '--probe-child',
-                    '--read-fd', str(cr), '--write-fd', str(cw), '--scenario', scenario,
-                    '--acceptance-id', acceptance_id], cwd=_SOURCE.parent.parent, env=env,
+                child_args = ([sys.executable, str(consumer), '--prepared-read-fd', str(cr),
+                    '--prepared-write-fd', str(cw), '--acceptance-id', acceptance_id,
+                    '--out', str(Path(output).resolve())] + (['--json'] if json_output else [])) if behavior == 'product' else [
+                    sys.executable, str(_SOURCE), '--probe-child', '--read-fd', str(cr),
+                    '--write-fd', str(cw), '--scenario', scenario, '--acceptance-id', acceptance_id]
+                self._child = subprocess.Popen(child_args, cwd=_SOURCE.parent.parent, env=env,
                     pass_fds=(cr, cw), stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 self._child_identity = process_identity(self._child.pid)
@@ -357,6 +381,8 @@ class PreparedDomainIssuer:
                     os.close(fd)
                     self._fds.pop(fd)
                 self._verify_child()
+                # Drain both pipes concurrently: real JSON reports can exceed pipe capacity.
+                self._communication = asyncio.create_task(asyncio.to_thread(self._child.communicate))
                 d = self._domain
                 d._record('probe_created', {'host': self._child_identity,
                                             'consumer': e['consumer'], 'credential_delivered': False})
@@ -370,7 +396,7 @@ class PreparedDomainIssuer:
             response = await _receive(pr, e['deadline'])
             async with self._lock:
                 self._verify_child()
-                await self._validate(grant, scenario=scenario, acceptance_id=acceptance_id, consumer=_SOURCE)
+                await self._validate(grant, scenario=scenario, acceptance_id=acceptance_id, consumer=consumer)
                 if (response.get('kind') != 'response' or response.get('challenge') != challenge
                         or response.get('nonce') != e['nonce'] or response.get('consumer') != e['consumer']
                         or response.get('child') != _host(Path(f"/proc/{self._child_identity['proc_pid']}"))
@@ -391,10 +417,29 @@ class PreparedDomainIssuer:
             d._record('probe_ready', {'corroborated': True, 'scenario': scenario,
                                      'acceptance_id': acceptance_id})
             result = await _receive(pr, e['deadline'])
-            if result != {'kind': 'result', 'status': 'PASS', 'dump_bytes': True}:
+            if behavior == 'product':
+                if (set(result) != {'kind', 'returncode', 'exception_type'}
+                        or result['kind'] != 'exit' or type(result['returncode']) is not int
+                        or not isinstance(result['exception_type'], str)):
+                    raise Hold('invalid product CLI exit outcome')
+            elif result != {'kind': 'result', 'status': 'PASS', 'dump_bytes': True}:
                 raise Hold('probe did not validate byte-mode domain handoff')
             async with asyncio.timeout_at(e['deadline']):
-                stdout, stderr = await asyncio.to_thread(self._child.communicate)
+                stdout, stderr = await asyncio.shield(self._communication)
+            if behavior == 'product':
+                if self._child.returncode != result['returncode']:
+                    raise Hold('product CLI exit identity mismatch')
+                for raw in (stdout, stderr):
+                    if any(secret.encode() in raw for secret in
+                           (d._owner_password, d._scenario_password)):
+                        raise Hold('credential output refused')
+                d._record('product_cli_outcome', result)
+                if result['returncode'] == 0:
+                    await self.finish()
+                else:
+                    await self.abort(reason='scenario_failure')
+                return subprocess.CompletedProcess(self._child.args, result['returncode'],
+                                                   stdout.decode(), stderr.decode())
             if self._child.returncode != 0 or stdout or stderr:
                 raise Hold('probe output/exit contract failed')
             await self.finish()
@@ -429,6 +474,8 @@ class PreparedDomainIssuer:
         finally:
             if pidfd is not None:
                 os.close(pidfd)
+        if self._communication is not None:
+            await asyncio.shield(self._communication)
         for stream in (self._child.stdout, self._child.stderr):
             stream.close()
 
@@ -533,15 +580,15 @@ class PreparedDomainIssuer:
                 raise self._error
 
 
-async def _probe_child(args) -> None:
-    """Trusted probe, deliberately separate from all original acceptance CLIs."""
+async def _receive_child_lease(args, *, consumer: Path):
+    """Accepted private-channel challenge and read-only Redis corroboration."""
     # A bounded bootstrap wait even if a live parent sends nothing.
     hello = await _receive(args.read_fd, time.monotonic() + 10)
     parent_proc = int(next(l.split()[1] for l in Path('/proc/self/status').read_text().splitlines()
                            if l.startswith('PPid:')))
     if (hello.get('kind') != 'challenge' or hello.get('issuer') != _host(Path(f'/proc/{parent_proc}'))
             or hello.get('child') != _host(Path('/proc/self'))
-            or hello.get('consumer') != _consumer(_SOURCE)
+            or hello.get('consumer') != _consumer(consumer)
             or hello.get('channels') != {'read_inode': os.fstat(args.read_fd).st_ino,
                                          'write_inode': os.fstat(args.write_fd).st_ino}
             or hello.get('scenario') != args.scenario or hello.get('acceptance_id') != args.acceptance_id
@@ -550,11 +597,11 @@ async def _probe_child(args) -> None:
         raise Hold('invalid issuer, child or source binding')
     deadline, nonce = hello['deadline'], hello['nonce']
     if hello['behavior'] == 'eof':
-        return
+        return None
     child_challenge = secrets.token_hex(32)
     await _send(args.write_fd, {'kind': 'response', 'challenge': hello['challenge'],
         'nonce': 'replayed' if hello['behavior'] == 'replay' else nonce,
-        'consumer': _consumer(_SOURCE), 'child': _host(Path('/proc/self')),
+        'consumer': _consumer(consumer), 'child': _host(Path('/proc/self')),
         'child_challenge': child_challenge}, deadline)
     credential = await _receive(args.read_fd, deadline)
     if (credential.get('kind') != 'credential' or credential.get('nonce') != nonce
@@ -583,6 +630,23 @@ async def _probe_child(args) -> None:
                 or setup_sha256 != binding['setup_sha256']):
             raise Hold('read-only CLI boundary corroboration failed')
         await _send(args.write_fd, {'kind': 'ready', 'corroborated': True}, deadline)
+        def valid():
+            if time.monotonic() >= deadline or _host(Path(f'/proc/{parent_proc}')) != hello['issuer']:
+                raise Hold('CLI grant expired or original issuer lost')
+        return ScenarioLease(client, valid), hello, credential
+    except BaseException:
+        await client.aclose()
+        raise
+
+
+async def _probe_child(args) -> None:
+    received = await _receive_child_lease(args, consumer=_SOURCE)
+    if received is None:
+        return
+    lease, hello, _credential = received
+    try:
+        client = lease.client
+        deadline = hello['deadline']
         if hello['behavior'] == 'exception':
             raise Hold('audited scenario exception')
         if hello['behavior'] == 'timeout':
@@ -591,7 +655,118 @@ async def _probe_child(args) -> None:
             raise Hold('DUMP byte contract failed')
         await _send(args.write_fd, {'kind': 'result', 'status': 'PASS', 'dump_bytes': True}, deadline)
     finally:
-        await client.aclose()
+        await lease.aclose()
+
+
+_CHILD_GRANTS: dict[PreparedGrant, dict] = {}
+
+
+async def borrow_builder_lease(*, grant, issuer, consumer, scenario, acceptance_id,
+                               redis_url=None, reset_test_db=False) -> ScenarioLease:
+    """No URL, reset flag, forged lease or copied receipt can authorize entry."""
+    if redis_url is not None or reset_test_db is not False:
+        raise Hold('URL-only/reset execution is forbidden; explicit prepared grant required')
+    if type(grant) is not PreparedGrant:
+        raise Hold('explicit live prepared grant required')
+    if type(issuer) is PreparedDomainIssuer:
+        if _ISSUERS.get(getattr(issuer, '_key', None)) is not issuer:
+            raise Hold('original live issuer required')
+        return await issuer.redeem(grant, scenario=scenario, acceptance_id=acceptance_id,
+                                   consumer=consumer)
+    e = _CHILD_GRANTS.get(grant)
+    if (issuer is not None or e is None or e['used'] or e['consumer'] is not consumer
+            or e['scenario'] != scenario or e['acceptance_id'] != acceptance_id):
+        raise Hold('missing, foreign or reused child prepared grant')
+    e['lease'].client  # Revalidate live original parent and deadline before product writes.
+    e['used'] = True
+    return e['lease']
+
+
+async def product_cli_child(args, *, consumer, scenario, execute) -> int:
+    """Private entry only. Captured output is redacted before reaching OS pipes."""
+    channel_args = argparse.Namespace(read_fd=args.prepared_read_fd,
+        write_fd=args.prepared_write_fd, scenario=scenario, acceptance_id=args.acceptance_id)
+    received = await _receive_child_lease(channel_args, consumer=Path(inspect.getsourcefile(consumer)))
+    if received is None:
+        raise Hold('missing product child handshake')
+    lease, hello, credential = received
+    grant = object.__new__(PreparedGrant)
+    _CHILD_GRANTS[grant] = {'lease': lease, 'consumer': consumer, 'scenario': scenario,
+                          'acceptance_id': args.acceptance_id, 'used': False}
+    out, err = io.StringIO(), io.StringIO()
+    handlers = {h for logger in [logging.getLogger(), *[
+        x for x in logging.Logger.manager.loggerDict.values() if isinstance(x, logging.Logger)]]
+        for h in logger.handlers if isinstance(h, logging.StreamHandler) and h.stream in (sys.stdout, sys.stderr)}
+    streams = {h: h.stream for h in handlers}
+    code, error_type = 1, ''
+    try:
+        for h in handlers:
+            h.setStream(err if streams[h] is sys.stderr else out)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = await execute(args, grant, None)
+                if type(code) is not int:
+                    raise Hold('invalid original CLI status')
+            except Exception as exc:
+                error_type = type(exc).__name__
+                traceback.print_exc()
+                code = 1
+    finally:
+        _CHILD_GRANTS.pop(grant, None)
+        await lease.aclose()
+        for h, stream in streams.items():
+            h.setStream(stream)
+    def redacted(value):
+        return value.replace(credential['password'], '<redacted>')
+    sys.stdout.write(redacted(out.getvalue()))
+    sys.stderr.write(redacted(err.getvalue()))
+    await _send(channel_args.write_fd, {'kind': 'exit', 'returncode': code,
+                                      'exception_type': error_type}, hello['deadline'])
+    return code
+
+
+async def launch_product_cli(args, *, source: Path, scenario: str) -> int:
+    """Explicit creator action; normal builders cannot call or infer this grant."""
+    if args.redis_url is not None or args.reset_test_db:
+        raise Hold('explicit owned launcher rejects URL/reset flags')
+    binary = Path(os.environ['HFA_ACCEPTANCE_REDIS_BINARY'])
+    evidence = Path(os.environ['HFA_ACCEPTANCE_EVIDENCE_DIR'])
+    domain = OwnedFreshDomain(binary, evidence)
+    issuer = None
+    try:
+        await domain.create()
+        await domain.activate_prepared(terminal_events=True)
+        issuer = PreparedDomainIssuer(domain)
+        grant = await issuer.issue(scenario=scenario, acceptance_id=args.acceptance_id,
+                                   consumer=source, timeout=60, terminal_events=True)
+        completed = await issuer.run_cli(grant, scenario=scenario, acceptance_id=args.acceptance_id,
+                                         consumer=source, output=Path(args.out), json_output=args.json)
+        sys.stdout.write(completed.stdout)
+        sys.stderr.write(completed.stderr)
+        return completed.returncode
+    finally:
+        if issuer is not None and not issuer._closed.is_set():
+            await issuer.abort()
+        elif issuer is None and domain._host is not None and domain.phase != Phase.DISPOSED:
+            await PreparedDomainIssuer._await_owned_cleanup(
+                asyncio.create_task(domain.abort_owned(reason='scenario_failure')))
+
+
+def add_product_cli_arguments(parser) -> None:
+    parser.add_argument('--owned-fresh-domain', action='store_true')
+    parser.add_argument('--prepared-read-fd', type=int)
+    parser.add_argument('--prepared-write-fd', type=int)
+
+
+async def dispatch_product_cli(args, *, source, scenario, consumer, execute) -> int:
+    if args.owned_fresh_domain:
+        if args.prepared_read_fd is not None or args.prepared_write_fd is not None:
+            raise Hold('launcher/child modes cannot be combined')
+        return await launch_product_cli(args, source=source, scenario=scenario)
+    if (args.prepared_read_fd is not None and args.prepared_write_fd is not None
+            and args.redis_url is None and not args.reset_test_db):
+        return await product_cli_child(args, consumer=consumer, scenario=scenario, execute=execute)
+    raise Hold('explicit owned launcher or live private child handoff required')
 
 
 def main() -> int:

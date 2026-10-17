@@ -52,3 +52,27 @@ async def owned_domain(tmp_path, request):
             assert domain._process.poll() is not None and not domain._root.exists()
         else:
             await domain.dispose()
+
+
+@pytest_asyncio.fixture
+async def prepared_product(owned_domain):
+    from scripts.acceptance_prepared_domain import PreparedDomainIssuer
+    await owned_domain.activate_prepared(terminal_events=True)
+    issuer = PreparedDomainIssuer(owned_domain)
+    async def issue(consumer, *, scenario, acceptance_id):
+        grant = await issuer.issue(scenario=scenario, acceptance_id=acceptance_id,
+            consumer=consumer, timeout=60, terminal_events=True)
+        return grant, issuer
+    try:
+        yield issue
+    finally:
+        if not issuer._closed.is_set():
+            await issuer.abort()
+
+
+def product_cli_environment():
+    """Launcher paths only; never forward a shared fixture URL or credentials."""
+    env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'PYTHONDONTWRITEBYTECODE': '1'}
+    for key in ('HFA_ACCEPTANCE_REDIS_BINARY', 'HFA_ACCEPTANCE_EVIDENCE_DIR'):
+        env[key] = os.environ[key]
+    return env
