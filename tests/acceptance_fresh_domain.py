@@ -6,6 +6,7 @@ prerequisites are failures, not skip/xfail. Existing integration fixtures elsewh
 are unchanged. Import these overrides only into the new lifecycle test module.
 """
 import os
+import json
 from pathlib import Path
 
 import pytest
@@ -33,12 +34,18 @@ def flush_redis():
 
 
 @pytest_asyncio.fixture
-async def owned_domain(tmp_path):
+async def owned_domain(tmp_path, request):
     binary = Path(os.environ["HFA_ACCEPTANCE_REDIS_BINARY"])
     evidence = Path(os.environ.get("HFA_ACCEPTANCE_EVIDENCE_DIR", str(tmp_path)))
     domain = OwnedFreshDomain(binary, evidence)
     try:
         await domain.create()
+        # Observational evidence only: never accepted as an ownership grant.
+        # Keep the original bytes even when a negative test corrupts its receipt.
+        creation, creation_sha256 = domain._receipts[0]
+        domain._record('test_node', {'nodeid': request.node.nodeid,
+            'creation_receipt_sha256': creation_sha256,
+            'creation_receipt_hex': creation.read_bytes().hex()})
         yield domain
     finally:
         if domain.phase == Phase.DISPOSED:

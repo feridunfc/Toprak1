@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import shutil
 import socket
 import stat
@@ -349,8 +350,14 @@ class OwnedFreshDomain:
             "tcp_writers": "denied without creator-only ACL credential", "trusted_principal": os.geteuid(),
             "limitation": "malicious same-principal code / compromised host excluded"})
 
-    async def _verify_exclusion(self) -> None:
+    async def _verify_exclusion(self, *, setup_client_id: int | None = None) -> None:
         self.verify_ownership()
+        expected_clients = {self._owner_client_id}
+        if setup_client_id is not None:
+            self._require(Phase.HEADER_VERIFIED)
+            if type(setup_client_id) is not int or setup_client_id == self._owner_client_id:
+                raise Hold('invalid creator-owned setup connection')
+            expected_clients.add(setup_client_id)
         info = await self._client.info("server")
         clients = await self._client.client_list()
         users = await self._client.acl_users()
@@ -360,7 +367,7 @@ class OwnedFreshDomain:
                 or "off" not in default["flags"]
                 or "on" not in owner["flags"] or "nopass" in owner["flags"]
                 or owner["passwords"] != [hashlib.sha256(self._owner_password.encode()).hexdigest()]
-                or {int(c["id"]) for c in clients} != {self._owner_client_id}
+                or {int(c["id"]) for c in clients} != expected_clients
                 or any(c["user"] != "owner" or c["db"] != "0" for c in clients)):
             raise Hold("external writer exclusion not established")
 
@@ -376,6 +383,19 @@ class OwnedFreshDomain:
         return evidence
 
     async def activate_fresh(self) -> None:
+        await self._activate_fresh(prepared=False, terminal_events=False)
+
+    async def activate_prepared(self, *, terminal_events: bool = False) -> None:
+        """Creator-only fresh setup; leave credentials unreleased for grant issuance.
+
+        This is not a retained-domain repair operation. The original D1 entry
+        point above continues to release its text client exactly as before.
+        """
+        if type(terminal_events) is not bool:
+            raise Hold('terminal setup requires an explicit Boolean')
+        await self._activate_fresh(prepared=True, terminal_events=terminal_events)
+
+    async def _activate_fresh(self, *, prepared: bool, terminal_events: bool) -> None:
         async with self._lock:
             self._require(Phase.WRITERS_ISOLATED)
             if self._activation_attempts != 0:
@@ -416,11 +436,134 @@ class OwnedFreshDomain:
                     raise Hold("unexpected key after activation")
                 await self._verify_exclusion()
                 self._transition(Phase.HEADER_VERIFIED, self._header)
-                await self._release()
+                if prepared:
+                    await self._prepare_fresh(terminal_events=terminal_events)
+                else:
+                    await self._release()
             except BaseException as exc:
-                self._transition(Phase.HOLD, {"reason": type(exc).__name__, "detail": str(exc),
+                self._transition(Phase.HOLD, {"reason": type(exc).__name__,
                                               "activation_attempts": self._activation_attempts})
                 raise
+
+    async def _prepare_fresh(self, *, terminal_events: bool) -> None:
+        self._require(Phase.HEADER_VERIFIED)
+        await self._verify_exclusion()
+        await self._validate_header(fresh=True)
+        if set(await self._client.keys('*')) != {HEADER}:
+            raise Hold('fresh setup requires the original header-only inventory')
+        expected_keys = {HEADER}
+        if terminal_events:
+            from hfa_control.run_terminal_event_evidence import (
+                ensure_terminal_event_index, validate_index_contract,
+            )
+            from hfa.config.keys import RedisKey
+            key = RedisKey.run_terminal_event_index()
+            expected_keys.add(key)
+            # WATCH needs a pooled connection. Use one explicit creator-owned
+            # setup pool instead of leaving a hidden idle pipeline connection.
+            setup = redis.Redis(host='127.0.0.1', port=self._port, db=0,
+                username='owner', password=self._owner_password, decode_responses=True,
+                max_connections=1, socket_connect_timeout=2, socket_timeout=2)
+            try:
+                setup_id = await setup.client_id()
+                await self._verify_exclusion(setup_client_id=setup_id)
+                result = await ensure_terminal_event_index(setup)
+                shell = await setup.hgetall(key)
+                validate_index_contract(shell)
+                if (result != 'prepared' or await setup.pttl(key) != -1 or len(shell) != 2):
+                    raise Hold('fresh terminal setup must create a persistent contract shell')
+                await self._verify_exclusion(setup_client_id=setup_id)
+                self._record('terminal_setup_connection', {'creator_client_id': setup_id,
+                    'contract': shell, 'result': result, 'persistent': True})
+            finally:
+                await setup.aclose()
+        await self._verify_exclusion()
+        if set(await self._client.keys('*')) != expected_keys:
+            raise Hold('unexpected post-setup evidence')
+        self._prepared_snapshot = await semantic_snapshot(self._client)
+        self._prepared_terminal = terminal_events
+        self._prepared_issued = False
+        self._record('prepared_setup', {'terminal_events': terminal_events,
+                                       'snapshot': self._prepared_snapshot,
+                                       'sha256': digest(self._prepared_snapshot)})
+
+    def _scenario_bytes(self):
+        """Private creator operation; independent pool, never an owner client."""
+        self._require(Phase.DOMAIN_RELEASED)
+        self.verify_ownership()
+        return redis.Redis(host='127.0.0.1', port=self._port, db=0,
+                           username='scenario', password=self._scenario_password,
+                           decode_responses=False, socket_connect_timeout=2, socket_timeout=2)
+
+    async def abort_owned(self, *, reason: str) -> None:
+        """Bounded post-identity abort, including failed validation; never retention.
+
+        Host identity is proved before endpoint commands or signals. pidfds
+        prevent a reused numeric PID from receiving our signal. Parent hard
+        death and pre-identity startup failure are outside this guarantee.
+        """
+        if self.phase == Phase.DISPOSED:
+            raise Hold('already disposed')
+        if self._process is None or self._host is None:
+            raise Hold('known-owned abort requires original child identity')
+        if reason not in {'normal', 'deadline', 'cancelled', 'probe_failure',
+                          'validation_failure', 'scenario_failure'}:
+            reason = 'explicit_creator_abort'
+        errors = []
+        pidfd = None
+        try:
+            if self._process.poll() is None:
+                self.verify_ownership()
+                pidfd = os.pidfd_open(self._process.pid)
+                self.verify_ownership()
+            else:
+                _private(self._root, 0o700)
+                if _identity(self._root) != self._storage_identity:
+                    raise Hold('foreign storage after owned child exit')
+            self.phase = Phase.HOLD
+            self._record('owned_abort', {'reason': reason, 'retention_acceptance': False})
+            if pidfd is not None:
+                try:
+                    removed = await self._client.acl_deluser('scenario')
+                    self._record('scenario_revoked' if removed else 'credential_cleanup',
+                                 {'by': 'creator_abort', 'user_removed': bool(removed),
+                                  'generation': getattr(self, '_scenario_generation', 0)})
+                except Exception as exc:
+                    errors.append(type(exc).__name__)
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                try:
+                    await asyncio.to_thread(self._process.wait, timeout=2)
+                except subprocess.TimeoutExpired:
+                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                    await asyncio.to_thread(self._process.wait, timeout=2)
+            else:
+                self._record('scenario_revoked', {'by': 'original_child_already_exited'})
+            for client in (self._scenario, self._client):
+                if client is not None:
+                    try:
+                        await client.aclose()
+                    except Exception as exc:
+                        errors.append(type(exc).__name__)
+            _private(self._root, 0o700)
+            if _identity(self._root) != self._storage_identity:
+                raise Hold('refuse abort removal of foreign storage')
+            shutil.rmtree(self._root)
+            self._log.close()
+            self._transition(Phase.DISPOSED, {'pid': self._process.pid,
+                'returncode': self._process.returncode, 'storage_removed': not self._root.exists(),
+                'activation_attempts': self._activation_attempts, 'cleanup_errors': errors,
+                'retention_acceptance': False})
+        except BaseException as exc:
+            if self.phase != Phase.DISPOSED:
+                self.phase = Phase.HOLD
+            self._record('owned_abort_hold', {'error_type': type(exc).__name__,
+                'retention_acceptance': False, 'reason': 'ownership_or_cleanup_verification_failed'})
+            raise Hold('NOT_PROVEN / HOLD: known-owned abort failed') from None
+        finally:
+            if pidfd is not None:
+                os.close(pidfd)
+        if errors:
+            raise Hold('owned child disposed with cleanup errors')
 
     async def _validate_header(self, *, fresh: bool = False) -> None:
         if self._header is None or await self._client.type(HEADER) != "hash":
@@ -448,8 +591,13 @@ class OwnedFreshDomain:
                                      username="scenario", password=self._scenario_password,
                                      decode_responses=True, single_connection_client=True,
                                      socket_connect_timeout=2, socket_timeout=2)
+        self._scenario_generation = getattr(self, '_scenario_generation', 0) + 1
+        acl = await self._client.acl_getuser('scenario')
         self._transition(Phase.DOMAIN_RELEASED, {"scenario_credential": "new restricted capability",
-                                                "activation_attempts": self._activation_attempts})
+            "activation_attempts": self._activation_attempts,
+            "credential_generation": self._scenario_generation,
+            "privileges": {k: acl[k] for k in ('flags', 'commands', 'keys', 'channels')},
+            "trust_model": "BOUNDED_TRUSTED_SCENARIO_CODE"})
 
     @property
     def client(self):
@@ -518,7 +666,9 @@ class OwnedFreshDomain:
         async with self._lock:
             self._require(Phase.DOMAIN_RELEASED)
             # Revocation disconnects every scenario connection, including leaked references.
-            await self._client.acl_deluser("scenario")
+            removed = await self._client.acl_deluser("scenario")
+            self._record('scenario_revoked', {'by': 'creator_quiesce', 'user_removed': bool(removed),
+                                             'generation': self._scenario_generation})
             await self._scenario.aclose()
             self._scenario = None
             try:
