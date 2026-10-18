@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
       - 'hfa-worker/src/hfa_worker/main.py'
       - 'hfa-control/src/hfa_control/run_terminate_authority.py'
       - 'hfa-worker/src/hfa_worker/run_finalizing_runtime.py'
@@ -71,7 +72,7 @@ jobs:
               assert changed == allowlist, {"missing":sorted(allowlist-changed),"unexpected":sorted(changed-allowlist)}
               mode="FEATURE_EXACT_SCOPE"
           else:
-              assert changed & allowlist, sorted(changed)
+              assert changed & (allowlist | {".github/actions/acceptance-redis/action.yml"}), sorted(changed)
               mode="REGRESSION_TRIGGER_INTERSECTION"
           forbidden=[p for p in changed if p.startswith("local_out/") or "__pycache__" in p or ".pytest_cache" in p or p.endswith(".pyc")]
           assert not forbidden, forbidden
@@ -79,6 +80,8 @@ jobs:
           PY
 
       - name: Verify frozen canonical authority and retry boundaries
+        # Historical byte acceptance; current branches execute unchanged semantic regressions.
+        if: github.head_ref == 'sprint/84-7e-worker-crash-retry-acceptance'
         shell: bash
         run: |
           set -euo pipefail
@@ -121,6 +124,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
+
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
 
       - name: Static E crash/retry architecture guards
         shell: bash
@@ -412,3 +418,11 @@ jobs:
             tests/core/test_production_worker_crash_retry_contract.py \
             tests/integration/test_worker_crash_retry_canonical_composition_integration.py
           git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint84-7e-worker-crash-retry-acceptance
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
+          if-no-files-found: error

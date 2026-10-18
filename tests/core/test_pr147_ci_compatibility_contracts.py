@@ -37,12 +37,15 @@ REDIS = [
     "sprint84-7d-run-terminate-production-injection.yml",
     "sprint84-8-canonical-resource-settlement.yml",
     "sprint84-9-canonical-task-requeue-retry.yml",
+    "sprint83-9-idempotency-reservation-diagnostics.yml",
+    "sprint84-7e-worker-crash-retry-acceptance.yml",
 ]
 LOCKS = [
     (REDIS[4], "Verify C1 product byte parity and forbidden-file freeze", "sprint/84-7c2-task-terminal-production-composition"),
     (REDIS[5], "Verify frozen RUN and TASK authority parity", "sprint/84-7d-run-terminate-production-injection"),
     (REDIS[6], "Verify frozen product parity and no new OperationType", "sprint/84-8-canonical-resource-settlement"),
     (REDIS[7], "Frozen authority parity", "sprint/84-9-canonical-task-requeue-retry"),
+    (REDIS[9], "Verify frozen canonical authority and retry boundaries", "sprint/84-7e-worker-crash-retry-acceptance"),
 ]
 SCOPES = [
     (REDIS[6], "Verify accepted parent and exact 84.8 scope", LOCKS[2][2]),
@@ -172,7 +175,7 @@ def test_wrong_historical_parent_still_fails_before_scope_execution(name, title,
     assert "SCOPE_OK" not in result.stdout
 
 
-@pytest.mark.parametrize("name", REDIS[:6])
+@pytest.mark.parametrize("name", REDIS[:6] + REDIS[8:])
 @pytest.mark.parametrize("generated", [False, True])
 def test_shared_action_only_trigger_is_consistent_and_keeps_artifact_prohibition(monkeypatch, name, generated):
     doc = workflow(name)
