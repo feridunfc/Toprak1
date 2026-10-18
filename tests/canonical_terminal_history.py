@@ -14,4 +14,3 @@ async def prepare_terminal_history(redis):
     await redis.xgroup_create(RedisKey.stream_results(), "acceptance-bootstrap", id="0", mkstream=True)
     result = await backfill_terminal_event_evidence(redis, completed_at_ms=50)
     assert result.status == "ready" and result.scanned_entries == 0
-
