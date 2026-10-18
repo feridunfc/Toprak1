@@ -12,6 +12,10 @@ from scripts.runtime_alpha_acceptance_83_8 import (
     build_acceptance_report,
 )
 
+from tests.acceptance_fresh_domain import (  # noqa: F401
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain, prepared_product, product_cli_environment,
+)
+
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -19,14 +23,12 @@ pytestmark = [
 ]
 
 
-async def test_idempotent_submission_report_83_8():
+async def test_idempotent_submission_report_83_8(prepared_product):
+    grant, issuer = await prepared_product(build_acceptance_report,
+        scenario="s83-8", acceptance_id="s83-8-integration")
     report = await build_acceptance_report(
-        os.environ.get(
-            "REDIS_URL",
-            "redis://127.0.0.1:6389/0",
-        ),
+        prepared_grant=grant, prepared_issuer=issuer,
         acceptance_id="s83-8-integration",
-        reset_test_db=True,
     )
 
     assert report["schema_version"] == 1
@@ -194,19 +196,15 @@ async def test_idempotent_submission_cli_83_8(
                 / "scripts"
                 / "runtime_alpha_acceptance_83_8.py"
             ),
-            "--redis-url",
-            os.environ.get(
-                "REDIS_URL",
-                "redis://127.0.0.1:6389/0",
-            ),
+            "--owned-fresh-domain",
             "--acceptance-id",
             "s83-8-cli",
-            "--reset-test-db",
             "--out",
             str(output),
             "--json",
         ],
         cwd=root,
+        env=product_cli_environment(),
         capture_output=True,
         text=True,
         check=False,

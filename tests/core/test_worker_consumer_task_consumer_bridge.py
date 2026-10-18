@@ -391,11 +391,35 @@ async def test_worker_consumer_task_consumer_bridge_enabled_without_injected_con
     assert redis.xack_calls == []
 
 
+
+async def _prepared_terminal_evidence_redis():
+    """Use real fakeredis WATCH/MULTI/EXEC for the terminal writer."""
+    from fakeredis.aioredis import FakeRedis as TransactionalFakeRedis
+
+    redis = TransactionalFakeRedis(decode_responses=True)
+    await redis.hset(
+        RedisKey.run_terminal_event_index(),
+        mapping={
+            "__contract__:schema_version": "1",
+            "__contract__:producer_contract_version": "1",
+        },
+    )
+
+    redis.xack_calls = []
+
+    async def record_ack(stream, group, message_id):
+        redis.xack_calls.append((stream, group, message_id))
+        return 1
+
+    redis.xack = record_ack
+    return redis
+
+
 @pytest.mark.asyncio
 async def test_worker_consumer_task_consumer_bridge_flag_off_preserves_legacy_path(monkeypatch) -> None:
     monkeypatch.delenv("HFA_WORKER_TASK_CONSUMER_BRIDGE", raising=False)
 
-    redis = FakeRedis()
+    redis = await _prepared_terminal_evidence_redis()
     task_consumer = RecordingTaskConsumer()
     consumer = WorkerConsumer(
         redis=redis,
@@ -448,6 +472,11 @@ async def test_worker_consumer_task_consumer_bridge_flag_off_preserves_legacy_pa
     assert calls["try_claim"] == [("run-legacy-still-default", "worker-legacy", "default", 0)]
     assert task_consumer.calls == []
     assert redis.xack_calls == [(stream, CONSUMER_GROUP, "1-legacy")]
+    assert await redis.xlen(RedisKey.stream_results()) == 1
+    assert await redis.hget(
+        RedisKey.run_terminal_event_index(),
+        RedisKey.run_terminal_event_evidence_field("run-legacy-still-default"),
+    ) is not None
 
 
 class ClaimFailedTaskConsumer:

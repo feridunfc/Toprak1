@@ -34,6 +34,7 @@ from hfa.dag.schema import DagRedisKey
 from hfa_control.api.router import router
 from hfa_control.models import ControlPlaneConfig
 from hfa_control.run_submission import RunSubmissionCoordinator
+from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index
 from hfa_control.service import ControlPlaneService
 from hfa_control.shard import ShardOwnershipManager
 from hfa_worker.consumer import CONSUMER_GROUP
@@ -522,6 +523,8 @@ async def build_acceptance_report(
         await redis_client.ping()
         if reset_test_db:
             await redis_client.flushdb()
+            # Explicit disposable acceptance setup, never retained-domain repair.
+            await ensure_terminal_event_index(redis_client)
 
         scenario = await _http_product_scenario(
             redis_client,

@@ -52,6 +52,13 @@ class RunTerminationResult:
     skipped_count: int = 0
     already_finalized: bool = False
     ack_allowed: bool = False
+    canonical_transition_id: str = ""
+    canonical_record_hash: str = ""
+    canonical_command_hash: str = ""
+    canonical_revision: int = 0
+    terminal_proof_sha256: str = ""
+    canonical_head_keys: tuple[str, ...] = ()
+    canonical_head_witness: tuple[str, ...] = ()
 
     @staticmethod
     def from_lua(raw: list, *, run_id: str) -> "RunTerminationResult":
@@ -155,6 +162,18 @@ class RunTerminationCoordinator:
                 worker_instance_id=worker_instance_id,
                 trigger_terminal_state=trigger_terminal_state,
             )
+            # Preserve only the binding's successful authority result. These
+            # values remain observational until the recovery ACK Lua validates
+            # the exact current RUN head and transport entry atomically.
+            proof = {
+                "canonical_transition_id": canonical.canonical_transition_id,
+                "canonical_record_hash": canonical.canonical_record_hash,
+                "canonical_command_hash": canonical.canonical_command_hash,
+                "canonical_revision": canonical.canonical_revision,
+                "terminal_proof_sha256": canonical.terminal_proof_sha256,
+                "canonical_head_keys": canonical.canonical_head_keys,
+                "canonical_head_witness": canonical.canonical_head_witness,
+            } if canonical.finalized and canonical.ack_allowed else {}
             return RunTerminationResult(
                 finalized=bool(canonical.finalized),
                 status=str(canonical.status),
@@ -166,6 +185,7 @@ class RunTerminationCoordinator:
                 skipped_count=int(canonical.skipped_count),
                 already_finalized=bool(canonical.already_finalized),
                 ack_allowed=bool(canonical.ack_allowed),
+                **proof,
             )
 
         assert self._loader is not None

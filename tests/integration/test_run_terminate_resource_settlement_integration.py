@@ -4,6 +4,12 @@ from dataclasses import dataclass
 
 import pytest
 
+from tests.acceptance_fresh_domain import (
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain,
+    activated_redis as real_redis,
+)
+from tests.canonical_terminal_history import prepare_terminal_history, seed_canonical_root, settlement_witnesses
+
 from hfa.authority import (
     AuthorityDecisionCode,
     RedisAuthorityCommitStatus,
@@ -45,6 +51,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 class _Request:
     run_id: str
     tenant_id: str
+    root_task_id: str
     agent_type: str = "research"
     priority: int = 5
     payload: dict | None = None
@@ -58,20 +65,10 @@ class _Request:
 
 
 async def _migration_ready(redis):
-    await redis.hset(
-        RedisKey.run_terminal_event_index(),
-        mapping={
-            "__contract__:schema_version": "1",
-            "__contract__:producer_contract_version": "1",
-            "__migration__:status": "ready",
-            "__migration__:results_stream_key": RedisKey.stream_results(),
-            "__migration__:source_history_complete": "1",
-        },
-    )
-    await redis.persist(RedisKey.run_terminal_event_index())
+    await prepare_terminal_history(redis)
 
 
-async def _seed_resource_run(redis, *, run_id: str, tenant_id: str, tasks: dict[str, str], cost: int = 125):
+async def _seed_resource_run(redis, *, run_id: str, tenant_id: str, tasks: dict[str, str], cost: int = 125, root_task_id: str = "task-a"):
     manager = AdmissionResourceReservationManager(redis)
     create = RunCreateAuthorityBinding(
         redis=redis,
@@ -80,7 +77,7 @@ async def _seed_resource_run(redis, *, run_id: str, tenant_id: str, tasks: dict[
     )
     await create.initialise()
     result = await create.admit(
-        _Request(run_id=run_id, tenant_id=tenant_id, estimated_cost_cents=cost),
+        _Request(run_id=run_id, tenant_id=tenant_id, root_task_id=root_task_id, estimated_cost_cents=cost),
         tenant_inflight_limit=10,
         concurrent_run_limit=10,
         budget_limit_cents=10_000,
@@ -94,6 +91,7 @@ async def _seed_resource_run(redis, *, run_id: str, tenant_id: str, tasks: dict[
     await redis.set(RedisKey.run_state(run_id), "running")
     await redis.hset(RedisKey.run_meta(run_id), mapping={"run_id": run_id, "tenant_id": tenant_id, "state": "running"})
     await redis.zadd(RedisKey.cp_running(), {run_id: 100})
+    await seed_canonical_root(create.store, run_id=run_id, tenant_id=tenant_id, task_id=root_task_id, state=tasks[root_task_id])
     for task_id, state in tasks.items():
         await redis.sadd(DagRedisKey.run_tasks(run_id), task_id)
         await redis.set(DagRedisKey.task_state(task_id), state)
@@ -112,14 +110,14 @@ async def test_non_last_run_not_ready_does_not_settle(real_redis):
     run_id, tenant = "r84-8-not-ready", "t84-8"
     manager, store, binding, op = await _seed_resource_run(
         real_redis, run_id=run_id, tenant_id=tenant,
-        tasks={"task-a": "done", "task-b": "running"},
+        tasks={"task-a": "running", "task-b": "done"},
     )
     before = await _counters(manager, tenant)
     result = await binding.terminate(
         run_id=run_id, tenant_id=tenant, trigger_task_id="task-a",
         finalized_at_ms=1000, worker_instance_id="worker-a", trigger_terminal_state="done",
     )
-    assert result.status == NOT_READY_STATUS and result.ack_allowed is True
+    assert result.status == NOT_READY_STATUS and result.ack_allowed is False
     receipt = await real_redis.hgetall(manager.reservation_receipt_key(op))
     assert receipt["state"] == RESERVATION_STATE_FINALIZED
     assert await _counters(manager, tenant) == before
@@ -250,7 +248,7 @@ async def test_exact_settlement_retry_returns_already_settled_and_never_decremen
         final_state=result.final_state,
     )
     before = await _counters(manager, tenant)
-    replay = await manager.settle_once(settlement, now_ms=9999)
+    replay = await manager.settle_once(settlement, now_ms=9999, **await settlement_witnesses(store, run_id))
     assert replay.status == RESERVATION_STATUS_ALREADY_SETTLED and replay.resource_mutated is False
     assert await _counters(manager, tenant) == before
 
@@ -273,7 +271,7 @@ async def test_changed_settlement_proof_conflicts_without_counter_mutation(real_
         canonical_revision=result.canonical_revision, final_state=result.final_state,
     )
     before = await _counters(manager, tenant)
-    replay = await manager.settle_once(conflict, now_ms=9999)
+    replay = await manager.settle_once(conflict, now_ms=9999, **await settlement_witnesses(store, run_id))
     assert replay.status != RESERVATION_STATUS_SETTLED
     assert replay.resource_mutated is False
     assert await _counters(manager, tenant) == before
@@ -310,7 +308,7 @@ async def test_settlement_enabled_without_run_create_resource_receipt_fails_clos
             run_id=run_id, tenant_id=tenant, agent_type="research", priority=5,
             payload={"prompt": "bare-run-create"}, estimated_cost_cents=125,
             preferred_region="eu-west-1", preferred_placement="LEAST_LOADED",
-            created_at_ms=100, control_stream=RedisKey.stream_control(),
+            created_at_ms=100, control_stream=RedisKey.stream_control(), root_task_id="task-a",
         )
     )
     evaluation = evaluate_authority_commit(
@@ -325,6 +323,7 @@ async def test_settlement_enabled_without_run_create_resource_receipt_fails_clos
     await real_redis.set(RedisKey.run_state(run_id), "running")
     await real_redis.hset(RedisKey.run_meta(run_id), mapping={"run_id": run_id, "tenant_id": tenant, "state": "running"})
     await real_redis.zadd(RedisKey.cp_running(), {run_id: 100})
+    await seed_canonical_root(store, run_id=run_id, tenant_id=tenant, task_id="task-a", state="done")
     await real_redis.sadd(DagRedisKey.run_tasks(run_id), "task-a")
     await real_redis.set(DagRedisKey.task_state("task-a"), "done")
     await real_redis.hset(DagRedisKey.task_meta("task-a"), mapping={"task_id": "task-a", "run_id": run_id, "tenant_id": tenant})

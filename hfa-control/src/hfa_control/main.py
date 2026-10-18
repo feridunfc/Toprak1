@@ -26,8 +26,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import signal
-import sys
 
 import uvicorn
 from fastapi import FastAPI
@@ -44,7 +42,9 @@ def build_app(redis=None, config=None) -> FastAPI:
     """
     Factory used both by main() and by tests (pass mock redis).
     """
-    from hfa_control.service import ControlPlaneService
+    from hfa_control.service import ControlPlaneService, _config_from_env
+    from hfa_control.product_profile import ProductMode, parse_product_mode
+    from hfa_control.product_startup import redis_client_from_environment, verify_terminal_event_readiness
     from hfa_control.api.router import router
 
     app = FastAPI(title="IRONCLAD Control Plane", version="10.0.0")
@@ -57,14 +57,24 @@ def build_app(redis=None, config=None) -> FastAPI:
     async def _startup() -> None:
         nonlocal _redis, _cp
         if _redis is None:
-            import redis.asyncio as aioredis
-
-            _redis = aioredis.from_url(
+            _redis = redis_client_from_environment(
                 os.environ.get("REDIS_URL", "redis://localhost:6379"),
                 decode_responses=False,
             )
-        _cp = ControlPlaneService(_redis, config)
-        await _cp.start()
+        try:
+            resolved = config if config is not None else _config_from_env()
+            if parse_product_mode(resolved.product_mode) is ProductMode.SINGLE_TASK_ALPHA:
+                await verify_terminal_event_readiness(_redis)
+            _cp = ControlPlaneService(_redis, resolved)
+            await _cp.start()
+        except BaseException:
+            try:
+                if _cp is not None:
+                    await _cp.close()
+            finally:
+                await _redis.aclose()
+                _cp, _redis = None, None
+            raise
         app.state.cp = _cp
         app.state.redis = _redis
         logger.info("ControlPlane FastAPI app started")
@@ -103,20 +113,10 @@ def main() -> None:
     )
     server = uvicorn.Server(config)
 
-    # SIGTERM → graceful shutdown
-    loop = asyncio.get_event_loop()
-
-    def _handle_sigterm(*_):
-        logger.info("SIGTERM received — initiating graceful shutdown")
-        loop.call_soon_threadsafe(server.handle_exit, signal.SIGTERM, None)
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-
-    try:
-        loop.run_until_complete(server.serve())
-    finally:
-        loop.close()
-        sys.exit(0)
+    # Uvicorn owns signal handling; asyncio.run also works with Python 3.12/uvloop.
+    asyncio.run(server.serve())
+    if not server.started:
+        raise RuntimeError("Control startup failed; service did not become active")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,12 @@ import json
 
 import pytest
 
+from tests.acceptance_fresh_domain import (
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain,
+    activated_redis as real_redis,
+)
+from tests.canonical_terminal_history import prepare_terminal_history, seed_canonical_root
+
 from hfa.authority import (
     AuthorityDecisionCode,
     RedisAuthorityCommitStatus,
@@ -45,6 +51,7 @@ async def _seed_canonical_run(
     tasks: dict[str, str],
     legacy_run_state: str = "running",
     with_run_meta: bool = True,
+    root_task_id: str = "task-a",
 ) -> RedisCanonicalAuthorityStore:
     store = RedisCanonicalAuthorityStore(redis_client)
     await store.initialise()
@@ -52,6 +59,7 @@ async def _seed_canonical_run(
         RunCreateAuthorityInput(
             run_id=run_id,
             tenant_id=tenant_id,
+            root_task_id=root_task_id,
             agent_type="research",
             priority=5,
             payload={"prompt": "sprint-84.5"},
@@ -87,6 +95,7 @@ async def _seed_canonical_run(
             },
         )
     await redis_client.zadd(RedisKey.cp_running(), {run_id: 100})
+    await seed_canonical_root(store, run_id=run_id, tenant_id=tenant_id, task_id=root_task_id, state=tasks[root_task_id])
     for task_id, state in tasks.items():
         await redis_client.sadd(DagRedisKey.run_tasks(run_id), task_id)
         await redis_client.set(DagRedisKey.task_state(task_id), state)
@@ -102,19 +111,7 @@ async def _seed_canonical_run(
 
 
 async def _set_terminal_event_migration_ready(redis_client):
-    # Synthetic readiness for Sprint 84.5 regression tests only. Production
-    # readiness must be created by the bounded Sprint 84.6 backfill tool.
-    await redis_client.hset(
-        RedisKey.run_terminal_event_index(),
-        mapping={
-            "__contract__:schema_version": "1",
-            "__contract__:producer_contract_version": "1",
-            "__migration__:status": "ready",
-            "__migration__:results_stream_key": RedisKey.stream_results(),
-            "__migration__:source_history_complete": "1",
-        },
-    )
-    await redis_client.persist(RedisKey.run_terminal_event_index())
+    await prepare_terminal_history(redis_client)
 
 
 async def _binding(redis_client, store=None, projection=None):
@@ -143,22 +140,14 @@ async def _capture_and_commit_without_projection(
     tenant_id: str,
     finalized_at_ms: int = 1000,
 ):
-    proof_manager = TerminalAggregateProofManager(redis_client)
-    await proof_manager.initialise()
+    binding = await _binding(redis_client, store=store)
     snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
-    assert snapshot is not None
-    captured = await proof_manager.capture(
-        run_id=run_id,
-        tenant_id=tenant_id,
-        finalized_at_ms=finalized_at_ms,
-        worker_instance_id="worker-a",
-        trigger_task_id="task-a",
-        trigger_terminal_state="done",
-        canonical_expected_revision=snapshot.revision,
-        canonical_previous_state=snapshot.state,
+    proof = await binding._capture_canonical_proof(
+        snapshot=snapshot, run_id=run_id, tenant_id=tenant_id,
+        finalized_at_ms=finalized_at_ms, worker_instance_id="worker-a",
+        trigger_task_id="task-a", trigger_terminal_state="done",
     )
-    assert captured.proof is not None
-    proof = captured.proof
+    assert proof is not None
     command = build_run_terminate_command(proof)
     evaluation = evaluate_authority_commit(
         context=build_run_terminate_context(command),
@@ -183,7 +172,7 @@ async def test_success_capture_commit_projection_and_exact_retry(real_redis):
         real_redis,
         run_id=run_id,
         tenant_id=tenant_id,
-        tasks={"task-b": "done", "task-a": "done"},
+        tasks={"task-b": "done", "task-a": "done"}, root_task_id="task-b",
     )
     binding = await _binding(real_redis, store=store)
 
@@ -211,12 +200,13 @@ async def test_success_capture_commit_projection_and_exact_retry(real_redis):
     assert first.canonical_revision == retry.canonical_revision == 2
     snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
     assert snapshot is not None and snapshot.revision == 2 and snapshot.state == "done"
-    proof_manager = TerminalAggregateProofManager(real_redis)
-    proof = await proof_manager.load_existing(run_id)
-    assert proof is not None
-    assert [row.task_id for row in proof.tasks] == ["task-a", "task-b"]
+    head = await store.load_receipt_probe(run_terminate_identity(run_id), snapshot.operation_id)
+    proof = binding._proof_from_record(head.canonical_store_record)
+    assert [row.task_id for row in proof.tasks] == ["task-b"]
+    assert proof.canonical_task["state"] == "done"
     assert hashlib.sha256(proof.proof_payload_json.encode()).hexdigest() == proof.proof_sha256
-    assert await real_redis.ttl(proof_manager.proof_key(run_id)) == -1
+    assert await real_redis.ttl(store.keyspace(run_terminate_identity(run_id).sha256).operation_records) == -1
+    assert not await real_redis.exists(TerminalAggregateProofManager.proof_key(run_id))
     proof_payload = json.loads(proof.proof_payload_json)
     assert "finalized_at_ms" not in proof_payload
     assert "worker_instance_id" not in proof_payload
@@ -241,7 +231,7 @@ async def test_failure_terminal_aggregate_projects_failed(real_redis):
         real_redis,
         run_id=run_id,
         tenant_id=tenant_id,
-        tasks={"task-a": "done", "task-b": "failed", "task-c": "skipped"},
+        tasks={"task-a": "done", "task-b": "failed", "task-c": "skipped"}, root_task_id="task-b",
     )
     binding = await _binding(real_redis, store=store)
     result = await binding.terminate(
@@ -253,7 +243,7 @@ async def test_failure_terminal_aggregate_projects_failed(real_redis):
         trigger_terminal_state="failed",
     )
     assert result.final_state == "failed"
-    assert (result.task_count, result.done_count, result.failed_count, result.skipped_count) == (3, 1, 1, 1)
+    assert (result.task_count, result.done_count, result.failed_count, result.skipped_count) == (1, 0, 1, 0)
     stored = await real_redis.hgetall(RedisKey.run_result(run_id))
     assert stored["status"] == "failed"
     assert stored["error"] == "aggregate_task_failure"
@@ -268,7 +258,7 @@ async def test_nonterminal_sibling_is_not_ready_without_proof_or_authority_mutat
         real_redis,
         run_id=run_id,
         tenant_id=tenant_id,
-        tasks={"task-a": "done", "task-b": "running"},
+        tasks={"task-a": "running", "task-b": "done"},
     )
     binding = await _binding(real_redis, store=store)
     result = await binding.terminate(
@@ -279,7 +269,7 @@ async def test_nonterminal_sibling_is_not_ready_without_proof_or_authority_mutat
         trigger_terminal_state="done",
     )
     assert result.status == NOT_READY_STATUS
-    assert result.finalized is False and result.ack_allowed is True
+    assert result.finalized is False and result.ack_allowed is False
     assert await real_redis.exists(TerminalAggregateProofManager.proof_key(run_id)) == 0
     snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
     assert snapshot is not None and snapshot.revision == 1 and snapshot.state == "pending"
@@ -297,29 +287,24 @@ async def test_frozen_proof_then_task_change_conflicts_before_canonical_commit(r
         tenant_id=tenant_id,
         tasks={"task-a": "done"},
     )
-    manager = TerminalAggregateProofManager(real_redis)
-    await manager.initialise()
-    captured = await manager.capture(
-        run_id=run_id,
-        tenant_id=tenant_id,
-        finalized_at_ms=4000,
-        worker_instance_id="worker-a",
-        trigger_task_id="task-a",
-        trigger_terminal_state="done",
-        canonical_expected_revision=1,
-        canonical_previous_state="pending",
-    )
-    assert captured.proof is not None
-    await real_redis.set(DagRedisKey.task_state("task-a"), "running")
     binding = await _binding(real_redis, store=store)
-    with pytest.raises(RunTerminateAuthorityError, match="terminal_proof_changed_after_capture"):
-        await binding.terminate(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            trigger_task_id="task-a",
-            finalized_at_ms=9999,
-            trigger_terminal_state="done",
-        )
+    snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
+    proof = await binding._capture_canonical_proof(
+        snapshot=snapshot, run_id=run_id, tenant_id=tenant_id,
+        finalized_at_ms=4000, worker_instance_id="worker-a",
+        trigger_task_id="task-a", trigger_terminal_state="done",
+    )
+    assert proof is not None
+    from hfa.authority import AggregateType, CanonicalAggregateIdentity
+    task = CanonicalAggregateIdentity(aggregate_type=AggregateType.TASK, run_id=run_id, task_id="task-a")
+    task_head = await store.get_aggregate_snapshot(task)
+    await real_redis.hdel(store.keyspace(task.sha256).receipts, task_head.operation_digest)
+    before = {k: await real_redis.dump(k) async for k in real_redis.scan_iter()}
+    with pytest.raises(RunTerminateAuthorityError) as caught:
+        await binding.terminate(run_id=run_id, tenant_id=tenant_id, trigger_task_id="task-a",
+                                finalized_at_ms=9999, trigger_terminal_state="done")
+    assert caught.value.status == "canonical_run_terminate_evidence_unavailable"
+    assert {k: await real_redis.dump(k) async for k in real_redis.scan_iter()} == before
     snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
     assert snapshot is not None and snapshot.revision == 1
     assert await _events(real_redis, run_id) == []
@@ -334,22 +319,17 @@ async def test_proof_without_canonical_receipt_never_backfills_legacy_terminal_r
         tenant_id=tenant_id,
         tasks={"task-a": "done"},
     )
-    manager = TerminalAggregateProofManager(real_redis)
-    await manager.initialise()
-    captured = await manager.capture(
-        run_id=run_id,
-        tenant_id=tenant_id,
-        finalized_at_ms=5000,
-        worker_instance_id="worker-a",
-        trigger_task_id="task-a",
+    binding = await _binding(real_redis, store=store)
+    snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
+    proof = await binding._capture_canonical_proof(
+        snapshot=snapshot, run_id=run_id, tenant_id=tenant_id,
+        finalized_at_ms=5000, worker_instance_id="worker-a", trigger_task_id="task-a",
         trigger_terminal_state="done",
-        canonical_expected_revision=1,
-        canonical_previous_state="pending",
     )
-    assert captured.proof is not None
+    assert proof is not None
     await real_redis.set(RedisKey.run_state(run_id), "done")
     binding = await _binding(real_redis, store=store)
-    with pytest.raises(RunTerminateAuthorityError, match="legacy_terminal_footprint_without_canonical_authority"):
+    with pytest.raises(RunTerminateProjectionPendingError, match="^legacy_terminal_footprint_without_projection_receipt$") as caught:
         await binding.terminate(
             run_id=run_id,
             tenant_id=tenant_id,
@@ -358,7 +338,12 @@ async def test_proof_without_canonical_receipt_never_backfills_legacy_terminal_r
             trigger_terminal_state="done",
         )
     snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
-    assert snapshot is not None and snapshot.revision == 1
+    # Canonical root authorizes RUN durability; existing unexplained runtime
+    # terminal state still refuses projection, event publication and ACK.
+    assert snapshot is not None and snapshot.revision == 2 and snapshot.state == "done"
+    assert caught.value.canonical_commit_durable is True
+    assert not await real_redis.exists(RedisKey.run_result(run_id))
+    assert await _events(real_redis, run_id) == []
 
 
 async def test_durable_canonical_commit_recovers_projection_without_reinterpreting_tasks(real_redis):
@@ -486,21 +471,23 @@ async def test_concurrent_exact_requests_commit_one_revision_and_one_event(real_
         real_redis,
         run_id=run_id,
         tenant_id=tenant_id,
-        tasks={"task-a": "done", "task-b": "done"},
+        tasks={"task-a": "done", "task-b": "done"}, root_task_id="task-b",
     )
     binding = await _binding(real_redis, store=store)
 
+    # Exact concurrent commands share immutable time/writer metadata as well as operation ID.
     async def call(index: int):
         return await binding.terminate(
             run_id=run_id,
             tenant_id=tenant_id,
             trigger_task_id="task-b",
-            finalized_at_ms=10000 + index,
-            worker_instance_id=f"worker-{index}",
+            finalized_at_ms=10000,
+            worker_instance_id="worker-exact",
             trigger_terminal_state="done",
         )
 
-    results = await asyncio.gather(*(call(index) for index in range(8)))
+    results = await asyncio.gather(*(call(index) for index in range(8)), return_exceptions=True)
+    assert not any(isinstance(item, BaseException) for item in results), results
     assert all(item.finalized and item.ack_allowed for item in results)
     assert len({item.terminal_proof_sha256 for item in results}) == 1
     snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
@@ -542,17 +529,21 @@ async def test_task_identity_mismatch_fails_before_proof_or_authority(real_redis
     )
     await real_redis.hset(DagRedisKey.task_meta("task-a"), "run_id", "other-run")
     binding = await _binding(real_redis, store=store)
-    with pytest.raises(RunTerminateAuthorityError, match="terminal_proof_task_identity_mismatch"):
-        await binding.terminate(
-            run_id=run_id,
-            tenant_id=tenant_id,
-            trigger_task_id="task-a",
-            finalized_at_ms=12000,
-            trigger_terminal_state="done",
-        )
-    assert await real_redis.exists(TerminalAggregateProofManager.proof_key(run_id)) == 0
+    before = {k: await real_redis.dump(k) async for k in real_redis.scan_iter()}
+    with pytest.raises(RunTerminateAuthorityError) as caught:
+        await binding.terminate(run_id=run_id, tenant_id=tenant_id, trigger_task_id="wrong-root",
+                                finalized_at_ms=12000, trigger_terminal_state="done")
+    assert caught.value.status == "canonical_root_task_mismatch"
+    assert {k: await real_redis.dump(k) async for k in real_redis.scan_iter()} == before
     snapshot = await store.get_aggregate_snapshot(run_terminate_identity(run_id))
     assert snapshot is not None and snapshot.revision == 1
+    # Mutable TASK metadata drift is not canonical identity corruption.
+    result = await binding.terminate(run_id=run_id, tenant_id=tenant_id, trigger_task_id="task-a",
+                                     finalized_at_ms=12001, trigger_terminal_state="failed")
+    assert result.final_state == "done" and result.ack_allowed
+    assert await real_redis.hget(DagRedisKey.task_meta("task-a"), "run_id") == "other-run"
+    assert len(await _events(real_redis, run_id)) == 1
+
 
 
 async def test_projection_receipt_corruption_after_durable_commit_fails_closed(real_redis):

@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import pytest
 
+from tests.acceptance_fresh_domain import (
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain,
+    activated_redis as redis_client,
+)
+from tests.canonical_terminal_history import prepare_terminal_history
+
 from hfa.authority import (AggregateType, AuthorityCommand, AuthorityDecisionCode,
     AuthorityEntryContext, CanonicalAggregateIdentity, OperationType,
     RedisAuthorityCommitStatus, RedisCanonicalAuthorityStore, evaluate_authority_commit)
@@ -47,15 +53,16 @@ async def _commit(store, command, revision, state, at):
     e=evaluate_authority_commit(context=_ctx(command), command=command, current_revision=revision,
         current_state=state, receipt_probe=None, committed_at_ms=at, correlation_id=None)
     assert e.decision.code is AuthorityDecisionCode.ACCEPTED and e.commit_plan is not None
-    r=await store.commit(e.commit_plan); assert r.status is RedisAuthorityCommitStatus.COMMITTED
+    # F07: TASK_ADMIT in an activated namespace must be owner-aware (legacy writers are fenced).
+    r=await store.commit(e.commit_plan, **({'require_task_owner_binding': True} if command.operation_type is OperationType.TASK_ADMIT else {})); assert r.status is RedisAuthorityCommitStatus.COMMITTED
     return e.commit_plan.record
 
-async def _seed_run(r, run_id, tenant_id):
+async def _seed_run(r, run_id, tenant_id, root_task_id):
     store=RedisCanonicalAuthorityStore(r); await store.initialise()
     cmd=build_run_create_command(RunCreateAuthorityInput(run_id=run_id, tenant_id=tenant_id,
         agent_type="research", priority=5, payload={"prompt":"84.7d"}, estimated_cost_cents=100,
         preferred_region="eu-west-1", preferred_placement="LEAST_LOADED", created_at_ms=50,
-        control_stream=RedisKey.stream_control()))
+        control_stream=RedisKey.stream_control(), root_task_id=root_task_id))
     e=evaluate_authority_commit(context=build_run_create_context(cmd), command=cmd, current_revision=0,
         current_state=None, receipt_probe=None, committed_at_ms=50, correlation_id=None)
     assert e.commit_plan is not None
@@ -66,11 +73,7 @@ async def _seed_run(r, run_id, tenant_id):
     return store
 
 async def _migration_ready(r):
-    await r.hset(RedisKey.run_terminal_event_index(), mapping={
-        "__contract__:schema_version":"1", "__contract__:producer_contract_version":"1",
-        "__migration__:status":"ready", "__migration__:results_stream_key":RedisKey.stream_results(),
-        "__migration__:source_history_complete":"1"})
-    await r.persist(RedisKey.run_terminal_event_index())
+    await prepare_terminal_history(r)
 
 async def _seed_dispatch(r, task_id, run_id, tenant_id, worker_id, epoch):
     store=RedisCanonicalAuthorityStore(r); await store.initialise()
@@ -139,30 +142,33 @@ async def _run_terminal(store,run_id,state):
 
 async def test_non_last_task_terminalizes_but_run_not_ready_and_message_acks(redis_client):
     t,s,run,tenant,wid,e="d-nonlast-task","d-sibling","d-nonlast-run","d-tenant","d-nonlast-worker","d-epoch"; stream=RedisKey.stream_shard(0)
-    rs=await _seed_run(redis_client,run,tenant); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); await _sibling(redis_client,s,run,tenant,"running")
+    rs=await _seed_run(redis_client,run,tenant,t); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); await _sibling(redis_client,s,run,tenant,"running")
     w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=True,output={"ok":True}))); mid,data=await _enqueue(redis_client,stream,"TaskRequested",t,run,tenant,wid,e)
     await w._consumer._process_message(_text(mid),data,stream,0)
     snap=await ts.get_aggregate_snapshot(ti); assert snap.revision==4 and snap.state=="done"
-    run_snap=await rs.get_aggregate_snapshot(run_terminate_identity(run)); assert run_snap.revision==1 and run_snap.state=="pending"
-    assert _text(await redis_client.get(RedisKey.run_state(run)))=="running" and not await redis_client.exists(RedisKey.run_result(run)) and await _pending(redis_client,stream)==[]
+    run_snap=await rs.get_aggregate_snapshot(run_terminate_identity(run)); assert run_snap.revision==2 and run_snap.state=="done"
+    # SINGLE_TASK: a mutable sibling is not an authority over the completed canonical root.
+    assert _text(await redis_client.get(RedisKey.run_state(run)))=="done" and await redis_client.exists(RedisKey.run_result(run)) and await _pending(redis_client,stream)==[]
+    assert _text(await redis_client.get(DagRedisKey.task_state(s)))=="running"
+    assert len(await _events(redis_client,run))==1
 
 async def test_last_task_success_canonical_run_terminate_done_then_acks(redis_client):
     t,run,tenant,wid,e="d-success-task","d-success-run","d-success-tenant","d-success-worker","d-success-epoch"; stream=RedisKey.stream_shard(0)
-    rs=await _seed_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=True,output={"answer":42})))
+    rs=await _seed_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=True,output={"answer":42})))
     mid,data=await _enqueue(redis_client,stream,"TaskRequested",t,run,tenant,wid,e); await w._consumer._process_message(_text(mid),data,stream,0)
     await _run_terminal(rs,run,"done"); result=await redis_client.hgetall(RedisKey.run_result(run)); events=await _events(redis_client,run)
     assert _text(await redis_client.get(RedisKey.run_state(run)))=="done" and _text(result.get("status"))=="done" and len(events)==1 and _text(events[0].get("event_type"))=="RunCompleted" and await _pending(redis_client,stream)==[]
 
 async def test_last_task_failure_canonical_run_terminate_failed_then_acks(redis_client):
     t,run,tenant,wid,e="d-fail-task","d-fail-run","d-fail-tenant","d-fail-worker","d-fail-epoch"; stream=RedisKey.stream_shard(0)
-    rs=await _seed_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=False,output={},error="boom")))
+    rs=await _seed_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=False,output={},error="boom")))
     mid,data=await _enqueue(redis_client,stream,"RunRequested",t,run,tenant,wid,e); await w._consumer._process_message(_text(mid),data,stream,0)
     await _run_terminal(rs,run,"failed"); events=await _events(redis_client,run)
     assert _text(await redis_client.get(RedisKey.run_state(run)))=="failed" and len(events)==1 and _text(events[0].get("event_type"))=="RunFailed" and await _pending(redis_client,stream)==[]
 
 async def test_run_authority_commit_projection_failure_leaves_message_unacked(redis_client,monkeypatch):
     t,run,tenant,wid,e="d-run-proj-task","d-run-proj-run","d-run-proj-tenant","d-run-proj-worker","d-run-proj-epoch"; stream=RedisKey.stream_shard(0)
-    rs=await _seed_run(redis_client,run,tenant); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=True,output={"durable":True})))
+    rs=await _seed_run(redis_client,run,tenant,t); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=True,output={"durable":True})))
     async def fail(_): raise RuntimeError("forced RUN projection failure")
     monkeypatch.setattr(w._run_terminate_authority_binding.projection_manager,"project",fail)
     mid,data=await _enqueue(redis_client,stream,"TaskRequested",t,run,tenant,wid,e); await w._consumer._process_message(_text(mid),data,stream,0)
@@ -171,7 +177,7 @@ async def test_run_authority_commit_projection_failure_leaves_message_unacked(re
 
 async def test_redelivery_repairs_only_run_projection_without_task_reexecution(redis_client,monkeypatch):
     t,run,tenant,wid,e="d-replay-task","d-replay-run","d-replay-tenant","d-replay-worker","d-replay-epoch"; stream=RedisKey.stream_shard(0)
-    rs=await _seed_run(redis_client,run,tenant); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); ex=_TaskExecutor(TaskExecutionResult(ok=True,output={"once":True})); w=await _worker(redis_client,wid,ex)
+    rs=await _seed_run(redis_client,run,tenant,t); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); ex=_TaskExecutor(TaskExecutionResult(ok=True,output={"once":True})); w=await _worker(redis_client,wid,ex)
     pm=w._run_terminate_authority_binding.projection_manager; original=pm.project; first=True
     async def fail_once(value):
         nonlocal first
@@ -188,7 +194,7 @@ async def test_redelivery_repairs_only_run_projection_without_task_reexecution(r
 
 async def test_task_projection_failure_never_attempts_run_terminate_and_does_not_ack(redis_client,monkeypatch):
     t,run,tenant,wid,e="d-task-proj-task","d-task-proj-run","d-task-proj-tenant","d-task-proj-worker","d-task-proj-epoch"; stream=RedisKey.stream_shard(0)
-    rs=await _seed_run(redis_client,run,tenant); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=True,output={"durable":True})))
+    rs=await _seed_run(redis_client,run,tenant,t); ts,ti=await _seed_dispatch(redis_client,t,run,tenant,wid,e); w=await _worker(redis_client,wid,_TaskExecutor(TaskExecutionResult(ok=True,output={"durable":True})))
     async def fail_task(_): raise TaskTerminalAuthorityError(status=TASK_TERMINAL_PROJECTION_PENDING_STATUS,detail="forced TASK projection failure",canonical_commit_durable=True)
     async def no_run(**kwargs): raise AssertionError("RUN_TERMINATE must not be attempted before TASK projection succeeds")
     monkeypatch.setattr(w._task_terminal_authority_binding.projection_manager,"project",fail_task); monkeypatch.setattr(w._run_terminate_authority_binding,"terminate",no_run)

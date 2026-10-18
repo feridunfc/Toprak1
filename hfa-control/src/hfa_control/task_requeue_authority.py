@@ -106,6 +106,7 @@ def _lua_path() -> Path:
     candidates = [
         here.parent.parent.parent.parent / "hfa-core" / "src" / "hfa" / "lua" / "task_requeue.lua",
         here.parent.parent.parent / "hfa" / "lua" / "task_requeue.lua",
+        here.parent.parent / "hfa" / "lua" / "task_requeue.lua",
     ]
     for candidate in candidates:
         if candidate.exists():

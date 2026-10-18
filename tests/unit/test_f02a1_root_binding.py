@@ -1,6 +1,7 @@
 """Actual production admission and Lua oracles; offline fixture by default."""
 from dataclasses import replace
 import hashlib
+import os
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -30,8 +31,27 @@ from tests.unit.test_f03_terminal_ordering import plan
 from tests.unit.test_run_create_authority_contract import value
 
 
+FRESH_TEST_ATTESTATION = {
+    'fresh_domain_id': 'f02a1-fresh-test-namespace', 'writers_isolated': True,
+    'attested_by': 'test-fixture', 'evidence_ref': 'disposable fakeredis server created for this test',
+}
+
+
 @pytest_asyncio.fixture
 async def root_redis():
+    live = os.environ.get('HFA_REAL_REDIS_URL')
+    if live:
+        # Real owned, disposable standalone Redis: flush before and verify DBSIZE==0 after cleanup.
+        import redis.asyncio as aioredis
+        redis = aioredis.from_url(live, decode_responses=True)
+        await redis.flushdb()
+        try:
+            yield redis
+        finally:
+            await redis.flushdb()
+            assert await redis.dbsize() == 0
+            await redis.aclose()
+        return
     server = fakeredis.FakeServer(version=(7, 4))
     redis = fakeredis.aioredis.FakeRedis(server=server, decode_responses=True)
     await redis.eval('return 1', 0)
@@ -44,8 +64,8 @@ async def root_redis():
         await redis.aclose()
 
 
-@pytest.fixture
-def alpha(root_redis, monkeypatch):
+@pytest_asyncio.fixture
+async def alpha(root_redis, monkeypatch):
     for name in ('RUN_CREATE', 'TASK_ADMIT', 'TASK_DISPATCH', 'TASK_CLAIM',
                  'TASK_TERMINAL', 'TASK_REQUEUE'):
         monkeypatch.setenv(f'HFA_CANONICAL_{name}_BINDING', 'true')
@@ -57,6 +77,13 @@ def alpha(root_redis, monkeypatch):
     dag = service._scheduler.composition.dag_lua
     assert type(dag) is DagLua and service._run_submission._dag_lua is dag
     assert dag._require_root_task_binding is True
+    assert dag._require_task_owner_binding is True
+    # F07: explicit bootstrap of a genuinely isolated, disposable fresh domain (never automatic).
+    from hfa.authority import RedisCanonicalAuthorityStore
+    activated = await RedisCanonicalAuthorityStore(root_redis).activate_task_owner_namespace(
+        namespace_id='f02a1-fresh-test-namespace', activated_at_ms=1,
+        isolation_attestation=FRESH_TEST_ATTESTATION)
+    assert activated['status'] == 'ACTIVATED'
     return service
 
 
@@ -151,7 +178,7 @@ async def test_original_blocker_now_rejects_second_task(alpha, root_redis, membe
         await dag.task_admit(wrong)
     # Also reach the canonical boundary directly, even if forged membership
     # was rejected earlier by legacy-footprint detection in the gateway.
-    rejected = await store.commit(admit_plan(wrong), require_task_admit_root_binding=True)
+    rejected = await store.commit(admit_plan(wrong), require_task_admit_root_binding=True, require_task_owner_binding=True)
     assert rejected.status is RedisAuthorityCommitStatus.ILLEGAL_STATE_TRANSITION
     assert rejected.detail == 'parent_run_root_task_mismatch'
     assert await store.get_aggregate_snapshot(build_task_admit_command(wrong).aggregate_identity) is None
@@ -162,7 +189,7 @@ async def test_original_blocker_now_rejects_second_task(alpha, root_redis, membe
 @pytest.mark.asyncio
 async def test_bound_parent_enforced_even_on_internal_gateway(alpha, root_redis):
     req, store, _ = await create(alpha)
-    internal = DagLua(root_redis, canonical_task_admit_binding=True)
+    internal = DagLua(root_redis, canonical_task_admit_binding=True, require_task_owner_binding=True)
     with pytest.raises(TaskAdmitAuthorityError, match='parent_run_root_task_mismatch'):
         await internal.task_admit(seed(req, 'wrong-internal-task'))
     assert await store.get_aggregate_snapshot(build_task_admit_command(seed(req, 'wrong-internal-task')).aggregate_identity) is None
@@ -248,7 +275,7 @@ async def test_exact_root_duplicate_is_receipt_first_and_read_only(alpha, root_r
     monkeypatch.setattr(RedisCanonicalAuthorityStore, 'parent_run_guard', forbidden)
     before = await snapshot(root_redis)
     assert (await dag.task_admit(item)).status == 'already_exists'
-    duplicate = await store.commit(admit_plan(item), require_task_admit_root_binding=True)
+    duplicate = await store.commit(admit_plan(item), require_task_admit_root_binding=True, require_task_owner_binding=True)
     assert duplicate.status is RedisAuthorityCommitStatus.ALREADY_APPLIED
     assert await snapshot(root_redis) == before
 
@@ -266,7 +293,7 @@ async def test_historical_unbound_run_and_duplicate_preserved(alpha, root_redis)
     assert 'root_task_id' not in probe.canonical_store_record.authoritative_metadata_changes
     assert await historical.admit(req) == req.run_id
     assert await store.get_aggregate_snapshot(run) == before
-    internal = DagLua(root_redis, canonical_task_admit_binding=True)
+    internal = DagLua(root_redis, canonical_task_admit_binding=True, require_task_owner_binding=True)
     for task in ('historical-first', 'historical-second'):
         assert (await internal.task_admit(seed(req, task))).admitted
     with pytest.raises(TaskAdmitAuthorityError, match='root_binding_required'):

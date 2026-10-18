@@ -4,6 +4,8 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
+      - 'tests/core/test_pr147_ci_compatibility_contracts.py'
       - 'hfa-control/src/hfa_control/scheduler.py'
       - 'hfa-control/src/hfa_control/scheduler_reservation_dispatch.py'
       - 'hfa-control/src/hfa_control/task_claim.py'
@@ -66,6 +68,12 @@ jobs:
               "hfa-control/src/hfa_control/task_claim.py",
               "tests/core/test_production_scheduler_composition_contract.py",
           }
+          regression_triggers = allowlist | {
+              ".github/actions/acceptance-redis/action.yml",
+              "tests/core/test_pr147_ci_compatibility_contracts.py",
+              "hfa-control/src/hfa_control/scheduler.py",
+              "tests/core/test_task_claim_service_legacy_quarantine_contract.py",
+          }
           changed = set(
               subprocess.check_output(
                   ["git", "diff", "--name-only", f"{os.environ['PR_BASE_SHA']}...HEAD"],
@@ -79,11 +87,11 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              touched = changed & allowlist
+              touched = changed & regression_triggers
               assert touched, {
                   "mode": "FUTURE_REGRESSION_TRIGGER",
                   "changed": sorted(changed),
-                  "required_intersection": sorted(allowlist),
+                  "required_intersection": sorted(regression_triggers),
               }
               mode = "REGRESSION_TRIGGER_INTERSECTION"
           forbidden = [
@@ -106,6 +114,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
+
+      - name: Install workflow policy test parser
+        run: python -m pip install pyyaml
+
+      - name: Current integration CI compatibility contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_pr147_ci_compatibility_contracts.py -q --tb=short | tee pr147_ci_contracts.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' pr147_ci_contracts.txt
+
+      - name: Historical CI scope contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/core/test_ci_historical_scope_contracts.py -q --tb=short | tee sprint84_7a_scope_contracts.txt
+          ! grep -Eqi '[1-9][0-9]* (skipped|deselected|xfailed|xpassed)' sprint84_7a_scope_contracts.txt
 
       - name: Focused baseline truth closure
         shell: bash
@@ -223,3 +251,11 @@ jobs:
         run: |
           python -m compileall -q hfa-core/src hfa-control/src hfa-worker/src
           git diff --check origin/${{ github.base_ref }}...HEAD
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint84-7a-baseline-truth-closure
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
+          if-no-files-found: error

@@ -35,9 +35,33 @@ class FakeRedis:
         return 1
 
 
+
+async def _prepared_terminal_evidence_redis():
+    """Use real fakeredis WATCH/MULTI/EXEC for the terminal writer."""
+    from fakeredis.aioredis import FakeRedis as TransactionalFakeRedis
+
+    redis = TransactionalFakeRedis(decode_responses=True)
+    await redis.hset(
+        RedisKey.run_terminal_event_index(),
+        mapping={
+            "__contract__:schema_version": "1",
+            "__contract__:producer_contract_version": "1",
+        },
+    )
+
+    redis.xack_calls = []
+
+    async def record_ack(stream, group, message_id):
+        redis.xack_calls.append((stream, group, message_id))
+        return 1
+
+    redis.xack = record_ack
+    return redis
+
+
 @pytest.mark.asyncio
 async def test_worker_consumer_process_message_writes_result_completes_and_acks() -> None:
-    redis = FakeRedis()
+    redis = await _prepared_terminal_evidence_redis()
     executor = FakeExecutor()
 
     consumer = WorkerConsumer(
@@ -143,10 +167,14 @@ async def test_worker_consumer_process_message_writes_result_completes_and_acks(
     assert calls["mark_completed"] == ["run-canonical-1"]
     assert calls["release_claim"] == []
 
-    assert redis.xadd_calls
-    result_stream, result_event = redis.xadd_calls[0]
-    assert result_stream == RedisKey.stream_results()
-    assert result_event
+    terminal_events = await redis.xrange(RedisKey.stream_results())
+    assert len(terminal_events) == 1
+    assert terminal_events[0][1]["event_type"] == "RunCompleted"
+    evidence = await redis.hget(
+        RedisKey.run_terminal_event_index(),
+        RedisKey.run_terminal_event_evidence_field("run-canonical-1"),
+    )
+    assert evidence is not None
 
     assert redis.xack_calls == [
         (stream, CONSUMER_GROUP, "1-0")

@@ -16,6 +16,13 @@
 -- RUN_TERMINATE uses KEYS[9..14]/ARGV[28] for the bound canonical root TASK,
 -- and ARGV[30] for the immutable RUN_CREATE proof in this RUN's existing keys.
 -- Cross-aggregate terminal ordering uses standalone Redis, without rekeying.
+-- F07 v2 (TASK_ADMIT only): the LAST two KEYS are the ONE persistent global owner HASH
+-- (KEYS[#KEYS-1], field = task_id) and its integrity header (KEYS[#KEYS], monotonic
+-- owner_count). Exact duplicates carry 10 KEYS, first allocations 16. ARGV[31] "1" requires
+-- the owner inventory. Every owner decision first proves HLEN(owners) == owner_count, so the
+-- deletion of ANY prior binding is detected before another TASK may reuse that id. The owner
+-- is written (HSET + HINCRBY) in this invocation immediately before the canonical writes,
+-- after every data-dependent validation. Standalone Redis only (no Cluster atomicity claim).
 -- All data-dependent validation
 -- precedes an accepted lifecycle write. Conflict outcomes append their durable,
 -- deduplicated evidence in this same Lua execution without consuming revision.
@@ -48,6 +55,7 @@ local head_prevalidation_status = ARGV[24]
 local head_record_raw_sha1 = ARGV[25]
 local head_receipt_raw_sha1 = ARGV[26]
 local head_index_raw_sha1 = ARGV[27]
+local owner_mode = ARGV[31]
 
 local function result(status, existing_transition_id, revision, detail)
     return {
@@ -369,6 +377,82 @@ local function emit_conflict(conflict_type, stored_command_hash, existing_transi
     return result(conflict_type, existing_transition_id, revision, detail or "")
 end
 
+-- F07 v2 persistent global TASK owner inventory helpers (TASK_ADMIT only).
+local OWNER_SCHEMA = "task-owner:v1"
+local HEADER_SCHEMA = "task-owner-header:v1"
+
+local function owner_value_for(record)
+    local identity = record.canonical_aggregate_identity
+    local meta = record.authoritative_metadata_changes
+    if type(identity) ~= "table" or type(meta) ~= "table"
+        or type(identity.run_id) ~= "string" or identity.run_id == ""
+        or type(identity.task_id) ~= "string" or identity.task_id == ""
+        or type(meta.tenant_id) ~= "string" or meta.tenant_id == "" then
+        return nil, nil
+    end
+    local fields = {
+        OWNER_SCHEMA, identity.run_id, meta.tenant_id, identity_sha, operation_id,
+        operation_digest, transition_id, canonical_record_hash, canonical_command_hash,
+        committed_at_ms_raw,
+    }
+    local out = {}
+    for i = 1, #fields do out[i] = length_prefix(fields[i]) end
+    return table.concat(out), identity.task_id
+end
+
+local function decode_owner_value(value)
+    local fields, pos = {}, 1
+    while pos <= #value do
+        local colon = string.find(value, ":", pos, true)
+        if not colon then return nil end
+        local size = tonumber(string.sub(value, pos, colon - 1))
+        if not size or size < 0 or size ~= math.floor(size) then return nil end
+        if colon + size > #value then return nil end
+        fields[#fields + 1] = string.sub(value, colon + 1, colon + size)
+        pos = colon + size + 1
+    end
+    if #fields ~= 10 or fields[1] ~= OWNER_SCHEMA then return nil end
+    return fields
+end
+
+local function hash_fields(key)
+    local flat = redis.call("HGETALL", key)
+    local out = {}
+    for i = 1, #flat, 2 do out[flat[i]] = flat[i + 1] end
+    return out
+end
+
+-- Returns "none", "corrupt" or "ACTIVE", owner_count.
+local function read_header()
+    local key = KEYS[#KEYS]
+    local kind = redis_type(key)
+    if kind == "none" then return "none" end
+    if kind ~= "hash" or redis.call("HLEN", key) ~= 7 or redis.call("PTTL", key) ~= -1 then
+        return "corrupt"
+    end
+    local h = hash_fields(key)
+    local count = tonumber(h.owner_count)
+    if h.schema ~= HEADER_SCHEMA or h.state ~= "ACTIVE" or not count or count < 0
+        or count ~= math.floor(count) or count > 9007199254740991
+        or tostring(count) ~= h.owner_count
+        or type(h.namespace_id) ~= "string" or h.namespace_id == ""
+        or type(h.activated_at_ms) ~= "string" or h.activated_at_ms == ""
+        or type(h.inventory_sha256) ~= "string" or h.inventory_sha256 == ""
+        or type(h.attestation_sha256) ~= "string" or h.attestation_sha256 == "" then
+        return "corrupt"
+    end
+    return "ACTIVE", count
+end
+
+-- Loss detection: the owner hash must exist with no TTL and exactly owner_count entries.
+local function owners_inventory_ok(count)
+    local key = KEYS[#KEYS - 1]
+    local kind = redis_type(key)
+    if kind == "none" then return count == 0 end
+    if kind ~= "hash" or redis.call("PTTL", key) ~= -1 then return false end
+    return redis.call("HLEN", key) == count
+end
+
 local function stream_tail(key)
     local rows = redis.call("XREVRANGE", key, "+", "-", "COUNT", 1)
     if type(rows) ~= "table" or #rows ~= 1 or type(rows[1]) ~= "table" then
@@ -468,6 +552,35 @@ if incoming_receipt.operation_id ~= operation_id
     return result("INVALID_COMMIT_PLAN", nil, nil, "receipt_argument_mismatch")
 end
 
+local task_owner_value, task_owner_task_id = nil, nil
+if operation_type == "TASK_ADMIT" then
+    if (owner_mode ~= "0" and owner_mode ~= "1") or (#KEYS ~= 10 and #KEYS ~= 16)
+        or string.sub(KEYS[#KEYS], -18) ~= ":task-owner-header"
+        or string.sub(KEYS[#KEYS - 1], -12) ~= ":task-owners" then
+        return result("INVALID_COMMIT_PLAN", nil, nil, "task_owner_keys_invalid")
+    end
+    local header_state, owner_count = read_header()
+    if owner_mode == "0" then
+        if header_state ~= "none" then
+            return result("ILLEGAL_STATE_TRANSITION", nil, nil, "task_owner_legacy_writer_fenced")
+        end
+    else
+        if header_state == "none" then
+            return result("ILLEGAL_STATE_TRANSITION", nil, nil, "task_owner_namespace_not_activated")
+        end
+        if header_state ~= "ACTIVE" then
+            return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "task_owner_header_corrupt")
+        end
+        if not owners_inventory_ok(owner_count) then
+            return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "task_owner_inventory_loss_detected")
+        end
+        task_owner_value, task_owner_task_id = owner_value_for(incoming_record)
+        if not task_owner_value then
+            return result("INVALID_COMMIT_PLAN", nil, nil, "task_owner_metadata_invalid")
+        end
+    end
+end
+
 -- Receipt-first idempotency: fixed hash fields are resolved before incoming
 -- revision, operation type or transition ID can classify the command.
 local existing_receipt_raw = redis.call("HGET", KEYS[3], operation_digest)
@@ -514,6 +627,19 @@ if existing_receipt_raw or existing_record_raw then
         if proof.record_payload == record_json
             and proof.receipt_payload == receipt_json
             and proof.index_payload == transition_index_json then
+            if task_owner_value then
+                -- Never ALREADY_APPLIED while the required owner binding is absent/mismatched.
+                local stored_owner = redis.call("HGET", KEYS[#KEYS - 1], task_owner_task_id)
+                local owner_detail = nil
+                if not stored_owner then
+                    owner_detail = "task_owner_binding_missing_for_canonical_task"
+                elseif stored_owner ~= task_owner_value then
+                    owner_detail = "task_owner_provenance_mismatch"
+                end
+                if owner_detail then
+                    return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", proof.receipt.transition_id, proof.receipt.aggregate_revision, owner_detail)
+                end
+            end
             return result("ALREADY_APPLIED", proof.receipt.transition_id, proof.receipt.aggregate_revision, "")
         end
         return emit_conflict("CANONICAL_RECORD_CORRUPTION_CONFLICT", proof.receipt.canonical_command_hash, proof.receipt.transition_id, proof.receipt.aggregate_revision, "exact_duplicate_payload_mismatch")
@@ -527,7 +653,7 @@ end
 if operation_type == "TASK_ADMIT" then
     local guard = decode_object(ARGV[28])
     local creation = decode_object(ARGV[30])
-    if #KEYS ~= 14 or not guard or not creation
+    if #KEYS ~= 16 or not guard or not creation
         or (ARGV[29] ~= "0" and ARGV[29] ~= "1") then
         return result("INVALID_COMMIT_PLAN", nil, nil, "task_admit_parent_guard_missing")
     end
@@ -591,6 +717,30 @@ if operation_type == "TASK_ADMIT" then
             return result("ILLEGAL_STATE_TRANSITION", nil, nil, "parent_run_root_binding_required")
         end
     end
+end
+
+-- F07 v2: first allocation of a global TASK id. Reads only; no write before the final section.
+local task_owner_write_pending = false
+if operation_type == "TASK_ADMIT" and task_owner_value then
+    local existing = redis.call("HGET", KEYS[#KEYS - 1], task_owner_task_id)
+    if existing then
+        local f = decode_owner_value(existing)
+        if not f then
+            return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "task_owner_binding_corrupt")
+        end
+        if f[4] == identity_sha and f[2] == incoming_record.canonical_aggregate_identity.run_id
+            and f[3] == incoming_record.authoritative_metadata_changes.tenant_id then
+            -- Owner-only footprint: this identity is bound but its canonical admission is absent.
+            return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "task_owner_binding_without_canonical_admission")
+        end
+        return result("ILLEGAL_STATE_TRANSITION", nil, nil, "task_owner_conflict")
+    end
+    if redis.call("EXISTS", KEYS[1]) ~= 0 or redis.call("HLEN", KEYS[2]) ~= 0
+        or redis.call("HLEN", KEYS[3]) ~= 0 or redis.call("HLEN", KEYS[4]) ~= 0
+        or redis.call("XLEN", KEYS[5]) ~= 0 or redis.call("XLEN", KEYS[6]) ~= 0 then
+        return result("CANONICAL_RECORD_CORRUPTION_CONFLICT", nil, nil, "task_owner_binding_missing_for_canonical_task")
+    end
+    task_owner_write_pending = true
 end
 
 -- F02B: only the exact canonical root TASK can authorize a new RUN terminal
@@ -830,6 +980,11 @@ end
 local record_envelope = storage_envelope(record_json)
 local receipt_envelope = storage_envelope(receipt_json)
 local index_envelope = storage_envelope(transition_index_json)
+if task_owner_write_pending then
+    -- First write position: immutable owner binding + monotonic count, atomic with the canonical writes.
+    redis.call("HSET", KEYS[#KEYS - 1], task_owner_task_id, task_owner_value)
+    redis.call("HINCRBY", KEYS[#KEYS], "owner_count", 1)
+end
 redis.call("HSET", KEYS[2], transition_id, index_envelope)
 redis.call("HSET", KEYS[3], operation_digest, receipt_envelope)
 redis.call("HSET", KEYS[4], operation_digest, record_envelope)

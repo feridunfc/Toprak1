@@ -6,6 +6,12 @@ from dataclasses import dataclass
 import pytest
 
 import hfa_worker.consumer as consumer_module
+from tests.acceptance_fresh_domain import (
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain,
+    activated_redis as redis_client,
+)
+from tests.canonical_terminal_history import prepare_terminal_history, settlement_witnesses
+
 from hfa.authority import (
     AggregateType,
     AuthorityCommand,
@@ -69,6 +75,7 @@ def _forbid_requeue(monkeypatch):
 class _Request:
     run_id: str
     tenant_id: str
+    root_task_id: str
     agent_type: str = "research"
     priority: int = 5
     payload: dict | None = None
@@ -126,28 +133,21 @@ async def _commit(store, command, revision, state, at):
     )
     assert evaluation.decision.code is AuthorityDecisionCode.ACCEPTED
     assert evaluation.commit_plan is not None
-    result = await store.commit(evaluation.commit_plan)
+    result = await store.commit(evaluation.commit_plan, require_task_owner_binding=command.operation_type is OperationType.TASK_ADMIT)
     assert result.status is RedisAuthorityCommitStatus.COMMITTED
     return evaluation.commit_plan.record
 
 
 async def _migration_ready(redis):
-    await redis.hset(RedisKey.run_terminal_event_index(), mapping={
-        "__contract__:schema_version": "1",
-        "__contract__:producer_contract_version": "1",
-        "__migration__:status": "ready",
-        "__migration__:results_stream_key": RedisKey.stream_results(),
-        "__migration__:source_history_complete": "1",
-    })
-    await redis.persist(RedisKey.run_terminal_event_index())
+    await prepare_terminal_history(redis)
 
 
-async def _seed_resource_run(redis, run_id, tenant_id, *, cost=100):
+async def _seed_resource_run(redis, run_id, tenant_id, root_task_id, *, cost=100):
     manager = AdmissionResourceReservationManager(redis)
     binding = RunCreateAuthorityBinding(redis=redis, resource_manager=manager, control_stream=RedisKey.stream_control())
     await binding.initialise()
     created = await binding.admit(
-        _Request(run_id=run_id, tenant_id=tenant_id, estimated_cost_cents=cost),
+        _Request(run_id=run_id, tenant_id=tenant_id, root_task_id=root_task_id, estimated_cost_cents=cost),
         tenant_inflight_limit=10, concurrent_run_limit=10, budget_limit_cents=10_000,
     )
     operation_id = run_create_operation_id(created.run_id)
@@ -268,7 +268,7 @@ async def _snapshot(manager, tenant):
 
 async def test_a_non_last_task_acks_without_settlement(redis_client):
     t, sib, run, tenant, wid, epoch = "s8-a-task", "s8-a-sib", "s8-a-run", "s8-a-tenant", "s8-a-worker", "s8-a-epoch"
-    manager, rstore, op = await _seed_resource_run(redis_client, run, tenant)
+    manager, rstore, op = await _seed_resource_run(redis_client, run, tenant, t)
     await _seed_dispatch(redis_client, t, run, tenant, wid, epoch)
     await redis_client.sadd(DagRedisKey.run_tasks(run), sib); await redis_client.set(DagRedisKey.task_state(sib), "running")
     await redis_client.hset(DagRedisKey.task_meta(sib), mapping={"task_id": sib, "run_id": run, "tenant_id": tenant})
@@ -276,15 +276,18 @@ async def test_a_non_last_task_acks_without_settlement(redis_client):
     stream,_=await _enqueue(redis_client,t,run,tenant,epoch)
     await _wait_value(redis_client, DagRedisKey.task_state(t), "done")
     await _wait_pending(redis_client,stream,0)
-    assert (await redis_client.hgetall(manager.reservation_receipt_key(op)))["state"] == RESERVATION_STATE_FINALIZED
-    assert await _snapshot(manager,tenant) == before and len(calls)==1
-    rs=await rstore.get_aggregate_snapshot(run_terminate_identity(run)); assert rs.revision==1
+    # Canonical SINGLE_TASK root completed; the mutable sibling cannot delay settlement.
+    assert (await redis_client.hgetall(manager.reservation_receipt_key(op)))["state"] == RESERVATION_STATE_SETTLED
+    assert await _snapshot(manager,tenant) == {"concurrent_runs":0,"budget_reserved_cents":0,"tenant_inflight":0}
+    assert before == {"concurrent_runs":1,"budget_reserved_cents":100,"tenant_inflight":1} and len(calls)==1
+    assert _text(await redis_client.get(DagRedisKey.task_state(sib))) == "running"
+    rs=await rstore.get_aggregate_snapshot(run_terminate_identity(run)); assert rs.revision==2 and rs.state=="done"
     await _close(service)
 
 
 async def test_b_last_success_settles_once_then_acks(redis_client):
     t,run,tenant,wid,epoch="s8-b-task","s8-b-run","s8-b-tenant","s8-b-worker","s8-b-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; service=await _worker(redis_client,wid,_CountingTaskExecutor(calls)); stream,_=await _enqueue(redis_client,t,run,tenant,epoch)
     await _wait_value(redis_client, RedisKey.run_state(run), "done")
     await _wait_pending(redis_client,stream,0)
@@ -296,7 +299,7 @@ async def test_b_last_success_settles_once_then_acks(redis_client):
 
 async def test_c_last_failure_settles_once_then_acks(redis_client):
     t,run,tenant,wid,epoch="s8-c-task","s8-c-run","s8-c-tenant","s8-c-worker","s8-c-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; service=await _worker(redis_client,wid,_CountingTaskExecutor(calls,TaskExecutionResult(ok=False,output={},error="boom"))); stream,_=await _enqueue(redis_client,t,run,tenant,epoch)
     await _wait_value(redis_client, RedisKey.run_state(run), "failed")
     await _wait_pending(redis_client,stream,0)
@@ -307,7 +310,7 @@ async def test_c_last_failure_settles_once_then_acks(redis_client):
 
 async def test_d_run_commit_settlement_failure_keeps_finalized_and_pending(redis_client, monkeypatch):
     t,run,tenant,wid,epoch="s8-d-task","s8-d-run","s8-d-tenant","s8-d-worker","s8-d-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; service=await _worker(redis_client,wid,_CountingTaskExecutor(calls)); settlement_failed=asyncio.Event()
     async def fail(value, **kwargs):
         settlement_failed.set()
@@ -327,7 +330,7 @@ async def test_e_restart_reclaim_after_settlement_pending_reuses_run_revision(re
     t,run,tenant,worker_a,worker_b,epoch=(
         "s8-e-task","s8-e-run","s8-e-tenant","s8-e-worker-a","s8-e-worker-b","s8-e-epoch"
     )
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t)
     await _seed_dispatch(redis_client,t,run,tenant,worker_a,epoch)
     calls=[]
     first=await _worker(redis_client,worker_a,_CountingTaskExecutor(calls))
@@ -421,6 +424,7 @@ async def test_e_restart_reclaim_after_settlement_pending_reuses_run_revision(re
             final_state=receipt.final_state,
         ),
         now_ms=(receipt.settled_at_ms or 0)+1,
+        **await settlement_witnesses(rstore, run),
     )
     assert replay.status==RESERVATION_STATUS_ALREADY_SETTLED
     assert replay.resource_mutated is False
@@ -432,7 +436,7 @@ async def test_e_restart_reclaim_after_settlement_pending_reuses_run_revision(re
 
 async def test_f_settlement_success_run_projection_failure_no_ack(redis_client, monkeypatch):
     t,run,tenant,wid,epoch="s8-f-task","s8-f-run","s8-f-tenant","s8-f-worker","s8-f-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; service=await _worker(redis_client,wid,_CountingTaskExecutor(calls)); projection_failed=asyncio.Event()
     async def fail(_value):
         projection_failed.set()
@@ -450,7 +454,7 @@ async def test_f_settlement_success_run_projection_failure_no_ack(redis_client, 
 
 async def test_g_redelivery_after_projection_failure_never_decrements_twice(redis_client, monkeypatch):
     t,run,tenant,wid,epoch="s8-g-task","s8-g-run","s8-g-tenant","s8-g-worker","s8-g-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; first=await _worker(redis_client,wid,_CountingTaskExecutor(calls)); pm=first._run_terminate_authority_binding.projection_manager; original=pm.project; once=True; projection_failed=asyncio.Event()
     async def fail_once(value):
         nonlocal once
@@ -475,7 +479,7 @@ async def test_g_redelivery_after_projection_failure_never_decrements_twice(redi
 
 async def test_h_ack_loss_replay_is_delivery_only(redis_client, monkeypatch):
     t,run,tenant,wid,epoch="s8-h-task","s8-h-run","s8-h-tenant","s8-h-worker","s8-h-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; first=await _worker(redis_client,wid,_CountingTaskExecutor(calls)); original_ack=consumer_module.ack_message; once=True; ack_lost=asyncio.Event()
     async def lose_once(*args,**kwargs):
         nonlocal once
@@ -501,7 +505,7 @@ async def test_h_ack_loss_replay_is_delivery_only(redis_client, monkeypatch):
 
 async def test_i_resource_proof_conflict_fails_closed_without_projection_or_ack(redis_client, monkeypatch):
     t,run,tenant,wid,epoch="s8-i-task","s8-i-run","s8-i-tenant","s8-i-worker","s8-i-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; service=await _worker(redis_client,wid,_CountingTaskExecutor(calls)); before=await _snapshot(manager,tenant); settlement_conflict=asyncio.Event()
     async def conflict(value, **kwargs):
         settlement_conflict.set()
@@ -520,7 +524,7 @@ async def test_i_resource_proof_conflict_fails_closed_without_projection_or_ack(
 
 async def test_j_task_terminal_projection_failure_never_reaches_run_or_settlement(redis_client, monkeypatch):
     t,run,tenant,wid,epoch="s8-j-task","s8-j-run","s8-j-tenant","s8-j-worker","s8-j-epoch"
-    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant); task_store,task_identity=await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
+    manager,rstore,op=await _seed_resource_run(redis_client,run,tenant,t); task_store,task_identity=await _seed_dispatch(redis_client,t,run,tenant,wid,epoch)
     calls=[]; service=await _worker(redis_client,wid,_CountingTaskExecutor(calls)); before=await _snapshot(manager,tenant); settle_calls=[]; task_projection_failed=asyncio.Event()
     async def fail_projection(_projection):
         task_projection_failed.set()

@@ -213,10 +213,16 @@ class DagLua:
         canonical_task_admit_binding: bool = False,
         canonical_task_dispatch_binding: bool = False,
         require_root_task_binding: bool = False,
+        require_task_owner_binding: bool = False,
     ) -> None:
         self._redis = redis
         if type(require_root_task_binding) is not bool:
             raise ValueError("require_root_task_binding must be a boolean")
+        if type(require_task_owner_binding) is not bool:
+            raise ValueError("require_task_owner_binding must be a boolean")
+        if require_task_owner_binding and not canonical_task_admit_binding:
+            raise ValueError("require_task_owner_binding requires canonical TASK_ADMIT binding")
+        self._require_task_owner_binding = require_task_owner_binding
         if require_root_task_binding and not canonical_task_admit_binding:
             raise ValueError("root TASK binding requires canonical TASK_ADMIT")
         self._require_root_task_binding = require_root_task_binding
@@ -273,6 +279,7 @@ class DagLua:
                 self._task_admit_authority_binding = TaskAdmitAuthorityBinding(
                     self._redis, self._task_admit_canonical_projection,
                     require_root_task_binding=self._require_root_task_binding,
+                    require_task_owner_binding=self._require_task_owner_binding,
                 )
             return await self._task_admit_authority_binding.admit(seed)
         return await self._task_admit_legacy(seed)
@@ -290,6 +297,8 @@ class DagLua:
         self, seed, *, canonical_head_keys: tuple[str, ...],
         canonical_head_witness: tuple[str, ...],
         current_head_witness: tuple[str, ...] = (),
+        task_owner_keys: tuple[str, ...] = (),
+        task_owner_expected: str = "",
     ) -> TaskAdmitResult:
         result = await self._task_admit_project(
             seed,
@@ -300,6 +309,8 @@ class DagLua:
             canonical_head_keys=canonical_head_keys,
             canonical_head_witness=canonical_head_witness,
             current_head_witness=current_head_witness,
+            task_owner_keys=task_owner_keys,
+            task_owner_expected=task_owner_expected,
         )
         if not result.admitted:
             from hfa_control.task_admit_authority import (
@@ -308,7 +319,7 @@ class DagLua:
 
             if result.status in {
                 "task_admit_target_type_conflict", "task_admit_effect_conflict",
-                "task_admit_input_conflict",
+                "task_admit_input_conflict", "canonical_task_admit_owner_conflict",
             }:
                 raise TaskAdmitProjectionConflictError(result.status)
             raise TaskAdmitProjectionPendingError(result.status)
@@ -323,6 +334,8 @@ class DagLua:
         dependency_count_text: str,
         canonical_projection: bool = False,
         canonical_head_keys: tuple[str, ...] = (),
+        task_owner_keys: tuple[str, ...] = (),
+        task_owner_expected: str = "",
         canonical_head_witness: tuple[str, ...] = (),
         current_head_witness: tuple[str, ...] = (),
     ) -> TaskAdmitResult:
@@ -344,6 +357,7 @@ class DagLua:
             DagRedisKey.tenant_active_set(),
         ]
         keys.extend(canonical_head_keys)
+        keys.extend(task_owner_keys)
         args: list[str] = [
             task_id,
             run_id,
@@ -363,6 +377,8 @@ class DagLua:
             "1" if canonical_projection else "0",
             json.dumps(canonical_head_witness, separators=(",", ":")),
             json.dumps(current_head_witness, separators=(",", ":")),
+            "1" if task_owner_keys else "0",
+            task_owner_expected if task_owner_keys else "",
         ] + child_ids
         raw = await self._admit_loader.run(num_keys=len(keys), keys=keys, args=args)
         status = raw[0].decode() if isinstance(raw[0], bytes) else str(raw[0])

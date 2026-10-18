@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,9 +16,16 @@ from hfa_worker.run_finalizing_runtime import (
     RunFinalizingTaskConsumer,
     RunFinalizingWorkerConsumer,
 )
+from tests.unit.test_f02a1_root_binding import alpha
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+
+
+@pytest.fixture
+def root_redis(redis_client):
+    # Reuse F07's explicit isolated-domain alpha fixture on this integration Redis.
+    return redis_client
 
 
 class _UnusedExecutor:
@@ -450,23 +458,15 @@ async def test_task_complete_not_ready_remains_ack_safe(redis_client) -> None:
     assert await redis_client.get(RedisKey.run_state(run_id)) == "running"
 
 
-async def test_terminal_duplicate_recovery_finalizes_then_acks(redis_client) -> None:
-    run_id = "run-terminal-duplicate-finalize"
-    tenant_id = "tenant-terminal-duplicate-finalize"
-    task_id = "task-terminal-duplicate-finalize"
-    worker_id = "worker-terminal-duplicate-finalize"
-    stream = "hfa:sprint83:terminal-duplicate"
-    await _seed_run(
-        redis_client,
-        run_id=run_id,
-        tenant_id=tenant_id,
-        tasks={task_id: "done"},
-    )
-    dag = await _dag(redis_client)
+async def _terminal_duplicate_delivery(
+    redis_client, manager, *, run_id, tenant_id, task_id, worker_id, stream,
+):
+    executor = _UnusedExecutor()
+    executor.execute = AsyncMock(side_effect=executor.execute)
     task_consumer = RunFinalizingTaskConsumer(
         object(),
-        _UnusedExecutor(),
-        completion_manager=dag,
+        executor,
+        completion_manager=manager,
     )
     consumer = object.__new__(RunFinalizingWorkerConsumer)
     consumer._redis = redis_client
@@ -494,6 +494,7 @@ async def test_terminal_duplicate_recovery_finalizes_then_acks(redis_client) -> 
         block=1000,
     )
     assert delivered
+    assert delivered[0][1][0][0] == message_id
 
     event = SimpleNamespace(
         run_id=run_id,
@@ -505,16 +506,119 @@ async def test_terminal_duplicate_recovery_finalizes_then_acks(redis_client) -> 
         trace_state="",
         scheduler_epoch="sched-duplicate",
     )
-    await consumer._process_message_via_task_consumer(
-        event,
-        message_id,
-        stream,
-        shard=0,
+    return SimpleNamespace(
+        consumer=consumer, executor=executor, event=event,
+        message_id=message_id, stream=stream,
+    )
+
+
+async def _canonical_terminal_duplicate_case(redis_client, alpha):
+    from hfa_control.run_terminal_event_evidence import backfill_terminal_event_evidence
+    from hfa_control.run_terminate_authority import RunTerminateAuthorityBinding, run_terminate_identity
+    from hfa_control.task_terminal_authority import TaskTerminalAuthorityBinding
+    from hfa_worker.redis_utils import ensure_consumer_group
+    from tests.unit.test_f04_4c_task_claim_projection_proof import claim, setup
+
+    req, store, dag, item, task, claim_manager = await setup(alpha, redis_client)
+    assert (await claim(claim_manager, item)).ok
+    terminal = await TaskTerminalAuthorityBinding(redis_client, store=store).complete(
+        task_id=item.task_id, run_id=item.run_id, tenant_id=item.tenant_id,
+        finished_at_ms=4000, worker_instance_id="worker-1", scheduler_epoch="epoch-7",
+        claim_epoch=1, output_data='{"terminal_once":true}',
+    )
+    assert terminal.completed and terminal.projection_applied
+    assert await redis_client.get(DagRedisKey.task_state(item.task_id)) == "done"
+    # Bounded terminal-event preparation belongs only to this disposable test setup.
+    # MKSTREAM permits real empty-history backfill without fabricating an event.
+    await ensure_consumer_group(
+        redis_client, RedisKey.stream_results(), "r4-terminal-evidence-setup",
+        start_id="0", mkstream=True,
+    )
+    await backfill_terminal_event_evidence(redis_client, completed_at_ms=5000)
+    binding = RunTerminateAuthorityBinding(
+        redis_client, store=store,
+        resource_manager=alpha.admission._run_create_authority.resource_manager,
+    )
+    await binding.initialise()
+    # Preserve the actual canonical result, including its own accepted RUN proof.
+    # The legacy coordinator's narrow result type is not the recovery ACK contract.
+    manager = SimpleNamespace(
+        run_termination_binding_enabled=True,
+        finalize_run_from_tasks=binding.terminate,
+    )
+    case = await _terminal_duplicate_delivery(
+        redis_client, manager, run_id=req.run_id, tenant_id=req.tenant_id,
+        task_id=req.root_task_id, worker_id="worker-1",
+        stream="hfa:sprint83:terminal-duplicate:" + req.run_id,
+    )
+    case.req, case.store, case.task, case.binding = req, store, task, binding
+    case.run = run_terminate_identity(req.run_id)
+    case.prior_run_head = await redis_client.hgetall(store.keyspace(case.run.sha256).aggregate)
+    return case
+
+
+async def test_terminal_duplicate_recovery_finalizes_then_acks(
+    redis_client, alpha, monkeypatch,
+) -> None:
+    import hfa_worker.run_finalizing_runtime as runtime
+    from tests.unit.test_f04_4c_task_claim_projection_proof import snapshot
+    from tests.unit.test_f04_task_projection_proof import write_counts
+
+    case = await _canonical_terminal_duplicate_case(redis_client, alpha)
+    run_id, stream = case.req.run_id, case.stream
+    task_head = await case.store.get_aggregate_snapshot(case.task)
+    assert task_head.state == "done" and task_head.revision == 4
+    assert (await case.store.get_aggregate_snapshot(case.run)).state == "pending"
+    assert await _pending_count(redis_client, stream) == 1
+    statuses, settlements = [], []
+    actual_ack = runtime.ack_message
+    actual_settle = case.binding.resource_manager.settle_once
+
+    async def observe_settlement(value, **kwargs):
+        result = await actual_settle(value, **kwargs)
+        settlements.append(result.status)
+        return result
+
+    async def observe_ack(redis, stream, group, message_id, *, ctx, run_termination):
+        head = await case.store.get_aggregate_snapshot(case.run)
+        probe = await case.store.load_receipt_probe(case.run, head.operation_id)
+        keys, witness = case.store.authority_head_witness(probe.canonical_store_record, probe.receipt)
+        assert run_termination.canonical_head_keys == tuple(keys)
+        assert run_termination.canonical_head_witness == tuple(witness)
+        assert probe.canonical_store_record.operation_type == "RUN_TERMINATE"
+        status = await actual_ack(
+            redis, stream, group, message_id, ctx=ctx, run_termination=run_termination,
+        )
+        statuses.append(status)
+        return status
+
+    monkeypatch.setattr(case.binding.resource_manager, "settle_once", observe_settlement)
+    monkeypatch.setattr(runtime, "ack_message", observe_ack)
+    before = await write_counts(redis_client)
+    await case.consumer._process_message_via_task_consumer(
+        case.event, case.message_id, stream, shard=0,
     )
 
     assert await _pending_count(redis_client, stream) == 0
     assert await redis_client.get(RedisKey.run_state(run_id)) == "done"
     assert len(await _result_events(redis_client, run_id)) == 1
+    assert statuses == ["acked"]
+    assert settlements == ["settled"]
+    assert (await write_counts(redis_client))["xack"] - before["xack"] == 1
+    assert await case.store.get_aggregate_snapshot(case.task) == task_head
+    assert await case.binding.resource_manager.get_resource_snapshot(case.req.tenant_id) == {
+        "concurrent_runs": 0, "budget_reserved_cents": 0, "tenant_inflight": 0,
+    }
+    case.executor.execute.assert_not_awaited()
+    replay_before, writes_before = await snapshot(redis_client), await write_counts(redis_client)
+    await case.consumer._process_message_via_task_consumer(
+        case.event, case.message_id, stream, shard=0,
+    )
+    assert statuses == ["acked", "already_acked"]
+    assert settlements.count("settled") == 1
+    assert await snapshot(redis_client) == replay_before
+    assert await write_counts(redis_client) == writes_before
+    case.executor.execute.assert_not_awaited()
 
 
 async def test_terminal_duplicate_finalization_conflict_stays_pending(redis_client) -> None:

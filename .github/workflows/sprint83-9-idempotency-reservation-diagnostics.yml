@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
       - '.github/workflows/sprint83-8-idempotent-single-task-submission.yml'
       - '.github/workflows/sprint83-9-idempotency-reservation-diagnostics.yml'
       - 'docs/implementation/sprint83/SPRINT83.9-idempotency-reservation-diagnostics.md'
@@ -98,7 +99,7 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              touched = changed & allowlist
+              touched = changed & (allowlist | {".github/actions/acceptance-redis/action.yml"})
               assert touched, {
                   "mode": "FUTURE_REGRESSION_TRIGGER",
                   "changed": sorted(changed),
@@ -146,6 +147,9 @@ jobs:
             httpx \
             uvicorn
 
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
+
       - name: Dedicated diagnostics contract tests
         shell: bash
         run: |
@@ -172,17 +176,15 @@ jobs:
           mkdir -p local_out/sprint83
 
           python scripts/runtime_alpha_acceptance_83_9.py \
-            --redis-url "$REDIS_URL" \
+            --owned-fresh-domain \
             --acceptance-id s83-9-ci \
-            --reset-test-db \
             --out local_out/sprint83/sprint83_9_diagnostics.json \
             --json \
             > sprint83_9_acceptance_stdout.json
 
           python scripts/runtime_alpha_acceptance_83_9.py \
-            --redis-url "$REDIS_URL" \
+            --owned-fresh-domain \
             --acceptance-id s83-9-ci \
-            --reset-test-db \
             --out local_out/sprint83/sprint83_9_diagnostics_repeat.json \
             --json \
             > sprint83_9_acceptance_repeat_stdout.json
@@ -289,3 +291,11 @@ jobs:
             local_out/sprint83/sprint83_9_diagnostics.json
             sprint83_9_acceptance_stdout.json
           if-no-files-found: warn
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint83-9-idempotency-reservation-diagnostics
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
+          if-no-files-found: error

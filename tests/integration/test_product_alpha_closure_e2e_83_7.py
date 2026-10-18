@@ -13,6 +13,10 @@ from scripts.runtime_alpha_acceptance_83_7 import (
     build_acceptance_report,
 )
 
+from tests.acceptance_fresh_domain import (  # noqa: F401
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain, prepared_product, product_cli_environment,
+)
+
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -20,14 +24,12 @@ pytestmark = [
 ]
 
 
-async def test_trusted_gateway_product_alpha_report_83_7():
+async def test_trusted_gateway_product_alpha_report_83_7(prepared_product):
+    grant, issuer = await prepared_product(build_acceptance_report,
+        scenario="s83-7", acceptance_id="s83-7-integration")
     report = await build_acceptance_report(
-        os.environ.get(
-            "REDIS_URL",
-            "redis://127.0.0.1:6389/0",
-        ),
+        prepared_grant=grant, prepared_issuer=issuer,
         acceptance_id="s83-7-integration",
-        reset_test_db=True,
     )
 
     assert report["schema_version"] == 1
@@ -121,7 +123,10 @@ async def test_trusted_gateway_product_alpha_report_83_7():
     )
     assert scenario["success"]["terminal_outcome"] == "SUCCESS"
     assert scenario["success"]["task_output"] == {
-        "output_text": "SPRINT83_7_ALPHA_SUCCESS"
+        "run_id": scenario["success"]["run_id"],
+        "result": "success",
+        "output_text": "FAKE_RESPONSE: Sprint 83.7 controlled success...",
+        "input": {"mode": "success", "prompt": "Sprint 83.7 controlled success"},
     }
     assert (
         scenario["failure"]["task_running_state"]
@@ -204,19 +209,15 @@ async def test_trusted_gateway_product_alpha_cli_83_7(
                 / "scripts"
                 / "runtime_alpha_acceptance_83_7.py"
             ),
-            "--redis-url",
-            os.environ.get(
-                "REDIS_URL",
-                "redis://127.0.0.1:6389/0",
-            ),
+            "--owned-fresh-domain",
             "--acceptance-id",
             "s83-7-cli",
-            "--reset-test-db",
             "--out",
             str(output),
             "--json",
         ],
         cwd=root,
+        env=product_cli_environment(),
         capture_output=True,
         text=True,
         check=False,

@@ -15,6 +15,7 @@ from hfa_control.product_profile import (
     require_alpha_deterministic_executor_mode,
 )
 from hfa_worker.main import WorkerService
+from hfa_control.product_startup import redis_client_from_environment, verify_terminal_event_readiness
 
 
 RedisFactory = Callable[[str], Any]
@@ -131,7 +132,7 @@ def config_from_env(
 
 
 def _default_redis_factory(redis_url: str):
-    return redis_async.from_url(redis_url)
+    return redis_client_from_environment(redis_url)
 
 
 async def _wait_for_shutdown_signal() -> None:
@@ -178,6 +179,8 @@ async def run_worker_process(
     service: WorkerService | None = None
 
     try:
+        if parse_product_mode(resolved.get("product_mode")) is ProductMode.SINGLE_TASK_ALPHA:
+            await verify_terminal_event_readiness(redis)
         service = WorkerService(redis, resolved)
         await service.start()
         waiter = wait_for_shutdown or _wait_for_shutdown_signal

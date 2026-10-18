@@ -5,6 +5,12 @@ from dataclasses import dataclass
 
 import pytest
 
+from tests.acceptance_fresh_domain import (
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain,
+    activated_redis as redis_client,
+)
+from tests.canonical_terminal_history import prepare_terminal_history
+
 from hfa.authority import (
     AggregateType,
     AuthorityCommand,
@@ -58,6 +64,7 @@ _DEPENDENCY_FLAGS = (
 class _RunRequest:
     run_id: str
     tenant_id: str
+    root_task_id: str
     agent_type: str = "recovery"
     priority: int = 5
     payload: dict | None = None
@@ -125,30 +132,20 @@ async def _commit(
     )
     assert evaluation.decision.code is AuthorityDecisionCode.ACCEPTED
     assert evaluation.commit_plan is not None
-    result = await store.commit(evaluation.commit_plan)
+    result = await store.commit(evaluation.commit_plan,
+        require_task_owner_binding=command.operation_type is OperationType.TASK_ADMIT)
     assert result.status is RedisAuthorityCommitStatus.COMMITTED
     return evaluation.commit_plan.record
 
 
-async def _migration_ready(redis_client) -> None:
-    await redis_client.hset(
-        RedisKey.run_terminal_event_index(),
-        mapping={
-            "__contract__:schema_version": "1",
-            "__contract__:producer_contract_version": "1",
-            "__migration__:status": "ready",
-            "__migration__:results_stream_key": RedisKey.stream_results(),
-            "__migration__:source_history_complete": "1",
-        },
-    )
-    await redis_client.persist(RedisKey.run_terminal_event_index())
-
+_migration_ready = prepare_terminal_history
 
 async def _seed_run_create(
     redis_client,
     *,
     run_id: str,
     tenant_id: str,
+    root_task_id: str,
     cost: int = 125,
 ):
     resource_manager = AdmissionResourceReservationManager(redis_client)
@@ -162,6 +159,7 @@ async def _seed_run_create(
         _RunRequest(
             run_id=run_id,
             tenant_id=tenant_id,
+            root_task_id=root_task_id,
             estimated_cost_cents=cost,
         ),
         tenant_inflight_limit=10,
@@ -214,6 +212,7 @@ async def _seed_canonical_running_task(
             redis_client,
             run_id=run_id,
             tenant_id=tenant_id,
+            root_task_id=task_id,
             cost=cost,
         )
     else:
@@ -868,12 +867,12 @@ async def test_K4_run_terminate_durable_settlement_failure_reuses_operation_and_
     original_settle = manager.settle_once
     calls = 0
 
-    async def fail_once(settlement, *, now_ms=None):
+    async def fail_once(settlement, *, now_ms=None, **authority_witness):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("K4 settlement unavailable")
-        return await original_settle(settlement, now_ms=now_ms)
+        return await original_settle(settlement, now_ms=now_ms, **authority_witness)
 
     monkeypatch.setattr(manager, "settle_once", fail_once)
     await service.recovery._sweep()

@@ -16,6 +16,7 @@ for rel in ("hfa-core/src", "hfa-worker/src", "hfa-control/src"):
     if path.exists():
         sys.path.insert(0, str(path))
 
+from fakeredis.aioredis import FakeRedis as AsyncFakeRedis
 from hfa.config.keys import RedisKey
 from hfa_worker.consumer import CONSUMER_GROUP, WorkerConsumer
 from hfa_worker.fake_executor import FakeExecutor
@@ -26,115 +27,23 @@ ARTIFACT_DIR = ROOT / "docs" / "dashboard" / "artifacts"
 OUTPUT_PATH = ARTIFACT_DIR / "latest_scheduler_dispatched_task_execution.json"
 
 
-class Pipeline:
-    def __init__(self, redis: "FakeRedis") -> None:
-        self.redis = redis
-        self.ops: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+class FakeRedis(AsyncFakeRedis):
+    """Single fakeredis store for scheduler and worker proof.
 
-    def hset(self, *args, **kwargs):
-        self.ops.append(("hset", args, kwargs))
-        return self
+    Scheduler CAS/EVAL remains deliberately simulated because this
+    proof exercises SchedulerLua's documented Lua-unavailable fallback.
+    Terminal event writes use fakeredis WATCH/MULTI/EXEC unchanged.
+    """
 
-    def expire(self, *args, **kwargs):
-        self.ops.append(("expire", args, kwargs))
-        return self
-
-    def zadd(self, *args, **kwargs):
-        self.ops.append(("zadd", args, kwargs))
-        return self
-
-    def xadd(self, *args, **kwargs):
-        self.ops.append(("xadd", args, kwargs))
-        return self
-
-    def set(self, *args, **kwargs):
-        self.ops.append(("set", args, kwargs))
-        return self
-
-    def sadd(self, *args, **kwargs):
-        self.ops.append(("sadd", args, kwargs))
-        return self
-
-    async def execute(self) -> list[Any]:
-        results: list[Any] = []
-        for name, args, kwargs in self.ops:
-            fn = getattr(self.redis, name)
-            result = fn(*args, **kwargs)
-            if hasattr(result, "__await__"):
-                result = await result
-            results.append(result)
-        return results
-
-
-class FakeRedis:
     def __init__(self) -> None:
-        self.values: dict[str, Any] = {}
-        self.hashes: dict[str, dict[str, Any]] = {}
-        self.zsets: dict[str, dict[str, float]] = {}
-        self.streams: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        super().__init__(decode_responses=True)
         self.xack_calls: list[tuple[str, str, str]] = []
-        self.expire_calls: list[tuple[str, int]] = []
-        self._stream_seq = 0
-
-    def pipeline(self) -> Pipeline:
-        return Pipeline(self)
-
-    async def get(self, key: str) -> Any:
-        return self.values.get(key)
-
-    async def set(self, key: str, value: Any, ex: int | None = None) -> bool:
-        self.values[key] = value
-        return True
-
-    async def hset(self, key: str, mapping: dict[str, Any] | None = None, **kwargs) -> int:
-        self.hashes.setdefault(key, {})
-        if mapping:
-            self.hashes[key].update(mapping)
-            return len(mapping)
-        return 0
-
-    async def expire(self, key: str, ttl: int) -> bool:
-        self.expire_calls.append((key, ttl))
-        return True
-
-    async def zadd(self, key: str, mapping: dict[str, float], **kwargs) -> int:
-        self.zsets.setdefault(key, {})
-        added = 0
-        nx = bool(kwargs.get("nx", False))
-        for member, score in mapping.items():
-            if nx and member in self.zsets[key]:
-                continue
-            if member not in self.zsets[key]:
-                added += 1
-            self.zsets[key][member] = float(score)
-        return added
-
-    async def sadd(self, key: str, *members: str) -> int:
-        current = self.values.setdefault(key, set())
-        before = len(current)
-        current.update(members)
-        return len(current) - before
-
-    async def xadd(self, stream: str, fields: dict[str, Any]) -> str:
-        self._stream_seq += 1
-        msg_id = f"{self._stream_seq}-0"
-        self.streams.setdefault(stream, []).append((msg_id, dict(fields)))
-        return msg_id
 
     async def xack(self, stream: str, group: str, message_id: str) -> int:
+        # This proof records ACK calls. Redis consumer-group ACK semantics
+        # are exercised in separate integration tests.
         self.xack_calls.append((stream, group, message_id))
         return 1
-
-    async def hget(self, *args, **kwargs):
-        return None
-
-    async def hincrby(self, *args, **kwargs):
-        return 0
-
-    async def delete(self, *args, **kwargs):
-        return 1
-
-
 
     async def eval(self, source: str, num_keys: int, *keys_and_args):
         keys = list(keys_and_args[:num_keys])
@@ -164,7 +73,7 @@ class FakeRedis:
             except (TypeError, ValueError):
                 continue
 
-        current = self.values.get(state_key)
+        current = await self.get(state_key)
         if expected_state not in (None, "", "None") and current not in (None, expected_state):
             return [0, current or "missing"]
 
@@ -173,6 +82,8 @@ class FakeRedis:
 
         await self.set(state_key, target_state, ex=ttl)
         return [1, target_state]
+
+
 class RecordingFakeExecutor(FakeExecutor):
     def __init__(self) -> None:
         super().__init__()
@@ -210,6 +121,13 @@ def evaluate_safety(artifact: dict[str, Any]) -> list[str]:
     return failing_reasons
 async def build_artifact() -> dict[str, Any]:
     redis = FakeRedis()
+    await redis.hset(
+        RedisKey.run_terminal_event_index(),
+        mapping={
+            "__contract__:schema_version": "1",
+            "__contract__:producer_contract_version": "1",
+        },
+    )
 
     run_id = "run-scheduler-dispatch-demo"
     tenant_id = "tenant-demo"
@@ -257,7 +175,7 @@ async def build_artifact() -> dict[str, Any]:
     )
 
     shard_stream = RedisKey.stream_shard(shard)
-    stream_messages = redis.streams.get(shard_stream, [])
+    stream_messages = await redis.xrange(shard_stream)
     dispatch_output_created = bool(stream_messages)
     msg_id, message = stream_messages[-1] if stream_messages else ("", {})
 
@@ -344,6 +262,23 @@ async def build_artifact() -> dict[str, Any]:
             shard=shard,
         )
 
+    terminal_events = await redis.xrange(RedisKey.stream_results())
+    terminal_evidence = await redis.hget(
+        RedisKey.run_terminal_event_index(),
+        RedisKey.run_terminal_event_evidence_field(run_id),
+    )
+    terminal_record = (
+        json.loads(terminal_evidence)
+        if terminal_evidence is not None
+        else {}
+    )
+    terminal_evidence_committed = (
+        len(terminal_events) == 1
+        and terminal_events[0][1].get("event_type") == "RunCompleted"
+        and terminal_record.get("run_id") == run_id
+        and terminal_record.get("event_type") == "RunCompleted"
+    )
+
     stored_result = calls["store_result"][0] if calls["store_result"] else {}
     result_payload = stored_result.get("payload", {}) if isinstance(stored_result, dict) else {}
 
@@ -362,6 +297,7 @@ async def build_artifact() -> dict[str, Any]:
         "state_store_transition_state_called": bool(calls["transition_state"]),
         "state_store_mark_completed_called": bool(calls["mark_completed"]),
         "message_acknowledged": bool(redis.xack_calls),
+        "terminal_event_evidence_committed": terminal_evidence_committed,
         "result_readable": result_payload.get("result") == "success",
         "fallback_used": False,
         "product_fallback_used": False,
@@ -385,6 +321,7 @@ async def build_artifact() -> dict[str, Any]:
         "state_store_result_written",
         "state_store_mark_completed_called",
         "message_acknowledged",
+        "terminal_event_evidence_committed",
         "result_readable",
     ]
     required_false = [
