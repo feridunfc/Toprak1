@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
       - 'hfa-control/src/hfa_control/api/models.py'
       - 'hfa-control/src/hfa_control/api/router.py'
       - 'hfa-control/src/hfa_control/models.py'
@@ -130,7 +131,7 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              regression_touched = changed & allowlist
+              regression_touched = changed & (allowlist | {".github/actions/acceptance-redis/action.yml"})
               assert regression_touched, {
                   "mode": "future_regression",
                   "changed": sorted(changed),
@@ -180,6 +181,9 @@ jobs:
             fastapi \
             httpx \
             uvicorn
+
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
 
       - name: Dedicated alpha contract tests
         shell: bash
@@ -360,17 +364,15 @@ jobs:
           mkdir -p local_out/sprint83
 
           python scripts/runtime_alpha_acceptance_83_7.py \
-            --redis-url "$REDIS_URL" \
+            --owned-fresh-domain \
             --acceptance-id s83-7-ci \
-            --reset-test-db \
             --out local_out/sprint83/sprint83_7_product_alpha.json \
             --json \
             > sprint83_7_acceptance_stdout.json
 
           python scripts/runtime_alpha_acceptance_83_7.py \
-            --redis-url "$REDIS_URL" \
+            --owned-fresh-domain \
             --acceptance-id s83-7-ci \
-            --reset-test-db \
             --out local_out/sprint83/sprint83_7_product_alpha_repeat.json \
             --json \
             > sprint83_7_acceptance_repeat_stdout.json
@@ -603,4 +605,12 @@ jobs:
             sprint83_7_acceptance_repeat_stdout.json
             local_out/sprint83/sprint83_7_product_alpha.json
             local_out/sprint83/sprint83_7_product_alpha_repeat.json
+          if-no-files-found: error
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint83-7-trusted-gateway-single-task-alpha
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
           if-no-files-found: error

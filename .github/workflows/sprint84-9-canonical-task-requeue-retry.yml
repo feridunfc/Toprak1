@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
       - 'hfa-control/src/hfa_control/task_requeue_authority.py'
       - 'hfa-control/src/hfa_control/task_recovery.py'
       - 'hfa-control/src/hfa_control/recovery.py'
@@ -45,7 +46,27 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      - name: Verify current integration regression applicability
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          git merge-base --is-ancestor "$ACCEPTED_PARENT" HEAD
+          python - <<'PY'
+          import os, subprocess
+          triggers = set(['.github/actions/acceptance-redis/action.yml', '.github/workflows/sprint84-9-canonical-task-requeue-retry.yml', 'docs/implementation/sprint84/SPRINT84.9-canonical-task-requeue-retry.md', 'hfa-control/src/hfa_control/recovery.py', 'hfa-control/src/hfa_control/task_recovery.py', 'hfa-control/src/hfa_control/task_requeue_authority.py', 'hfa-core/src/hfa/lua/task_requeue.lua', 'tests/integration/test_task_recovery_canonical_requeue_integration.py', 'tests/integration/test_task_recovery_production_composition_integration.py', 'tests/integration/test_task_requeue_authority_integration.py', 'tests/unit/test_task_requeue_authority_contract.py'])
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only', os.environ['PR_BASE_SHA'] + '...HEAD'], text=True).splitlines())
+          assert changed & triggers, sorted(changed)
+          forbidden = [p for p in changed if p.startswith('local_out/') or '__pycache__' in p or '.pytest_cache' in p or p.endswith('.pyc')]
+          assert not forbidden, sorted(forbidden)
+          print('CURRENT_INTEGRATION_REGRESSION', sorted(changed & triggers))
+          PY
+
       - name: Exact parent and scope
+        if: github.head_ref == 'sprint/84-9-canonical-task-requeue-retry'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,6 +92,8 @@ jobs:
           PY
 
       - name: Frozen authority parity
+        # Immutable-source acceptance remains strict on its original sprint branch.
+        if: github.head_ref == 'sprint/84-9-canonical-task-requeue-retry'
         shell: bash
         run: |
           set -euo pipefail
@@ -106,6 +129,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
+
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
 
       - name: Architecture and synchronization guards
         shell: bash
@@ -283,3 +309,11 @@ jobs:
           print('YAML_COMPILE_PASS')
           PY
           git diff --check "$ACCEPTED_PARENT"...HEAD
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint84-9-canonical-task-requeue-retry
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
+          if-no-files-found: error

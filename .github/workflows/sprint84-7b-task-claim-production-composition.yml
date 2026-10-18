@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
       - 'hfa-worker/src/hfa_worker/consumer.py'
       - 'hfa-worker/src/hfa_worker/main.py'
       - 'hfa-worker/src/hfa_worker/process_root.py'
@@ -81,7 +82,7 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              touched = changed & allowlist
+              touched = changed & (allowlist | {".github/actions/acceptance-redis/action.yml"})
               assert touched, {
                   "mode": "FUTURE_REGRESSION_TRIGGER",
                   "changed": sorted(changed),
@@ -107,6 +108,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn
+
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
 
       - name: Static production stream-routing guard
         shell: bash
@@ -259,3 +263,11 @@ jobs:
             tests/core/test_production_worker_process_root_contract.py \
             tests/integration/test_worker_task_claim_canonical_composition_integration.py
           git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint84-7b-task-claim-production-composition
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
+          if-no-files-found: error

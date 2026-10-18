@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
       - '.github/workflows/sprint83-7-trusted-gateway-single-task-alpha.yml'
       - '.github/workflows/sprint83-8-idempotent-single-task-submission.yml'
       - 'docs/implementation/sprint83/SPRINT83.8-idempotent-single-task-submission.md'
@@ -111,7 +112,7 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              regression_touched = changed & allowlist
+              regression_touched = changed & (allowlist | {".github/actions/acceptance-redis/action.yml"})
               assert regression_touched, {
                   "mode": "future_regression",
                   "changed": sorted(changed),
@@ -161,6 +162,9 @@ jobs:
             fastapi \
             httpx \
             uvicorn
+
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
 
       - name: Dedicated idempotency contract tests
         shell: bash
@@ -376,9 +380,8 @@ jobs:
           mkdir -p local_out/sprint83
 
           python scripts/runtime_alpha_acceptance_83_8.py \
-            --redis-url "$REDIS_URL" \
+            --owned-fresh-domain \
             --acceptance-id s83-8-ci \
-            --reset-test-db \
             --out \
               local_out/sprint83/sprint83_8_idempotent_submission.json \
             --json \
@@ -443,3 +446,11 @@ jobs:
             sprint83_8_integration.txt
             sprint83_8_combined_e2e.txt
             sprint83_8_regressions.txt
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint83-8-idempotent-single-task-submission
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
+          if-no-files-found: error

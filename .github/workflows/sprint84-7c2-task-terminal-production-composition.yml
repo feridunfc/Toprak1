@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [baseline/local-import]
     paths:
+      - '.github/actions/acceptance-redis/action.yml'
       - 'hfa-worker/src/hfa_worker/main.py'
       - 'hfa-worker/src/hfa_worker/process_root.py'
       - 'tests/core/test_production_worker_terminal_composition_contract.py'
@@ -83,7 +84,7 @@ jobs:
               }
               mode = "FEATURE_EXACT_SCOPE"
           else:
-              assert changed & allowlist, {
+              assert changed & (allowlist | {".github/actions/acceptance-redis/action.yml"}), {
                   "mode": "FUTURE_REGRESSION_TRIGGER",
                   "changed": sorted(changed),
               }
@@ -100,6 +101,8 @@ jobs:
           PY
 
       - name: Verify C1 product byte parity and forbidden-file freeze
+        # Immutable-source acceptance remains strict on its original sprint branch.
+        if: github.head_ref == 'sprint/84-7c2-task-terminal-production-composition'
         shell: bash
         run: |
           set -euo pipefail
@@ -143,6 +146,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e hfa-core -e hfa-control -e hfa-worker -e hfa-tools
           python -m pip install pytest pytest-asyncio redis fakeredis rfc8785 fastapi httpx uvicorn pyyaml
+
+      - name: Prepare verified acceptance Redis executable
+        uses: ./.github/actions/acceptance-redis
 
       - name: Static C2 architecture guards
         shell: bash
@@ -389,3 +395,11 @@ jobs:
             tests/core/test_production_worker_process_root_terminal_contract.py \
             tests/integration/test_worker_task_terminal_canonical_composition_integration.py
           git diff --check "$PR_BASE_SHA...HEAD"
+
+      - name: Retain owned acceptance Redis evidence
+        if: ${{ always() && env.HFA_ACCEPTANCE_EVIDENCE_DIR != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-redis-sprint84-7c2-task-terminal-production-composition
+          path: ${{ env.HFA_ACCEPTANCE_EVIDENCE_DIR }}
+          if-no-files-found: error

@@ -1,0 +1,37 @@
+name: Verified acceptance Redis executable
+description: Build the pinned upstream source; existing acceptance launchers own all Redis processes.
+runs:
+  using: composite
+  steps:
+    - name: Build verified Redis 7.4.10
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Upstream redis/redis-hashes README, Git blob aa145cb7c71e9ca3925ce114fd214a4213f69050.
+        # This is the published source digest, not an invented compiled-binary digest.
+        source_sha256=669ab6689b5e7d0c479e8d526ccbadae36b69a11370742ffe23822b9df8d85ba
+        source_url=https://download.redis.io/releases/redis-7.4.10.tar.gz
+        build_root=$(mktemp -d "$RUNNER_TEMP/hfa-acceptance-redis.XXXXXXXX")
+        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+          "$source_url" -o "$build_root/redis.tar.gz"
+        printf '%s  %s\n' "$source_sha256" "$build_root/redis.tar.gz" | sha256sum --check --strict
+        tar -xzf "$build_root/redis.tar.gz" -C "$build_root"
+        make -C "$build_root/redis-7.4.10" -j2 MALLOC=libc BUILD_TLS=no redis-server
+        binary="$build_root/redis-7.4.10/src/redis-server"
+        "$binary" --version | grep -E '(^| )v=7\.4\.10( |$)'
+        binary_sha256=$(sha256sum "$binary" | cut -d ' ' -f1)
+        evidence=$(mktemp -d "$RUNNER_TEMP/hfa-acceptance-evidence.XXXXXXXX")
+        python - "$binary" "$binary_sha256" "$source_url" "$source_sha256" "$evidence" <<'PY'
+        import json, pathlib, platform, sys
+        binary, digest, url, source_digest, evidence = sys.argv[1:]
+        pathlib.Path(evidence, 'redis-source-build.json').write_text(json.dumps({
+            'source_url': url, 'source_sha256': source_digest,
+            'upstream_hash_registry_blob': 'aa145cb7c71e9ca3925ce114fd214a4213f69050',
+            'binary': binary, 'observed_binary_sha256': digest,
+            'build': 'make -j2 MALLOC=libc BUILD_TLS=no redis-server',
+            'platform': platform.platform(), 'machine': platform.machine(),
+            'process_started': False, 'endpoint_adopted': False,
+        }, sort_keys=True, indent=2) + '\n')
+        PY
+        printf 'HFA_ACCEPTANCE_REDIS_BINARY=%s\nHFA_ACCEPTANCE_REDIS_SHA256=%s\nHFA_ACCEPTANCE_EVIDENCE_DIR=%s\n' \
+          "$binary" "$binary_sha256" "$evidence" >> "$GITHUB_ENV"
