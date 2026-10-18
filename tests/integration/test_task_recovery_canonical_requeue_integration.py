@@ -4,6 +4,12 @@ import asyncio
 
 import pytest
 
+from tests.acceptance_fresh_domain import (
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain,
+    activated_redis as redis_client,
+)
+from hfa_control.run_create_authority import RunCreateAuthorityInput, build_run_create_command
+
 from hfa.authority import (
     AggregateType,
     AuthorityCommand,
@@ -61,7 +67,8 @@ async def _commit(store, command, *, revision: int, state: str | None, at_ms: in
     )
     assert evaluation.decision.code is AuthorityDecisionCode.ACCEPTED
     assert evaluation.commit_plan is not None
-    result = await store.commit(evaluation.commit_plan)
+    result = await store.commit(evaluation.commit_plan,
+        require_task_owner_binding=command.operation_type is OperationType.TASK_ADMIT)
     assert result.status is RedisAuthorityCommitStatus.COMMITTED
     return evaluation.commit_plan.record
 
@@ -74,6 +81,13 @@ async def _seed(redis_client, suffix: str, *, claim_epoch: int = 1):
     scheduler_epoch = "11"
     store = RedisCanonicalAuthorityStore(redis_client)
     await store.initialise()
+    create = build_run_create_command(RunCreateAuthorityInput(
+        run_id=run_id, tenant_id=tenant_id, root_task_id=task_id,
+        agent_type="acceptance", priority=5, payload={}, estimated_cost_cents=0,
+        preferred_region="", preferred_placement="LEAST_LOADED", created_at_ms=50,
+        control_stream=RedisKey.stream_control(),
+    ))
+    await _commit(store, create, revision=0, state=None, at_ms=50)
     identity = CanonicalAggregateIdentity(AggregateType.TASK, run_id, task_id)
 
     admit = AuthorityCommand(
