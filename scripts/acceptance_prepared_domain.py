@@ -682,6 +682,46 @@ async def borrow_builder_lease(*, grant, issuer, consumer, scenario, acceptance_
     return e['lease']
 
 
+async def prepare_fresh_product_domain(*, grant, issuer, consumer, scenario, acceptance_id) -> ScenarioLease:
+    """One explicit local creator action before starting normal product services.
+
+    Only the original live issuer and its unused fresh grant authorize this
+    step. Retained endpoints, URLs and copied receipts cannot enter. Original
+    activation/setup receipts stay intact; subsequent setup gets its own receipt.
+    """
+    if (type(issuer) is not PreparedDomainIssuer
+            or _ISSUERS.get(getattr(issuer, '_key', None)) is not issuer
+            or not issuer._domain._prepared_terminal):
+        raise Hold('original fresh issuer with terminal preparation required')
+    lease = await borrow_builder_lease(grant=grant, issuer=issuer, consumer=consumer,
+        scenario=scenario, acceptance_id=acceptance_id)
+    try:
+        from hfa.config.keys import RedisKey
+        from hfa_control.product_startup import verify_terminal_event_readiness
+        from hfa_control.run_terminal_event_evidence import ensure_terminal_event_index, backfill_terminal_event_evidence
+        client = lease.client
+        if await client.exists(RedisKey.stream_results()):
+            raise Hold('fresh product preparation refuses an existing results stream')
+        if await ensure_terminal_event_index(client) != 'already_prepared':
+            raise Hold('original prepared terminal contract required')
+        await client.xgroup_create(RedisKey.stream_results(), 'single-task-product-bootstrap', id='0', mkstream=True)
+        result = await backfill_terminal_event_evidence(client, completed_at_ms=time.time_ns() // 1_000_000)
+        if (result.status != 'ready' or result.scanned_entries or result.terminal_events
+                or result.evidence_created or result.snapshot_last_entry_id != '0-0'):
+            raise Hold('fresh product preparation did not validate empty source history')
+        ready = await verify_terminal_event_readiness(client)
+        await issuer._domain._validate_header(fresh=True)
+        issuer._domain._record('fresh_product_prepared', {
+            'readiness': ready, 'backfill': vars(result), 'work_admitted': False})
+        return lease
+    except BaseException as exc:
+        # Reuse the accepted repeated-cancellation-safe owner cleanup. It closes
+        # this lease too; an unshielded preliminary close must not strand Redis.
+        await issuer._shield_abort('cancelled' if isinstance(exc, asyncio.CancelledError)
+                                   else 'scenario_failure')
+        raise
+
+
 async def product_cli_child(args, *, consumer, scenario, execute) -> int:
     """Private entry only. Captured output is redacted before reaching OS pipes."""
     channel_args = argparse.Namespace(read_fd=args.prepared_read_fd,
