@@ -5,6 +5,12 @@ from dataclasses import dataclass
 
 import pytest
 
+from tests.acceptance_fresh_domain import (
+    integration_redis_stack, strict_mode_env, flush_redis, owned_domain,
+    activated_redis as redis_client,
+)
+from tests.canonical_terminal_history import prepare_terminal_history
+
 import hfa_worker.consumer as consumer_module
 import hfa_worker.run_finalizing_runtime as finalizing_module
 from hfa.authority import (
@@ -117,18 +123,20 @@ async def _commit(store, command, revision, state, at):
     )
     assert evaluation.decision.code is AuthorityDecisionCode.ACCEPTED
     assert evaluation.commit_plan is not None
-    persisted = await store.commit(evaluation.commit_plan)
+    persisted = await store.commit(evaluation.commit_plan,
+        require_task_owner_binding=command.operation_type is OperationType.TASK_ADMIT)
     assert persisted.status is RedisAuthorityCommitStatus.COMMITTED
     return evaluation.commit_plan.record
 
 
-async def _seed_run(redis_client, *, run_id: str, tenant_id: str):
+async def _seed_run(redis_client, *, run_id: str, tenant_id: str, root_task_id: str):
     store = RedisCanonicalAuthorityStore(redis_client)
     await store.initialise()
     command = build_run_create_command(
         RunCreateAuthorityInput(
             run_id=run_id,
             tenant_id=tenant_id,
+            root_task_id=root_task_id,
             agent_type="research",
             priority=5,
             payload={"prompt": "84.7e"},
@@ -149,7 +157,8 @@ async def _seed_run(redis_client, *, run_id: str, tenant_id: str):
         correlation_id=None,
     )
     assert evaluation.commit_plan is not None
-    persisted = await store.commit(evaluation.commit_plan)
+    persisted = await store.commit(evaluation.commit_plan,
+        require_task_owner_binding=command.operation_type is OperationType.TASK_ADMIT)
     assert persisted.status is RedisAuthorityCommitStatus.COMMITTED
     await redis_client.set(RedisKey.run_state(run_id), "running")
     await redis_client.hset(
@@ -267,19 +276,7 @@ async def _seed_dispatch(
     return store, identity
 
 
-async def _migration_ready(redis_client) -> None:
-    await redis_client.hset(
-        RedisKey.run_terminal_event_index(),
-        mapping={
-            "__contract__:schema_version": "1",
-            "__contract__:producer_contract_version": "1",
-            "__migration__:status": "ready",
-            "__migration__:results_stream_key": RedisKey.stream_results(),
-            "__migration__:source_history_complete": "1",
-        },
-    )
-    await redis_client.persist(RedisKey.run_terminal_event_index())
-
+_migration_ready = prepare_terminal_history
 
 async def _worker(
     redis_client,
@@ -418,7 +415,7 @@ def _terminal_operation_id(identity: CanonicalAggregateIdentity) -> str:
 async def test_a_claim_commit_projection_failure_restart_executes_once_and_finishes(redis_client, monkeypatch):
     task_id, run_id, tenant_id = "e-a-task", "e-a-run", "e-a-tenant"
     worker_id, epoch = "e-a-worker", "e-a-epoch"
-    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id)
+    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id, root_task_id=task_id)
     task_store, identity = await _seed_dispatch(
         redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
         worker_id=worker_id, scheduler_epoch=epoch,
@@ -472,7 +469,7 @@ async def test_a_claim_commit_projection_failure_restart_executes_once_and_finis
 async def test_b_projected_claim_executor_crash_restart_never_executes_again_or_acks(redis_client):
     task_id, run_id, tenant_id = "e-b-task", "e-b-run", "e-b-tenant"
     worker_id, epoch = "e-b-worker", "e-b-epoch"
-    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id)
+    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id, root_task_id=task_id)
     task_store, identity = await _seed_dispatch(
         redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
         worker_id=worker_id, scheduler_epoch=epoch,
@@ -520,7 +517,7 @@ async def _async_truth(value):
 async def test_c_executor_result_terminal_authority_missing_restart_does_not_guess_result(redis_client, monkeypatch):
     task_id, run_id, tenant_id = "e-c-task", "e-c-run", "e-c-tenant"
     worker_id, epoch = "e-c-worker", "e-c-epoch"
-    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id)
+    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id, root_task_id=task_id)
     task_store, identity = await _seed_dispatch(
         redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
         worker_id=worker_id, scheduler_epoch=epoch,
@@ -569,7 +566,7 @@ async def test_c_executor_result_terminal_authority_missing_restart_does_not_gue
 async def test_d_task_terminal_commit_projection_failure_cross_worker_replays_projection_only(redis_client, monkeypatch):
     task_id, run_id, tenant_id = "e-d-task", "e-d-run", "e-d-tenant"
     owner, replacement, epoch = "e-d-owner", "e-d-replacement", "e-d-epoch"
-    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id)
+    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id, root_task_id=task_id)
     task_store, identity = await _seed_dispatch(
         redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
         worker_id=owner, scheduler_epoch=epoch,
@@ -633,7 +630,7 @@ async def test_d_task_terminal_commit_projection_failure_cross_worker_replays_pr
 async def test_e_run_commit_projection_failure_restart_replays_run_only(redis_client, monkeypatch):
     task_id, run_id, tenant_id = "e-e-task", "e-e-run", "e-e-tenant"
     owner, replacement, epoch = "e-e-owner", "e-e-replacement", "e-e-epoch"
-    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id)
+    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id, root_task_id=task_id)
     task_store, identity = await _seed_dispatch(
         redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
         worker_id=owner, scheduler_epoch=epoch,
@@ -689,7 +686,7 @@ async def test_e_run_commit_projection_failure_restart_replays_run_only(redis_cl
 async def test_f_ack_loss_restart_reuses_terminal_truth_and_only_acks(redis_client, monkeypatch):
     task_id, run_id, tenant_id = "e-f-task", "e-f-run", "e-f-tenant"
     owner, replacement, epoch = "e-f-owner", "e-f-replacement", "e-f-epoch"
-    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id)
+    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id, root_task_id=task_id)
     task_store, identity = await _seed_dispatch(
         redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
         worker_id=owner, scheduler_epoch=epoch,
@@ -745,7 +742,7 @@ async def test_f_ack_loss_restart_reuses_terminal_truth_and_only_acks(redis_clie
 async def test_g_different_worker_reclaims_running_claim_but_cannot_execute_ack_or_requeue(redis_client):
     task_id, run_id, tenant_id = "e-g-task", "e-g-run", "e-g-tenant"
     owner, replacement, epoch = "e-g-owner", "e-g-replacement", "e-g-epoch"
-    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id)
+    run_store = await _seed_run(redis_client, run_id=run_id, tenant_id=tenant_id, root_task_id=task_id)
     task_store, identity = await _seed_dispatch(
         redis_client, task_id=task_id, run_id=run_id, tenant_id=tenant_id,
         worker_id=owner, scheduler_epoch=epoch,
