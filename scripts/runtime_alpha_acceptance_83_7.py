@@ -6,10 +6,11 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -37,10 +38,12 @@ from hfa_control.product_profile import (
     TenantIdentityBoundary,
 )
 from hfa_control.run_submission import RunSubmissionCoordinator
+from hfa_control.run_terminal_event_evidence import backfill_terminal_event_evidence
 from hfa_control.service import ControlPlaneService
 from hfa_control.shard import ShardOwnershipManager
 from hfa_worker.consumer import CONSUMER_GROUP
 from hfa_worker.main import WorkerService
+from hfa_worker.fake_executor import FakeExecutor
 
 from scripts.runtime_alpha_acceptance import (
     _decode,
@@ -74,7 +77,7 @@ PUBLIC_FAILURE = {
 }
 
 
-class ControlledAlphaExecutor:
+class ControlledAlphaExecutionProbe:
     product_executor_capability = "executor:deterministic"
 
     def __init__(self) -> None:
@@ -84,7 +87,7 @@ class ControlledAlphaExecutor:
         self.failure_started = asyncio.Event()
         self.failure_release = asyncio.Event()
 
-    async def execute(self, event):
+    async def observe(self, fake, event, execute):
         payload = dict(getattr(event, "payload", {}) or {})
         mode = str(payload.get("mode") or "success")
         self.calls.append(
@@ -105,54 +108,36 @@ class ControlledAlphaExecutor:
         if mode == "success":
             self.success_started.set()
             await self.success_release.wait()
-            return SimpleNamespace(
-                status="done",
-                payload={
-                    "output_text":
-                        "SPRINT83_7_ALPHA_SUCCESS",
-                },
-                error="",
-            )
+            return await execute(fake, event)
 
         if mode == "failure":
             self.failure_started.set()
             await self.failure_release.wait()
-            return SimpleNamespace(
-                status="failed",
-                payload={
-                    "provider_body": PRIVATE_FAILURE,
-                    "internal_path":
-                        "C:\\private\\provider\\trace.py",
-                },
-                error=PRIVATE_FAILURE,
-            )
+            fake.should_succeed = False
+            try:
+                result = await execute(fake, event)
+            finally:
+                fake.should_succeed = True
+            # Test-only private diagnostic fault at the executor result boundary.
+            # Canonical terminalization must still sanitize it before persistence.
+            result.error = PRIVATE_FAILURE
+            result.payload.update(provider_body=PRIVATE_FAILURE, internal_path="C:\\private\\provider\\trace.py")
+            return result
 
-        return SimpleNamespace(
-            status="done",
-            payload={
-                "output_text":
-                    "SPRINT83_7_DUPLICATE_POST_RUN",
-                "mode": mode,
-            },
-            error="",
-        )
+        return await execute(fake, event)
 
 
-class ReplacementExecutor:
+class ReplacementExecutionProbe:
     product_executor_capability = "executor:deterministic"
 
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def execute(self, event):
+    async def observe(self, fake, event, execute):
         self.calls.append(
             str(getattr(event, "run_id", "") or "")
         )
-        return SimpleNamespace(
-            status="done",
-            payload={"unexpected": True},
-            error="",
-        )
+        return await execute(fake, event)
 
 
 class DeterministicUUIDFactory:
@@ -243,7 +228,6 @@ def _worker_config(
     *,
     worker_id: str,
     worker_group: str,
-    executor: object,
 ) -> dict[str, Any]:
     return {
         "product_mode":
@@ -256,7 +240,7 @@ def _worker_config(
         "capacity": 1,
         "version": "83.7-acceptance",
         "capabilities": ["base"],
-        "executor": executor,
+        "executor": FakeExecutor(),
         "shard_manager": ShardOwnershipManager(
             redis_client,
             object(),
@@ -265,6 +249,11 @@ def _worker_config(
         "task_heartbeat_interval_ms": 50,
         "task_stale_after_ms": 5_000,
         "run_termination_binding_enabled": True,
+        "canonical_task_admit_binding": True,
+        "canonical_task_dispatch_binding": True,
+        "canonical_task_claim_binding": True,
+        "canonical_task_terminal_binding": True,
+        "canonical_resource_settlement_binding": True,
     }
 
 
@@ -529,7 +518,40 @@ async def _product_alpha_scenario(
     worker_id = f"worker-s83-7-{acceptance_id}"
     worker_group = f"group-s83-7-{acceptance_id}"
 
-    executor = ControlledAlphaExecutor()
+    # The live prepared grant attests an unused fresh terminal contract shell.
+    # Validate real empty history through the existing backfill owner before work.
+    if await redis_client.exists(RedisKey.stream_results()):
+        raise RuntimeError("fresh acceptance refuses an existing results stream")
+    await redis_client.xgroup_create(
+        RedisKey.stream_results(), "s83-7-bootstrap", id="0", mkstream=True,
+    )
+    preparation = await backfill_terminal_event_evidence(redis_client, completed_at_ms=time.time_ns() // 1_000_000)
+    if preparation.status != "ready" or preparation.scanned_entries != 0:
+        raise RuntimeError("fresh terminal history preparation failed")
+
+    executor = ControlledAlphaExecutionProbe()
+    observations = {worker_id: executor}
+    original_execute = FakeExecutor.execute
+
+    async def observed_execute(fake, event):
+        # Audited test timing/observation only; every call executes the built-in fake.
+        observer = observations[worker_id]
+        return await observer.observe(fake, event, original_execute)
+
+    execution_probe = patch.object(FakeExecutor, "execute", observed_execute)
+
+    with execution_probe:
+        return await _observed_product_alpha_scenario(
+            redis_client, acceptance_id=acceptance_id, tenant_id=tenant_id,
+            other_tenant_id=other_tenant_id, worker_id=worker_id,
+            worker_group=worker_group, executor=executor, observations=observations,
+        )
+
+
+async def _observed_product_alpha_scenario(
+    redis_client, *, acceptance_id, tenant_id, other_tenant_id, worker_id,
+    worker_group, executor, observations,
+):
     control = ControlPlaneService(
         redis_client,
         _control_config(
@@ -569,7 +591,6 @@ async def _product_alpha_scenario(
             redis_client,
             worker_id=worker_id,
             worker_group=worker_group,
-            executor=executor,
         ),
     )
     client = _build_client(
@@ -579,7 +600,7 @@ async def _product_alpha_scenario(
     )
 
     replacement: WorkerService | None = None
-    replacement_executor: ReplacementExecutor | None = None
+    replacement_executor: ReplacementExecutionProbe | None = None
     control_restarted = False
     try:
         await control.start()
@@ -964,14 +985,14 @@ async def _product_alpha_scenario(
             )
 
         await worker.close(drain_timeout=0)
-        replacement_executor = ReplacementExecutor()
+        replacement_executor = ReplacementExecutionProbe()
+        observations[worker_id] = replacement_executor
         replacement = WorkerService(
             redis_client,
             _worker_config(
                 redis_client,
                 worker_id=worker_id,
                 worker_group=worker_group,
-                executor=replacement_executor,
             ),
         )
         await replacement.start()
@@ -1058,8 +1079,10 @@ async def _product_alpha_scenario(
                 == "done",
                 success_terminal.get("task_output")
                 == {
-                    "output_text":
-                        "SPRINT83_7_ALPHA_SUCCESS"
+                    "run_id": success_run_id,
+                    "result": "success",
+                    "output_text": "FAKE_RESPONSE: Sprint 83.7 controlled success...",
+                    "input": {"mode": "success", "prompt": "Sprint 83.7 controlled success"},
                 },
                 failure_submit.status_code == 202,
                 failure_task_running == "running",
@@ -1299,6 +1322,11 @@ async def build_acceptance_report(
     )
 
     env_names = (
+        "HFA_CANONICAL_TASK_CLAIM_BINDING",
+        "HFA_CANONICAL_TASK_TERMINAL_BINDING",
+        "HFA_CANONICAL_RUN_CREATE_BINDING",
+        "HFA_CANONICAL_TASK_DISPATCH_BINDING",
+        "HFA_CANONICAL_TASK_REQUEUE_BINDING",
         "HFA_CANONICAL_TASK_ADMIT_BINDING",
         "HFA_PRODUCT_MODE",
         "HFA_TENANT_IDENTITY_BOUNDARY",
@@ -1308,6 +1336,11 @@ async def build_acceptance_report(
         name: os.environ.get(name)
         for name in env_names
     }
+    os.environ["HFA_CANONICAL_TASK_CLAIM_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_TASK_TERMINAL_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_RUN_CREATE_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_TASK_DISPATCH_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_TASK_REQUEUE_BINDING"] = "1"
     os.environ[
         "HFA_CANONICAL_TASK_ADMIT_BINDING"
     ] = "1"

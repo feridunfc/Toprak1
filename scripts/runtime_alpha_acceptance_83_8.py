@@ -719,6 +719,11 @@ async def build_acceptance_report(
     )
 
     env_names = (
+        "HFA_CANONICAL_TASK_CLAIM_BINDING",
+        "HFA_CANONICAL_TASK_TERMINAL_BINDING",
+        "HFA_CANONICAL_RUN_CREATE_BINDING",
+        "HFA_CANONICAL_TASK_DISPATCH_BINDING",
+        "HFA_CANONICAL_TASK_REQUEUE_BINDING",
         "HFA_CANONICAL_TASK_ADMIT_BINDING",
         "HFA_PRODUCT_MODE",
         "HFA_TENANT_IDENTITY_BOUNDARY",
@@ -728,6 +733,11 @@ async def build_acceptance_report(
         name: os.environ.get(name)
         for name in env_names
     }
+    os.environ["HFA_CANONICAL_TASK_CLAIM_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_TASK_TERMINAL_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_RUN_CREATE_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_TASK_DISPATCH_BINDING"] = "1"
+    os.environ["HFA_CANONICAL_TASK_REQUEUE_BINDING"] = "1"
     os.environ[
         "HFA_CANONICAL_TASK_ADMIT_BINDING"
     ] = "1"

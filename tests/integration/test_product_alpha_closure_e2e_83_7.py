@@ -123,7 +123,10 @@ async def test_trusted_gateway_product_alpha_report_83_7(prepared_product):
     )
     assert scenario["success"]["terminal_outcome"] == "SUCCESS"
     assert scenario["success"]["task_output"] == {
-        "output_text": "SPRINT83_7_ALPHA_SUCCESS"
+        "run_id": scenario["success"]["run_id"],
+        "result": "success",
+        "output_text": "FAKE_RESPONSE: Sprint 83.7 controlled success...",
+        "input": {"mode": "success", "prompt": "Sprint 83.7 controlled success"},
     }
     assert (
         scenario["failure"]["task_running_state"]

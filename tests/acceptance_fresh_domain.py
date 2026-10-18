@@ -76,3 +76,15 @@ def product_cli_environment():
     for key in ('HFA_ACCEPTANCE_REDIS_BINARY', 'HFA_ACCEPTANCE_EVIDENCE_DIR'):
         env[key] = os.environ[key]
     return env
+
+
+@pytest_asyncio.fixture
+async def activated_redis(owned_domain):
+    """Explicit owned fresh activation; restricted decoded client, no shared reset."""
+    await owned_domain.activate_fresh()
+    try:
+        yield owned_domain.client
+    finally:
+        # Fixture tests include deliberately corrupt/incomplete projection cases.
+        # Dispose by the existing identity-checked abort; do not claim retention.
+        await owned_domain.abort_owned(reason="test_complete_no_retention_claim")

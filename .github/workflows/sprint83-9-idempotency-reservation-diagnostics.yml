@@ -176,17 +176,15 @@ jobs:
           mkdir -p local_out/sprint83
 
           python scripts/runtime_alpha_acceptance_83_9.py \
-            --redis-url "$REDIS_URL" \
+            --owned-fresh-domain \
             --acceptance-id s83-9-ci \
-            --reset-test-db \
             --out local_out/sprint83/sprint83_9_diagnostics.json \
             --json \
             > sprint83_9_acceptance_stdout.json
 
           python scripts/runtime_alpha_acceptance_83_9.py \
-            --redis-url "$REDIS_URL" \
+            --owned-fresh-domain \
             --acceptance-id s83-9-ci \
-            --reset-test-db \
             --out local_out/sprint83/sprint83_9_diagnostics_repeat.json \
             --json \
             > sprint83_9_acceptance_repeat_stdout.json
